@@ -1,0 +1,32 @@
+# Secrets. .env.example documents every variable.
+.env*
+!.env.example
+
+# Runtime state. Compose bind-mounts the checkout over /app, so the containers
+# write the SQLite database and yt-dlp's cache into the source tree.
+/data/*
+!/data/.gitkeep
+/.cache/
+*.db
+*.db-*
+*.sqlite*
+
+# Python bytecode and local environments.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Logs.
+*.log
+
+# Editor and OS files.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+.DS_Store

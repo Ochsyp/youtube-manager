@@ -1,0 +1,5 @@
+# Runs in a Linux container, and the bind mount serves entrypoint.sh as checked out:
+# store and check out every text file with LF, even on Windows.
+* text=auto eol=lf
+
+*.db binary
