@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{# Details page for one download job (GET /job/<id>). Requires `job` -- app.job_details redirects
+   a missing id rather than rendering, so it is never None here or in the partials -- plus
+   `job_last_update` as the polling baseline and `job_log` for partials/job_content.html. #}
+
+{% block title %}Job Details{% endblock %}
+
+{% block content %}
+
+{# Replaced wholesale by refreshJobSection() below, from /api/job/<id>/section. #}
+<div id="job-content">
+    {% include "partials/job_content.html" %}
+</div>
+
+{% include "partials/log_display.html" %}
+{% include "partials/polling_manager.html" %}
+
+<script>
+    // Every 5s /api/job/<id> answers only whether the job changed; refreshJobSection then pulls
+    // the rendered fragment from /api/job/<id>/section and swaps #job-content. Children move too,
+    // so a child finishing is a change to this page.
+    const jobPollInterval = 5000;
+    // tojson emits a JS literal that no character in the value can end.
+    const jobLastUpdate = {{ job_last_update | default("") | tojson }};
+    const jobId = {{ job.id | tojson }};
+    const logState = LogDisplay.createState();
+
+    async function refreshJobSection(data) {
+        try {
+            // Captured before the swap, restored after: replacing the container resets the log
+            // box's scroll, which would yank the page away from whatever the user was reading.
+            const scrollPosition = LogDisplay.captureScrollPosition();
+
+            // The job section is a fragment of HTML, not JSON, so we can't use the PollingManager's
+            // built-in JSON parsing. Instead, we fetch the fragment and swap it in ourselves.
+            const response = await fetch(`/api/job/${jobId}/section`, { cache: 'no-store' });
+            if (!response.ok) return;
+            
+            // The response is HTML, not JSON, so we can't use response.json() here.
+            const html = await response.text();
+            const container = document.getElementById('job-content');
+            if (!container) return;
+
+            // Swap in the new content. This will remove the old log element, so we have to rebind its scroll listener.
+            container.innerHTML = html;
+
+            // The old log element went with the swap, so its scroll listener has to be rebound.
+            LogDisplay.initialize(logState);
+            LogDisplay.restoreScrollPosition(logState, scrollPosition);
+
+            // The new log content is in the new HTML, so we have to extract it and update the log display.
+            const newLogContent = LogDisplay.extractLogContent(html);
+            if (newLogContent) {
+                LogDisplay.updateContent(logState, newLogContent);
+            }
+        } catch (error) {
+            console.warn('Job refresh failed:', error);
+        }
+    }
+
+    // Start polling for job changes once the page is fully loaded. The PollingManager will call
+    // refreshJobSection() whenever the job changes, which will fetch and swap in the new
+    // content. The log display is initialized once at the start, and then updated whenever the
+    // job content is refreshed.
+    window.addEventListener('load', () => {
+        LogDisplay.initialize(logState);
+
+        // PollingManager is defined in polling_manager.html, which is included above.
+        const jobPoller = new PollingManager(
+            `/api/job/${jobId}`,
+            jobPollInterval,
+            refreshJobSection
+        );
+
+        // If the server provided a last update timestamp, use it to avoid unnecessary refreshes.
+        if (jobLastUpdate) {
+            jobPoller.setLatestTimestamp(jobLastUpdate);
+        }
+
+        // Start the polling loop. It will call refreshJobSection() whenever the job changes.
+        jobPoller.start();
+    });
+</script>
+{% endblock %}

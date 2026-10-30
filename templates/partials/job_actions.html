@@ -1,0 +1,60 @@
+{# The one place that decides which actions a job offers, so a row in the table and the job's own
+   page can never disagree about what is available. Imported as `actions`; the macro takes the job
+   plus a flag per action only some callers want, and reads no page context of its own. The status
+   helpers and status sets it uses are app.py globals -- see partials/downloads_table.html. #}
+
+{% macro job_actions(job, show_view_log=True, show_view_parent=True, show_redownload=False, show_delete=False) %}
+    {% set effective_status = compute_effective_status(job) %}
+
+    <div class="job-actions">
+        {# Cancel is available only for active or in-progress jobs. Uses the shared status list
+           from jobstate so this can never drift from queue_section.html's bulk Cancel All check. #}
+        {% if effective_status in CANCELABLE_EFFECTIVE_STATUSES %}
+            <form action="/cancel/{{ job.id }}" method="post" style="margin:0;">
+                <button class="button-danger">Cancel</button>
+            </form>
+        {% endif %}
+
+        {# Retry is shown if the job itself failed/was cancelled, or -- for a playlist/channel
+           parent -- if any of its children did, even when the parent's own effective_status
+           reads 'completed' because at least one other child succeeded. See jobstate.is_retriable. #}
+        {% if is_retriable(job) %}
+            <form action="/retry/{{ job.id }}" method="post" style="margin:0;">
+                <button class="button-secondary">Retry</button>
+            </form>
+        {% endif %}
+
+        {% if show_view_log %}
+            <form action="/job/{{ job.id }}/log" method="get" style="margin:0;">
+                <button class="button-secondary">View Log</button>
+            </form>
+        {% endif %}
+
+        {% if show_view_parent and job.parent %}
+            <form action="/job/{{ job.parent.id }}" method="get" style="margin:0;">
+                <button class="button-secondary">View Parent Job</button>
+            </form>
+        {% endif %}
+
+        {# Re-runs yt-dlp for this job's URL and rewrites its NFO, keeping the video file
+           already on disk (see worker.redownload_or_rename). Offered on child videos too, so
+           one video's metadata can be refreshed without redoing its whole parent; the label
+           says which of the two a click will do. #}
+        {% if show_redownload %}
+            <form action="/job/{{ job.id }}/redownload" method="post" style="margin:0;">
+                <button class="button-secondary">{{ 'Fetch Metadata for All Children' if job.children else 'Fetch Metadata' }}</button>
+            </form>
+        {% endif %}
+
+        {# Delete removes the downloaded file(s) and marks the job deleted (the row itself is
+           kept for history). Only offered for a top-level job that isn't currently in progress,
+           and only when there's actually something to delete: a file of its own, or children
+           whose files could be deleted. #}
+        {% if show_delete and not job.parent_id and effective_status not in CANCELABLE_EFFECTIVE_STATUSES and (job.filename or job.children) %}
+            <form action="/job/{{ job.id }}/delete" method="post" style="margin:0;"
+                  onsubmit="return confirm('Delete this download and its file(s)? This cannot be undone.');">
+                <button class="button-danger">Delete</button>
+            </form>
+        {% endif %}
+    </div>
+{% endmacro %}

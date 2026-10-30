@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{# History page (GET /history): completed, failed and cancelled jobs, one page at a time. Requires
+   `jobs` (this page's slice only), `total` (every entry, all pages), `page`, `page_count`, and
+   `return_to`, which the route builds as "/history?page=N" -- see partials/downloads_table.html
+   for why the page number has to be carried in it. #}
+
+{% block title %}History{% endblock %}
+
+{% block content %}
+<div class="section-header">
+    <h1>Download History</h1>
+
+    <div class="button-group">
+        {# Bulk action: hand every finished entry back to the worker to refresh its metadata/NFO
+           (or, for the rare entry with no file at all, to actually download it). It acts on all
+           `total` entries, not just this page, so the confirm has to say so. "all-action" makes
+           updateBulkActionButtons() (base.html) hide it once any row checkbox is checked. #}
+        {% if jobs %}
+            {# The prompt is built out here and rendered with tojson into a single-quoted attribute:
+               tojson double-quotes the JS string and escapes ' and HTML characters, so nothing in
+               the text can end the string or the attribute. #}
+            {% set entry_word = 'entry' if total == 1 else 'entries' %}
+            {% set confirm_text = 'Fetch fresh metadata for all ' ~ total ~ ' history ' ~ entry_word
+                                  ~ ' across every page, including every child video?' %}
+            <form action="/history/redownload-all" method="post" style="margin:0;" class="all-action"
+                  onsubmit='return confirm({{ confirm_text | tojson }});'>
+                <button class="button-secondary">Fetch Metadata for All</button>
+            </form>
+        {% endif %}
+        {% include "partials/bulk_action_buttons.html" %}
+    </div>
+</div>
+
+{# Reuse the shared downloads table partial to render the history view without active progress
+   fields, but with a per-entry redownload button alongside the usual row actions. #}
+{% set show_progress = false %}
+{% set show_redownload = true %}
+{% include "partials/downloads_table.html" %}
+
+{% if page_count > 1 %}
+    {# Checkboxes and the bulk form live inside one page's table, so a selection cannot span
+       pages -- each link is a plain reload rather than anything that merges rows. #}
+    <div class="form-row">
+        {% if page > 1 %}
+            <a class="nav-link" href="/history?page={{ page - 1 }}">Previous</a>
+        {% endif %}
+        <span>Page {{ page }} of {{ page_count }} ({{ total }} entries)</span>
+        {% if page < page_count %}
+            <a class="nav-link" href="/history?page={{ page + 1 }}">Next</a>
+        {% endif %}
+    </div>
+{% endif %}
+{% endblock %}

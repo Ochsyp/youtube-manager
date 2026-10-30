@@ -1,0 +1,111 @@
+{# Defines the PollingManager class and nothing else; takes no context. Included by index.html,
+   job.html and log.html, each ahead of the script that constructs one. A poll GETs
+   `endpoint`?since=<latest> and calls back only when the response says something changed --
+   answering that is all the endpoint does, and fetching any HTML is the caller's job. #}
+
+<script>
+// Centralized polling management for AJAX updates.
+// Handles periodic polling, change detection via 'since' parameter, and callbacks.
+class PollingManager {
+    // Initialize with endpoint, interval, onUpdate callback, optional error handler, and optional alwaysUpdate mode.
+    constructor(endpoint, interval = 5000, onUpdate, onError = null, alwaysUpdate = false) {
+        this.endpoint = endpoint;
+        this.interval = interval;
+        this.onUpdate = onUpdate;
+        this.onError = onError || ((error) => console.warn('Polling error:', error));
+        this.latestTimestamp = null;
+        this.pollIntervalId = null;
+        this.isPolling = false;
+        this.alwaysUpdate = alwaysUpdate;
+    }
+
+    // Start polling the endpoint at the configured interval. No-op if already polling.
+    start() {
+        if (this.isPolling) {
+            return;
+        }
+        this.isPolling = true;
+        this.poll();
+        this.pollIntervalId = setInterval(() => this.poll(), this.interval);
+    }
+
+    // Stop polling and clear the interval.
+    stop() {
+        if (this.pollIntervalId !== null) {
+            clearInterval(this.pollIntervalId);
+            this.pollIntervalId = null;
+        }
+        this.isPolling = false;
+    }
+
+    // Execute a single poll request, including 'since' parameter if we have a timestamp.
+    async poll() {
+        try {
+            const url = new URL(this.endpoint, window.location.origin);
+            
+            // Include 'since' parameter to only fetch if changed
+            if (this.latestTimestamp) {
+                url.searchParams.set('since', this.latestTimestamp);
+            }
+
+            // Fetch the endpoint with no caching to ensure we get the latest data.
+            const response = await fetch(url.toString(), { cache: 'no-store' });
+            
+            // If the response is not OK, we don't process it further.
+            if (!response.ok) {
+                return;
+            }
+
+            // Parse the JSON response.
+            const data = await response.json();
+            
+            // Update the latest timestamp if provided in the response.
+            const previousLatest = this.latestTimestamp;
+            if (data.latest) {
+                this.latestTimestamp = data.latest;
+            }
+
+            // If the server reports a change, invoke the callback.
+            if (data.changed) {
+                this.onUpdate(data);
+                return;
+            }
+
+            // If the caller requested always-update mode, invoke the callback for every response.
+            if (this.alwaysUpdate) {
+                this.onUpdate(data);
+                return;
+            }
+
+            // If we received a new timestamp and we did not have one before, invoke the callback for the first load.
+            if (!previousLatest && data.latest) {
+                this.onUpdate(data);
+            }
+        } catch (error) {
+            this.onError(error);
+        }
+    }
+
+    // Change the polling interval dynamically; restarts polling if currently active.
+    setInterval(newInterval) {
+        const wasPolling = this.isPolling;
+        if (wasPolling) {
+            this.stop();
+        }
+        this.interval = newInterval;
+        if (wasPolling) {
+            this.start();
+        }
+    }
+
+    // Get the latest timestamp from the last successful poll.
+    getLatestTimestamp() {
+        return this.latestTimestamp;
+    }
+
+    // Set the latest timestamp manually (useful for initialization).
+    setLatestTimestamp(timestamp) {
+        this.latestTimestamp = timestamp;
+    }
+}
+</script>

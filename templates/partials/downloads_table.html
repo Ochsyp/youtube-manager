@@ -1,0 +1,151 @@
+{# One row per download job, shared by the dashboard and history views so both render a job
+   identically. Requires `jobs`, always top-level rows -- a child appears only on its parent's
+   page. `show_progress`, `show_redownload` and `return_to` are optional; the two defaults below
+   are the dashboard's, since it includes this partial without setting either. #}
+
+{% import "partials/status_label.html" as status %}
+{% import "partials/job_actions.html" as actions %}
+
+{% set show_progress = show_progress if show_progress is defined else true %}
+{% set show_redownload = show_redownload if show_redownload is defined else false %}
+
+{# A single shared form that each row's checkbox and partials/bulk_action_buttons.html reference
+   via the HTML `form` attribute, rather than nesting a form inside the per-row action forms
+   that already exist in each row (browsers don't allow nesting <form> elements at all). The
+   button attribute works regardless of where in the document the buttons themselves live, which
+   is what lets queue_section.html/history.html place them in their own header instead of here. #}
+<form id="bulk-form" method="post"></form>
+{# Where a bulk action lands afterwards. Optional, but the fallback is only the request path, so
+   any caller whose query string matters has to pass it: on /history?page=3 the fallback drops the
+   page and every bulk action returns to page 1. The /api/... fragment routes must pass it too --
+   their own path is not one app.safe_return_path accepts, and it would degrade to "/". #}
+<input type="hidden" name="return_to" value="{{ return_to | default(request.url.path, true) }}" form="bulk-form">
+
+<table>
+    <thead>
+        <tr>
+            <th>
+                {# toggleAllRows() ticks every .row-select in the document, which is this table and
+                   nothing else -- a page renders one. It is defined out in base.html, where the
+                   comment above it says why it cannot live in this partial. #}
+                <input type="checkbox" title="Select all" onchange="toggleAllRows(this)">
+            </th>
+            <th>ID</th>
+            <th>Type</th>
+            <th>Title</th>
+            <th>Channel</th>
+            <th>Playlist</th>
+            <th>Status</th>
+            {% if show_progress %}
+                <th>Progress</th>
+                <th>Speed</th>
+            {% endif %}
+            <th>Date</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+
+    <tbody>
+        {% for job in jobs %}
+            {# compute_effective_status, is_retriable, format_children_summary and the two
+               compute_parent_* helpers are Jinja globals app.py registers from jobstate, as are
+               the CANCELABLE_/FAILED_/PARENT_ status lists; none of them is defined in a template.
+               Going through jobstate is what keeps the UI and the worker describing a job alike. #}
+            {% set effective_status = compute_effective_status(job) %}
+            {# Mirror job_actions.html's per-row conditions exactly, so a bulk button is only ever
+               enabled when a checked row would actually be affected by it -- see toggleAllRows()/
+               updateBulkActionButtons() in base.html. #}
+            {% set can_cancel = effective_status in CANCELABLE_EFFECTIVE_STATUSES %}
+            {# Not just effective_status in FAILED_OR_CANCELLED: a playlist/channel parent with
+               one successful child among several failed ones reads as 'completed' overall (see
+               resolve_parent_status), but retrying it still queues its failed children. See
+               jobstate.is_retriable -- same reasoning as job_actions.html's Retry button. #}
+            {% set can_retry = is_retriable(job) %}
+            {% set can_redownload = not job.parent_id %}
+            {% set can_delete = not job.parent_id and effective_status not in CANCELABLE_EFFECTIVE_STATUSES and (job.filename or job.children) %}
+            <tr>
+                <td>
+                    <input type="checkbox" name="job_ids" value="{{ job.id }}" form="bulk-form" class="row-select"
+                           data-cancelable="{{ '1' if can_cancel else '0' }}"
+                           data-retriable="{{ '1' if can_retry else '0' }}"
+                           data-redownloadable="{{ '1' if can_redownload else '0' }}"
+                           data-deletable="{{ '1' if can_delete else '0' }}"
+                           onchange="updateBulkActionButtons()">
+                </td>
+                <td><a href="/job/{{ job.id }}" title="View job {{ job.id }}">{{ job.id }}</a></td>
+                <td>
+                    {# A child row's own request_type is always 'video'; the parent carries the
+                       playlist/channel type and, once expanded, the item count. #}
+                    {% if job.parent_id %}
+                        video
+                    {% else %}
+                        {{ job.request_type }}
+                        {% if job.request_type in PARENT_REQUEST_TYPES and job.children|length > 0 %}
+                            <br>
+                            <small>{{ job.children|length }} items</small>
+                        {% endif %}
+                    {% endif %}
+                </td>
+                <td>
+                    {# The title is only known once the worker has fetched metadata, so an
+                       untitled row shows its URL rather than an empty cell. #}
+                    {% if job.title %}
+                        <a href="/job/{{ job.id }}" title="View {{ job.title }}">{{ job.title }}</a>
+                    {% elif job.parent_id %}
+                        <a href="/job/{{ job.id }}" title="View child job {{ job.id }}">{{ job.title or job.url or 'Child download' }}</a>
+                    {% else %}
+                        <a href="/job/{{ job.id }}" title="View job {{ job.url }}">{{ job.title or job.url }}</a>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if job.channel %}
+                        {{ job.channel.name or job.channel.youtube_id }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if job.playlist %}
+                        {{ job.playlist.title or job.playlist.youtube_id }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td class="status">
+                    {{ status.status_label(effective_status) }}
+                    {# For parents, spell out completion across all children so a "Completed" row
+                       still shows how many of its videos actually succeeded. #}
+                    {% set children_summary = format_children_summary(job) %}
+                    {% if children_summary %}
+                        <br><small>{{ children_summary }}</small>
+                    {% endif %}
+                </td>
+                {# If show_progress is true, display the progress and speed columns. Both helpers
+                   fall back to the job's own values when it has no children, so single videos and
+                   playlist parents render through the same call. #}
+                {% if show_progress %}
+                    <td>{{ compute_parent_progress(job) or '-' }}</td>
+                    <td>{{ compute_parent_speed(job) or '-' }}</td>
+                {% endif %}
+                {# Completion date once there is one, otherwise when the job was queued. #}
+                <td>{{ job.completed_at if job.completed_at else job.created_at }}</td>
+                <td>
+                    <div class="row-actions">
+                        {% if job.request_type in PARENT_REQUEST_TYPES and not job.parent_id %}
+                            <a href="/job/{{ job.id }}" class="parent-link">View items</a>
+                        {% endif %}
+
+                        {# Render the row's action buttons through the shared macro, so the rules for
+                           which action applies to which status live in exactly one place. #}
+                        {{ actions.job_actions(job, show_view_log=false, show_view_parent=false, show_redownload=show_redownload, show_delete=true) }}
+                    </div>
+                </td>
+            </tr>
+        {% else %}
+            {# colspan has to track the optional progress/speed columns above. #}
+            <tr>
+                <td colspan="{{ 11 if show_progress else 9 }}">No downloads</td>
+            </tr>
+        {% endfor %}
+    </tbody>
+</table>

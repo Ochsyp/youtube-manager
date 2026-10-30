@@ -1,0 +1,13 @@
+#!/bin/sh
+# Refuse pushes to main: it changes only through a merged pull request.
+# git passes one line per ref: <local ref> <local sha> <remote ref> <remote sha>.
+status=0
+while read -r _ _ remote_ref _; do
+    case "$remote_ref" in
+        refs/heads/main | refs/heads/master)
+            echo "pre-push: pushing to '${remote_ref#refs/heads/}' is refused. Push a feature branch and open a pull request." >&2
+            status=1
+            ;;
+    esac
+done
+exit $status

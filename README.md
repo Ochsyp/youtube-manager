@@ -52,6 +52,7 @@ One image, two containers, one SQLite database in WAL mode.
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
 | `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
+| `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name nginx serves the UI under, such as `ytdl.home.arpa`; any other `Host` gets 400 |
 | `PUID`, `PGID` | `1000` | User and group the containers run as |
 | `TZ` | | Timezone of the log timestamps |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | | Egress proxy; `NO_PROXY` must cover Jellyfin and the bgutil provider |
@@ -63,10 +64,29 @@ Volumes: `/app/data` (SQLite), `/downloads` (staging) and `/media` (library).
 
 ## Security notes
 
-- The web UI has **no authentication and no CSRF protection**. Any web page a user on
-  that network opens can submit its forms, including the ones that delete library
-  files. Expose it only on a trusted network, or behind a reverse proxy that
-  authenticates and checks the request origin.
+- The web UI has **no authentication**: anyone who can reach it can use it. Keep it
+  LAN-only. In jelly-stack, publish no host port for it (close `8085`) and let the
+  nginx server for the UI's name `allow` the LAN and the stack's Docker subnets, which
+  the blackbox probe comes from, before `deny all`.
+- Web pages a user opens elsewhere cannot drive it through that user's browser:
+  - **Host pinning.** The app answers only to `youtube-manager` (the blackbox probe),
+    `localhost` and `127.0.0.1` (the healthcheck), plus the entries of
+    `YTM_ALLOWED_HOSTS`, such as the UI's nginx name, whatever the port. Any other
+    `Host` gets 400, which defeats DNS rebinding.
+  - **Cross-origin guard.** Every request other than GET, HEAD and OPTIONS must come
+    from the UI's own pages. A browser that sends `Sec-Fetch-Site` must send
+    `same-origin` or `none`; otherwise, as over plain HTTP behind nginx, the `Origin`
+    header's host and port must equal `Host`. Anything else, including a missing or
+    `null` Origin, gets 403 and one WARN line in the app log.
+  - **Headers.** Every response carries a Content-Security-Policy limited to the app's
+    own origin (inline scripts and styles allowed), `X-Frame-Options: DENY`,
+    `X-Content-Type-Options: nosniff`, and same-origin Referrer and
+    Cross-Origin-Resource policies.
+- A manual POST must therefore send the UI's origin:
+  `curl -X POST -H 'Origin: http://ytdl.home.arpa' http://ytdl.home.arpa/retry-all`,
+  with your UI's name in place of `ytdl.home.arpa`.
+- Until jelly-stack closes port 8085, `http://<pi-ip>:8085` answers 400 unless
+  `YTM_ALLOWED_HOSTS` lists the Pi's address.
 - The Jellyfin refresh call does not verify TLS, so that a self-signed Jellyfin
   certificate on an internal network works. The API key is therefore sent without
   verifying the server, and urllib3's `InsecureRequestWarning` is silenced
@@ -76,12 +96,28 @@ Volumes: `/app/data` (SQLite), `/downloads` (staging) and `/media` (library).
 
 The Compose definition (both services, the bgutil sidecar, healthchecks and port
 mapping) lives in [jelly-stack](https://github.com/Ochsyp/jelly-stack), which clones this
-repository to `<stack-dir>/youtube-manager`. Compose builds the image from that
+repository into a `youtube-manager` folder of its checkout. Compose builds the image from that
 checkout and bind-mounts it over `/app`, so a `git pull` followed by a restart of both
 `youtube-manager` and `youtube-worker` deploys code changes; dependency, Dockerfile and
 yt-dlp updates need a rebuild. The container names `youtube-manager`, `youtube-worker`
 and `bgutil-provider` are an interface: the stack's Squid ACLs, firewall rules, probes,
-log pipeline and reverse proxy address them by name.
+log pipeline and reverse proxy address them by name. nginx must forward the `Host` the
+browser sent: `proxy_set_header Host $host` matches `Origin` only while nginx listens on
+port 80, and on any other port it needs `$http_host`, or every POST gets 403.
+
+## Running tests
+
+From the repository root, with [uv](https://docs.astral.sh/uv/), which fetches a
+standalone CPython 3.13, so no system Python is needed (on Windows this also sidesteps
+the Microsoft Store Python):
+
+```sh
+uv run --no-project --python 3.13 --with-requirements requirements.txt --with-requirements requirements-dev.txt python -m pytest -q
+```
+
+Tests marked `posix` need `os.killpg` and `SIGKILL`. They are skipped on Windows and run
+in CI on Linux (`.github/workflows/ci.yml`) along with the rest of the suite. The suite
+writes only under pytest's temp directories, never to `data/`, `/downloads` or `/media`.
 
 ## Repository layout
 
@@ -94,13 +130,24 @@ jobstate.py         job status and progress helpers
 media.py            paths and media lookup
 applog.py           shared log formatter
 templates/          Jinja2 templates
+tests/              pytest suite and its fixtures (conftest.py)
 data/               SQLite database (runtime, git-ignored)
 Dockerfile          image build; also installs yt-dlp and the bgutil plugin
 entrypoint.sh       drops root to PUID/PGID
 requirements.txt    Python dependencies
-.github/            secret scan and Dependabot
+requirements-dev.txt  test-only dependencies (pytest, httpx)
+pytest.ini          pytest settings and the posix marker
+.github/            CI tests, secret scan, Dependabot and the pull request template
+.githooks/          hooks that keep commits and pushes off main
+CHANGELOG.md        changes, newest first
+CONTRIBUTING.md     branch and pull request workflow
 SECURITY.md         security policy
 ```
+
+## Contributing
+
+Changes go through feature branches and pull requests; [CONTRIBUTING.md](CONTRIBUTING.md)
+describes the workflow, and [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
 ## License
 

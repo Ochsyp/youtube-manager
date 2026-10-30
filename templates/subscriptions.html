@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{# Subscriptions page (GET /subscriptions): the add form, then one row per existing subscription.
+   Requires `subscriptions`; each row reads id, subscription_type, url, enabled, backfill_existing
+   and last_checked. Every control below posts and redirects back here -- none of this polls. #}
+
+{% block title %}Subscriptions{% endblock %}
+
+{% block content %}
+<h1>Subscriptions</h1>
+
+{# Add form is a single row with a text input for the channel/playlist URL, a select for the type,
+   and a submit button. The backfill preference is a pair of radio buttons below the row. #}
+<section>
+    <h2>Add Subscription</h2>
+    <form action="/subscriptions/add" method="post">
+        <div class="form-row">
+            <input name="url" placeholder="Channel or playlist URL" required />
+            <select name="subscription_type">
+                <option value="channel">Channel</option>
+                <option value="playlist">Playlist</option>
+            </select>
+            <button type="submit">Add</button>
+        </div>
+        <div class="form-row">
+            {# Controls whether the very first scan queues everything the channel/playlist
+               already has, or just records it as a baseline so only videos published after
+               subscribing ever get downloaded. See worker.check_subscriptions. #}
+            <label class="radio-option">
+                <input type="radio" name="backfill_existing" value="true" checked>
+                Download all existing videos
+            </label>
+            <label class="radio-option">
+                <input type="radio" name="backfill_existing" value="false">
+                Only new videos from now on
+            </label>
+        </div>
+    </form>
+</section>
+
+{# The table of existing subscriptions is a single row per subscription, with a button to toggle
+   enabled/disabled, a button to toggle the backfill preference, a button to queue any skipped
+   videos, and a button to delete the subscription. #}
+<section>
+    <h2>Current subscriptions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Type</th>
+                <th>URL</th>
+                <th>Enabled</th>
+                <th>Backfill</th>
+                <th>Last Checked</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            {% for sub in subscriptions %}
+                <tr>
+                    <td>{{ sub.subscription_type }}</td>
+                    <td>{{ sub.url }}</td>
+                    <td>
+                        {# The button is the control, not a label: clicking it submits a toggle. #}
+                        <form action="/subscriptions/{{ sub.id }}/toggle-enabled" method="post" style="margin:0;">
+                            <button type="submit" class="{{ 'button-secondary' if sub.enabled else 'button-danger' }}">
+                                {{ 'Enabled' if sub.enabled else 'Disabled' }}
+                            </button>
+                        </form>
+                    </td>
+                    <td>
+                        <div class="row-actions">
+                            {# This preference only ever governs a subscription's very first scan
+                               (see worker.check_subscriptions); toggling it after that scan has
+                               already happened has no effect on its own, so "Download existing
+                               now" below is what actually queues anything already skipped. #}
+                            <form action="/subscriptions/{{ sub.id }}/toggle-backfill" method="post" style="margin:0;">
+                                <button type="submit" class="button-secondary">
+                                    {{ 'All existing' if sub.backfill_existing else 'Only new' }}
+                                </button>
+                            </form>
+                            {# Always available, not just while the preference above reads "Only
+                               new": toggling that preference doesn't retroactively touch videos
+                               already sitting skipped from before the toggle, so this is the only
+                               thing that actually queues them. A no-op if nothing is skipped. #}
+                            <form action="/subscriptions/{{ sub.id }}/backfill-now" method="post" style="margin:0;"
+                                  onsubmit="return confirm('Queue every video this subscription previously skipped?');">
+                                <button type="submit" class="button-secondary">Download existing now</button>
+                            </form>
+                        </div>
+                    </td>
+                    {# Empty until the worker's first periodic scan of this subscription. #}
+                    <td>{{ sub.last_checked or '-' }}</td>
+                    <td>
+                        <form action="/subscriptions/delete/{{ sub.id }}" method="post" style="margin:0;">
+                            <button type="submit" class="button-danger" onclick="return confirm('Delete this subscription?');">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+            {% else %}
+                <tr>
+                    <td colspan="6">No subscriptions</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

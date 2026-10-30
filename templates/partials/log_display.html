@@ -1,0 +1,122 @@
+{# Defines window.LogDisplay and nothing else; takes no context. A .log-output box sticks to the
+   bottom until the user scrolls away from it, after which their distance from the bottom is held
+   across every content swap. Included by job.html and log.html, which each keep a state object
+   from createState() and hand it back to every call; all of these act on the first .log-output. #}
+<script>
+    window.LogDisplay = window.LogDisplay || {};
+
+    // Create a shared log display state manager
+    LogDisplay.createState = function() {
+        return {
+            autoScroll: true,
+            lastContent: null,
+            manualScrollFromBottom: 0,
+            isManuallyScrolled: false,
+        };
+    };
+
+    // Initialize log display with proper scroll tracking
+    LogDisplay.initialize = function(state) {
+        const logOutput = document.querySelector('.log-output');
+        if (!logOutput) return;
+
+        if (state.lastContent === null) {
+            state.lastContent = logOutput.textContent;
+        }
+
+        // Function to scroll the log output to the bottom, ensuring the latest log entries are visible.
+        const scrollToBottom = () => {
+            logOutput.scrollTop = logOutput.scrollHeight;
+        };
+
+        // Function to update the auto-scroll state based on the user's scroll position, allowing manual scrolling without interference.
+        const updateAutoScrollState = () => {
+            const distanceFromBottom = logOutput.scrollHeight - logOutput.clientHeight - logOutput.scrollTop;
+            const wasAutoScroll = state.autoScroll;
+            state.autoScroll = distanceFromBottom <= 5;
+
+            // When user manually scrolls away from bottom, capture their position
+            if (wasAutoScroll && !state.autoScroll) {
+                state.isManuallyScrolled = true;
+                state.manualScrollFromBottom = distanceFromBottom;
+            }
+            // When user scrolls back to bottom, re-enable auto-scroll
+            if (!wasAutoScroll && state.autoScroll) {
+                state.isManuallyScrolled = false;
+                state.manualScrollFromBottom = 0;
+            }
+        };
+
+        // Add an event listener to the log output to track user scrolling and update the auto-scroll state accordingly.
+        logOutput.addEventListener('scroll', updateAutoScrollState);
+
+        // Jump to the bottom once on bind. Nothing watches the element after that: every later
+        // render goes through updateContent(), which is what maintains the position from then on.
+        if (state.autoScroll) {
+            scrollToBottom();
+        }
+    };
+
+    // Update log content while preserving scroll position
+    LogDisplay.updateContent = function(state, newContent) {
+        const logOutput = document.querySelector('.log-output');
+        if (!logOutput || newContent === state.lastContent) return false;
+
+        // Recalculate scroll state before updating content to ensure correct position detection.
+        const distanceFromBottom = logOutput.scrollHeight - logOutput.clientHeight - logOutput.scrollTop;
+        state.autoScroll = distanceFromBottom <= 5;
+
+        state.lastContent = newContent;
+        logOutput.textContent = newContent;
+
+        // Restore scroll position after content update
+        if (state.autoScroll) {
+            // If auto-scrolling, scroll to the new bottom after content has been added.
+            logOutput.scrollTop = logOutput.scrollHeight;
+        } else if (state.isManuallyScrolled) {
+            // Maintain the exact distance from bottom where user was reading.
+            logOutput.scrollTop = logOutput.scrollHeight - logOutput.clientHeight - state.manualScrollFromBottom;
+        }
+
+        return true;
+    };
+
+    // Extract log content from HTML fragment
+    LogDisplay.extractLogContent = function(html) {
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = html;
+        const logOutput = tempDiv.querySelector('.log-output');
+        return logOutput ? logOutput.textContent : null;
+    };
+
+    // Capture current scroll position before content update to preserve manual scroll location
+    LogDisplay.captureScrollPosition = function() {
+        const element = document.querySelector('.log-output');
+        if (!element) return null;
+        const distanceFromBottom = element.scrollHeight - element.clientHeight - element.scrollTop;
+        return {
+            isAtBottom: distanceFromBottom <= 5,
+            distanceFromBottom: distanceFromBottom,
+        };
+    };
+
+    // Restore scroll position after content has been updated
+    LogDisplay.restoreScrollPosition = function(state, scrollPosition) {
+        const element = document.querySelector('.log-output');
+        if (!element || !scrollPosition) return;
+
+        if (scrollPosition.isAtBottom) {
+            // If user was at the bottom, auto-scroll to the new bottom.
+            element.scrollTop = element.scrollHeight;
+            state.autoScroll = true;
+            state.isManuallyScrolled = false;
+        } else {
+            // If user was scrolled up, preserve their distance from bottom.
+            const targetScrollTop = element.scrollHeight - element.clientHeight - scrollPosition.distanceFromBottom;
+            element.scrollTop = targetScrollTop;
+            state.isManuallyScrolled = true;
+            state.manualScrollFromBottom = scrollPosition.distanceFromBottom;
+            state.autoScroll = false;
+        }
+    };
+</script>

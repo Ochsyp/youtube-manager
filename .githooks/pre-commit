@@ -1,0 +1,12 @@
+#!/bin/sh
+# Refuse commits on main: every change goes on a feature branch and reaches main through a
+# reviewed pull request. A detached HEAD, as during a rebase, is not refused.
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+case "$branch" in
+    main | master)
+        echo "pre-commit: commits on '$branch' are refused. Create a feature branch first, for example:" >&2
+        echo "    git switch -c fix/short-name" >&2
+        exit 1
+        ;;
+esac
+exit 0

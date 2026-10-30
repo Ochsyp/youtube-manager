@@ -1,0 +1,13 @@
+{# Site navigation, included by base.html so it appears on every page. Takes no context. #}
+
+<nav class="nav-bar">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/history" class="nav-link">History</a>
+    <a href="/subscriptions" class="nav-link">Subscriptions</a>
+    {# Marks failed jobs completed when their file turns out to be on disk already; it walks
+       the library, so it is a button rather than something a page does on its own. #}
+    <form action="/admin/sweep_existing" method="post" style="display:inline; margin:0;">
+        <button type="submit" class="button-secondary nav-button">Sweep existing files</button>
+    </form>
+</nav>
+<hr class="divider">

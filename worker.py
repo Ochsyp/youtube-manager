@@ -1,0 +1,2316 @@
+# -------------------------------------------------------
+# YouTube download worker
+#
+# Runs yt-dlp, updates job state in the database, discovers metadata for parent and video jobs,
+# and recovers or retries stalled jobs. Runs as its own process alongside the web app, taking one
+# job at a time; both share one SQLite file, which allows a single writer.
+# -------------------------------------------------------
+
+import json
+import logging
+import os
+import queue
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Optional
+
+from sqlalchemy import or_
+
+import applog
+from database import Channel, Download, Playlist, Session, Subscription, wait_for_schema
+from jobstate import (
+    ACTIVE_STATUS_SET,
+    PARENT_REQUEST_TYPES,
+    RESET_PROGRESS_ON_STATUSES,
+    RESTART_RECOVERY_STATUSES,
+    SKIPPED_STATUS,
+    STORABLE_STATUSES,
+    TERMINAL_STATUS_SET,
+    WORKER_PICKUP_STATUSES,
+    apply_status_update_to_hierarchy,
+    compute_parent_progress,
+    compute_parent_speed,
+    reset_job_for_retry,
+    resolve_parent_status,
+)
+from media import (
+    DOWNLOAD_PATH,
+    MEDIA_PATH,
+    STAGING_TEMP,
+    extract_youtube_id,
+    find_existing_media,
+    is_media_file,
+    normalize_youtube_id,
+)
+from organizer import organize_single_job as organizer_organize_single_job
+from organizer import remove_staging_leftovers as organizer_remove_staging_leftovers
+from organizer import scan_and_process as organizer_scan_and_process
+
+
+# =======================================================
+#              SETUP AND TUNING CONSTANTS
+# =======================================================
+
+PROXY = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+
+# Base URL of the local bgutil PO token provider (docker-compose.yml). YouTube withholds its
+# full DASH format list from a client with no PO token, leaving yt-dlp on low-bitrate HLS.
+# Left unset, no token arguments are passed at all.
+POT_PROVIDER_URL = os.getenv('POT_PROVIDER_URL', '')
+
+
+# Extractor arguments every yt-dlp invocation shares, built fresh per call so a caller extending
+# them into its own command list cannot mutate shared state.
+def ytdlp_common_args() -> list[str]:
+    if not POT_PROVIDER_URL:
+        return []
+    return ['--extractor-args', f'youtubepot-bgutilhttp:base_url={POT_PROVIDER_URL}']
+
+# Sleep intervals for the worker loop and its sub-tasks. The organizer runs every 5 minutes, and
+# subscription checks every 30 minutes, so a failed job is retried at the next organizer pass.
+ORGANIZER_INTERVAL_SECONDS = 300
+SUBSCRIPTION_CHECK_INTERVAL_SECONDS = 1800
+# How soon a failed job is first retried, so a transient network failure clears itself without
+# the user having to notice and click Retry.
+RETRY_INTERVAL_SECONDS = ORGANIZER_INTERVAL_SECONDS
+
+# Ceiling on the doubling delay between auto-retries of the same job.
+RETRY_BACKOFF_MAX_SECONDS = 6 * 3600
+
+# Consecutive pickups of one job before it is failed outright; a job no branch can move out of
+# the queue otherwise spins the loop at full CPU.
+MAX_JOB_PICKUP_REPEATS = 4
+
+# Keys dropped before storing yt-dlp's info dictionary in the database. They are large
+# (hundreds of kilobytes of format/caption listings) and none of them feed the NFO.
+BULKY_METADATA_KEYS = (
+    'formats',
+    'requested_formats',
+    'requested_downloads',
+    'thumbnails',
+    'automatic_captions',
+    'subtitles',
+    'heatmap',
+    'fragments',
+    'http_headers',
+    'entries',
+)
+
+# Only channel downloads get a per-uploader subfolder in staging; playlist episodes and
+# standalone videos stay flat, since the organizer builds its own structure for those.
+OUTPUT_TEMPLATE_CHANNEL = '%(uploader)s/%(title)s [%(id)s].%(ext)s'
+OUTPUT_TEMPLATE_FLAT = '%(title)s [%(id)s].%(ext)s'
+
+# Timeout for synchronous yt-dlp metadata/filename lookups. Without one a stalled connection
+# blocks the single-threaded loop indefinitely, with no chance for a cancel to be noticed.
+COMMAND_TIMEOUT_SECONDS = 120
+
+# A download printing nothing for this long is treated as dead. yt-dlp reports progress
+# continuously while transferring; the gap only has to clear a slow ffmpeg merge on the Pi.
+DOWNLOAD_STALL_TIMEOUT_SECONDS = 1800
+
+# Longest wait for a signalled process group to actually die before escalating to SIGKILL.
+PROCESS_KILL_TIMEOUT_SECONDS = 15
+
+# yt-dlp emits progress dozens of lines per second. Persisting each one costs two SQLite
+# transactions on a database the web app shares, so progress is written at most this often.
+PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
+
+# How often a running download re-reads its cancel flag, which only the web process sets.
+CANCEL_POLL_INTERVAL_SECONDS = 2.0
+
+# Cap on a job's stored log, which the UI renders whole and a fragment-heavy download would
+# otherwise grow to megabytes.
+MAX_STORED_LOG_CHARS = 256 * 1024
+
+# Set by SIGTERM/SIGINT so the loop and any running download stop at the next check instead of
+# being killed mid-write by the SIGKILL that follows `docker stop`.
+_shutdown = threading.Event()
+
+# Liveness marker for the container healthcheck: this process serves nothing over HTTP, so it
+# proves itself by touching a file. /tmp is a tmpfs in docker-compose.yml, so this never reaches
+# the SD card, and the file being absent after a restart is correct -- a process that has not
+# reached its loop yet has not proved anything. The healthcheck's staleness window has to clear
+# the longest gap between touches, which is one COMMAND_TIMEOUT_SECONDS-bounded yt-dlp call.
+HEARTBEAT_PATH = Path(os.getenv('WORKER_HEARTBEAT_PATH', '/tmp/worker-heartbeat'))
+
+
+# =======================================================
+#              LOGGING AND JOB-ROW UPDATES
+# =======================================================
+
+# Returns the current UTC time, which is what the database uses for its timestamps.
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# Refresh the liveness marker. Called from every loop that can run for a long time, so a download
+# in progress keeps the container healthy rather than looking wedged. Failure is swallowed: an
+# unwritable marker means the healthcheck assumes the worst, which is never a reason to abandon
+# a download that is otherwise fine.
+def touch_heartbeat() -> None:
+    try:
+        HEARTBEAT_PATH.touch()
+    except OSError as exc:
+        warn(f'Could not update the heartbeat marker: {exc}')
+
+
+# Log a message at INFO level, which is what the worker's stdout handler renders to Loki.
+def log(msg: str) -> None:
+    logging.info(msg)
+
+
+# Log something worth seeing in Loki that needs no human: a failure that clears itself or is
+# retried later, or a warning yt-dlp relayed. WARN never pages; see log_error() for ERROR.
+def warn(msg: str) -> None:
+    logging.warning(msg)
+
+
+# Log a failure with its traceback, indented so it stays one entry downstream.
+# The jelly-stack alert pages on any ERROR from this container, so ERROR is kept for what needs
+# a human: unexpected exceptions, a full disk, a subscription failing check after check.
+def log_error(msg: str, exc: BaseException | None = None) -> None:
+    logging.error(msg, exc_info=exc)
+
+
+# Set columns on one job row in its own session and commit, then re-aggregate the parent's progress
+# outside that transaction. A row that has since been deleted is a no-op, not an error.
+# organized_at is deliberately left alone here: a progress tick is no reason to send the
+# organizer back over a video it already filed. Only retry and redownload clear it.
+def update_job(job_id: int, **values) -> None:
+    with Session() as db:
+        job = db.get(Download, job_id)
+        if not job:
+            return
+
+        if values.get('status') in RESET_PROGRESS_ON_STATUSES:
+            values.setdefault('progress', None)
+            values.setdefault('speed', None)
+
+        for key, value in values.items():
+            setattr(job, key, value)
+
+        db.commit()
+        parent_id = job.parent_id
+
+    # Aggregated after the session closes: SQLite takes one writer, so the parent's own commit
+    # has no business nesting inside this transaction.
+    if parent_id and any(key in values for key in ('progress', 'speed', 'status')):
+        try:
+            compute_and_persist_parent_progress(parent_id)
+        except Exception as exc:
+            log_error(f'Failed to aggregate progress for parent {parent_id}', exc)
+
+
+# Append lines to a job's stored log, which is the only place download output is kept. Opens its own
+# session and commits; any failure is logged and swallowed rather than raised into a download.
+def append_log(job_id: int, *lines: str) -> None:
+    if not lines:
+        return
+
+    try:
+        with Session() as db:
+            job = db.get(Download, job_id)
+
+            if not job:
+                return
+
+            # The whole column is rewritten per call, so it is capped from the front: a long
+            # download would otherwise grow one row until every read of it is expensive.
+            text = (job.log or '') + ''.join(f'{line}\n' for line in lines)
+            if len(text) > MAX_STORED_LOG_CHARS:
+                text = '[log truncated]\n' + text[-MAX_STORED_LOG_CHARS:]
+            job.log = text
+            db.commit()
+    except Exception as exc:
+        # Logging must never take the worker down with it.
+        log_error(f'Failed to append log for job {job_id}', exc)
+
+
+# =======================================================
+#                     JOB DISPATCH
+# =======================================================
+
+# Run one picked-up job to its next resting state, blocking for as long as that takes: refuse a
+# cancelled or unsupported job, refresh a video or parent that already has files on disk, expand a
+# parent that has none, and otherwise download the video. Every branch has to leave the row in a
+# status get_next_job() no longer selects, or the loop picks the same job up again forever.
+def process_job(job: Download) -> None:
+    # Logged unconditionally: a branch below that no-ops would otherwise make a stuck job
+    # indistinguishable from the worker not running at all.
+    log(f'process_job: picked up job {job.id} ({job.request_type}, status={job.status})')
+
+    if job.cancel_requested:
+        update_job(job.id, status='cancelled', error='Cancelled by user')
+        return
+
+    if not is_safe_url(job.url):
+        warn(f'Job {job.id}: refusing unsupported URL {job.url!r}')
+        update_job(job.id, status='failed', error=f'Unsupported URL: {job.url}')
+        return
+
+    # A video whose file is already on disk is refreshed in place rather than downloaded again.
+    if job.status in {'metadata', 'redownload'}:
+        if job.request_type == 'video' and job.filename:
+            log(f'Job {job.id}: performing worker-side redownload/rename')
+            append_log(job.id, 'Worker performing redownload/rename...')
+            handled = redownload_or_rename(job)
+            if not handled:
+                # No error= here: discover_metadata has already stored yt-dlp's own reason, and
+                # a generic message would overwrite it.
+                update_job(job.id, status='failed')
+            # Settled on both paths: this branch returns before the download_video() exits that
+            # would otherwise do it, and a parent left active blocks the organizer.
+            if job.parent_id:
+                finalize_parent_if_done(job.id)
+            return
+        if job.request_type in PARENT_REQUEST_TYPES:
+            log(f'Job {job.id}: performing worker-side parent metadata refresh')
+            append_log(job.id, 'Worker performing parent metadata refresh...')
+            success = redownload_or_rename(job)
+            if success:
+                return
+            update_job(job.id, status='failed', error='Parent metadata refresh failed')
+            return
+
+    # A parent that already has children was expanded before; its children are picked up
+    # individually via the normal queue. Re-expanding loops forever: expand_playlist() resets
+    # the parent to 'queued' on a failed re-scan and get_next_job() hands it straight back.
+    if job.request_type in PARENT_REQUEST_TYPES:
+        with Session() as db:
+            db_job = db.get(Download, job.id)
+            already_has_children = bool(db_job.children) if db_job else False
+            if already_has_children:
+                sync_parent_status(db_job)
+                db.commit()
+        if already_has_children:
+            return
+        expand_playlist(job)
+        return
+
+    download_video(job)
+
+
+# Oldest job in any status the worker can act on, or None.
+def get_next_job() -> Optional[Download]:
+    with Session() as db:
+        # A parent with children has nothing actionable of its own, and predates them, so
+        # leaving it eligible lets it win this "oldest first" query forever.
+        parents_with_children = db.query(Download.parent_id).filter(Download.parent_id.isnot(None)).distinct()
+        return (
+            db.query(Download)
+            .filter(
+                Download.status.in_(WORKER_PICKUP_STATUSES),
+                or_(
+                    ~Download.id.in_(parents_with_children),
+                    # ...except a user-requested metadata refresh, which a parent with children
+                    # could never run otherwise. 'redownload' is one-shot, so it cannot starve.
+                    Download.status == 'redownload',
+                ),
+            )
+            .order_by(Download.created_at)
+            .first()
+        )
+
+
+# =======================================================
+#        CHANNEL, PLAYLIST AND SUBSCRIPTION ROWS
+# =======================================================
+
+# Fetch the channel row for `youtube_id`, creating it if absent and refreshing whichever fields the
+# caller supplies; returns None for a falsy id, despite the annotation. Works inside the caller's
+# open session and flushes so the id is assigned, but never commits -- the caller's transaction
+# stays in charge.
+def get_or_create_channel(
+    db, youtube_id: str, name: Optional[str], url: Optional[str] = None,
+    thumbnail: Optional[str] = None, description: Optional[str] = None,
+) -> Channel:
+    # thumbnail/description are only ever passed by a caller whose info dict describes the
+    # channel itself -- never a video's or playlist's own, which must not be mistaken for it.
+    if not youtube_id:
+        return None
+
+    channel = db.query(Channel).filter(Channel.youtube_id == youtube_id).first()
+
+    # Each field is refreshed only when the caller supplied one and it differs, so a later scan
+    # carrying partial metadata tops the row up instead of blanking what an earlier one found.
+    if channel:
+        if name and channel.name != name:
+            channel.name = name
+        if url and channel.url != url:
+            channel.url = url
+        if thumbnail and channel.thumbnail != thumbnail:
+            channel.thumbnail = thumbnail
+        if description and channel.description != description:
+            channel.description = description
+        return channel
+
+    # No row yet. The name and URL fall back to placeholders rather than failing: the id is the
+    # only field the organizer needs, and a real scan fills the rest in later.
+    channel = Channel(
+        youtube_id=youtube_id,
+        name=name or 'Unknown channel',
+        url=url or f'https://www.youtube.com/channel/{youtube_id}',
+        thumbnail=thumbnail,
+        description=description,
+    )
+
+    # Flushed so the caller sees an assigned id without committing the outer transaction.
+    db.add(channel)
+    db.flush()
+    return channel
+
+
+# Fetch the playlist row for `youtube_id`, creating it if absent and re-pointing it at `channel`
+# when one is given. Returns None for a falsy id despite the annotation, and flushes into the
+# caller's transaction without committing, as get_or_create_channel does.
+def get_or_create_playlist(db, youtube_id: str, title: Optional[str], channel: Optional[Channel] = None) -> Playlist:
+    if not youtube_id:
+        return None
+
+    playlist = db.query(Playlist).filter(Playlist.youtube_id == youtube_id).first()
+
+    # Updated only where the caller supplied a value that differs, so a later partial scan cannot
+    # blank a title or unlink a channel an earlier one resolved.
+    if playlist:
+        if title and playlist.title != title:
+            playlist.title = title
+        if channel and playlist.channel_id != channel.id:
+            playlist.channel = channel
+        return playlist
+
+    playlist = Playlist(
+        youtube_id=youtube_id,
+        title=title or 'Unknown playlist',
+        channel=channel,
+    )
+
+    # Flushed so the caller sees an assigned id without committing the outer transaction.
+    db.add(playlist)
+    db.flush()
+    return playlist
+
+
+# Resolve a subscription's own channel/playlist row and store its id. It takes a yt-dlp call the
+# web process never makes, so every subscription starts with channel_id/playlist_id NULL.
+# Writes into the caller's session and flushes without committing; False when nothing was resolved.
+# Each False is also counted as a failed check through record_subscription_failure().
+def resolve_subscription_target(db, subscription: Subscription) -> bool:
+    command = [
+        'yt-dlp', '--dump-single-json', '--skip-download',
+        *ytdlp_common_args(),
+        '--flat-playlist', subscription.url,
+    ]
+    try:
+        result = run_command(command)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        record_subscription_failure(subscription.id, f'failed to resolve channel/playlist: {exc}')
+        return False
+
+    try:
+        metadata = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        record_subscription_failure(subscription.id, f'could not parse channel/playlist metadata: {exc}')
+        return False
+
+    fields = extract_metadata_fields(metadata)
+
+    # Same resolution apply_metadata uses: a channel request's info dict describes the channel
+    # itself, so its top-level id is the channel's when no channel_id was reported.
+    channel = None
+    channel_id = fields['channel_id'] or (fields['id'] if subscription.subscription_type == 'channel' else None)
+    if channel_id:
+        channel_name = fields['channel_name'] or (fields['title'] if subscription.subscription_type == 'channel' else None)
+        channel = get_or_create_channel(
+            db, channel_id, channel_name, fields['channel_url'],
+            thumbnail=fields['thumbnail'] if subscription.subscription_type == 'channel' else None,
+            description=fields['description'] if subscription.subscription_type == 'channel' else None,
+        )
+        subscription.channel_id = channel.id
+
+    # A playlist subscription additionally needs its own row, linked to the channel resolved
+    # above; a channel subscription is already complete. Either way an id is mandatory -- without
+    # one the subscription cannot be matched to future scans, so the resolution fails outright.
+    if subscription.subscription_type == 'playlist':
+        playlist_id = fields['id'] or fields['playlist_id']
+        if not playlist_id:
+            record_subscription_failure(subscription.id, 'playlist metadata had no id')
+            return False
+        playlist = get_or_create_playlist(db, playlist_id, fields['title'] or fields['playlist_title'], channel=channel)
+        subscription.playlist_id = playlist.id
+    elif not channel_id:
+        record_subscription_failure(subscription.id, 'channel metadata had no id')
+        return False
+
+    # Flushed, not committed: check_subscriptions owns the transaction and commits once.
+    db.flush()
+    log(f'Subscription {subscription.id}: resolved channel_id={subscription.channel_id} playlist_id={subscription.playlist_id}')
+    return True
+
+
+# =======================================================
+#       YT-DLP INVOCATION AND SUBPROCESS CONTROL
+# =======================================================
+
+# Minimum gap between consecutive yt-dlp invocations. YouTube answers "Sign in to confirm you're
+# not a bot" once enough requests arrive from one IP, and the loop runs jobs back-to-back.
+YTDLP_MIN_INTERVAL_SECONDS = 2.0
+_last_youtube_request_at = 0.0
+
+
+# Sleep just long enough that consecutive yt-dlp calls stay YTDLP_MIN_INTERVAL_SECONDS apart.
+# Called only from the worker thread, so a module-level timestamp is enough. Monotonic, or the
+# NTP step this clockless Pi takes at boot skips the throttle entirely.
+def throttle_youtube_requests() -> None:
+    global _last_youtube_request_at
+
+    elapsed = time.monotonic() - _last_youtube_request_at
+    if elapsed < YTDLP_MIN_INTERVAL_SECONDS:
+        time.sleep(YTDLP_MIN_INTERVAL_SECONDS - elapsed)
+    _last_youtube_request_at = time.monotonic()
+
+
+# yt-dlp takes its URL as a positional argument, so a stored value beginning with "-" is read as
+# an option instead -- and --exec runs an arbitrary command. Only that shape is refused: yt-dlp
+# accepts a bare "youtube.com/watch?v=..." and older rows may hold one.
+def is_safe_url(url: Optional[str]) -> bool:
+    return bool(url) and not url.startswith('-')
+
+
+# Log each distinct WARNING: line of yt-dlp's stderr once, at WARN, in first-seen order. Returns
+# the other non-blank lines joined, so a failure's ERROR: reason is not buried behind warnings.
+def relay_ytdlp_warnings(stderr: Optional[str]) -> str:
+    relayed = set()
+    remainder = []
+    for raw_line in (stderr or '').splitlines():
+        line = raw_line.strip()
+        if line.startswith('WARNING:'):
+            if line not in relayed:
+                relayed.add(line)
+                warn(line)
+        elif line:
+            remainder.append(raw_line.rstrip())
+    return '\n'.join(remainder)
+
+
+# Run a yt-dlp command to completion, throttled and blocking; raises on a non-zero exit or timeout.
+# encoding='utf-8' is explicit because text=True's locale default mangles non-ASCII titles into
+# mojibake on a container with no UTF-8 locale, so the stored filename stops matching the file
+# on disk. The timeout is what keeps a stalled call from freezing the whole worker loop.
+def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    throttle_youtube_requests()
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        check=True,
+        timeout=timeout,
+    )
+
+    # A successful call's stderr is otherwise discarded, and with it yt-dlp's warnings, such as a
+    # PO-token or JS-solver fallback. yt-dlp repeats a warning per item, so each relays once.
+    relay_ytdlp_warnings(result.stderr)
+    return result
+
+
+# Stop a download and everything it spawned. yt-dlp runs in its own session and forks ffmpeg,
+# so the whole process group is signalled; SIGKILL follows a SIGTERM that goes unanswered, or a
+# merge wedged inside ffmpeg would hold the job in 'downloading' forever. Waits, so no zombie.
+def terminate_process_group(process: subprocess.Popen, grace_seconds: float = 0.0) -> None:
+    if grace_seconds:
+        try:
+            process.wait(timeout=grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            log(f'yt-dlp closed its output but has not exited after {grace_seconds}s; terminating')
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        # Only ever signal a live child: once it is reaped its pid can belong to somebody else.
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            process.wait(timeout=PROCESS_KILL_TIMEOUT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+    process.poll()
+
+
+# =======================================================
+#         PROGRESS PARSING AND OUTPUT STREAMING
+# =======================================================
+
+# A yt-dlp progress line: "[download]  62.5% of  15.30MiB at 4.80MiB/s ETA 00:02". Speed comes
+# only from a line that also carries a percentage, so "at 5MB/s" inside a title on a
+# "[download] Destination: ..." line cannot be stored as the transfer rate.
+PROGRESS_LINE_PATTERN = re.compile(
+    r'\[download\]\s+(?P<progress>[0-9]+(?:\.[0-9]+)?%)\s+of\s+'
+    r'(?:.*?\sat\s+(?P<speed>[0-9]+(?:\.[0-9]+)?[KMGT]?i?B/s))?'
+)
+
+# The summary yt-dlp prints when one format finishes: "[download] 100% of 559.84MiB in 00:00:31
+# at 18.01MiB/s". Its speed is that stream's average rather than an instantaneous sample.
+COMPLETION_LINE_PATTERN = re.compile(
+    r'\[download\]\s+100%\s+of\s+.+?\s+in\s+[0-9:]+\s+at\s+([0-9]+(?:\.[0-9]+)?[KMGT]?i?B/s)'
+)
+
+
+# Percentage and instantaneous speed from one yt-dlp progress line, both as the strings it printed.
+# (None, None) for any other line, and a None speed for a progress line that carried no rate.
+def parse_progress_line(line: str) -> tuple[Optional[str], Optional[str]]:
+    match = PROGRESS_LINE_PATTERN.search(line)
+    if not match:
+        return None, None
+    return match.group('progress'), match.group('speed')
+
+
+# Average rate from yt-dlp's per-format completion line, or None for any other line. One download
+# produces several of these, one per stream it fetches.
+def parse_completion_speed(line: str) -> Optional[str]:
+    match = COMPLETION_LINE_PATTERN.search(line)
+    return match.group(1) if match else None
+
+
+# Queued by the reader thread at EOF; a distinct object, so no line of output can be it.
+_OUTPUT_EOF = object()
+
+
+# Pumps the subprocess's stdout onto a queue from its own thread, so a stalled but not-yet-exited
+# subprocess can never block stream_process_output's cancellation and stall checks.
+def _pump_subprocess_output(process: subprocess.Popen[str], line_queue: 'queue.Queue') -> None:
+    try:
+        for line in iter(process.stdout.readline, ''):
+            line_queue.put(line)
+    except Exception:
+        # Closing the pipe under a blocked readline raises here; EOF is reported either way.
+        pass
+    finally:
+        line_queue.put(_OUTPUT_EOF)
+
+
+# Relay a subprocess's output to the log and job row until it exits, polling for a cancel
+# request, a worker shutdown and a stalled transfer as it goes. Returns why it stopped --
+# 'finished', 'cancelled', 'shutdown' or 'stalled' -- and the last line yt-dlp began with
+# 'ERROR:', or None. Leaves no process running behind it.
+def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[str, Optional[str]]:
+    assert process.stdout
+
+    line_queue: 'queue.Queue' = queue.Queue()
+    reader_thread = threading.Thread(target=_pump_subprocess_output, args=(process, line_queue), daemon=True)
+    reader_thread.start()
+
+    # Progress is buffered and written on a timer: yt-dlp emits dozens of lines a second, and
+    # each one costs an UPDATE plus a rewrite of the whole log column, on a shared SQLite file.
+    pending_lines: list[str] = []
+    pending_update: dict[str, str] = {}
+    # Kept apart from the instantaneous samples so the stored speed is the achieved rate.
+    final_speed = None
+
+    last_flush = time.monotonic()
+    last_cancel_check = time.monotonic()
+    last_output_at = time.monotonic()
+    outcome = 'finished'
+    # yt-dlp's own reason for a failed run; download_video stores it as the job's error.
+    last_error_line = None
+    out_of_space_logged = False
+
+    # Write the buffered log lines and progress values out and restart the flush timer. Each call
+    # costs up to two SQLite transactions, so callers rate-limit it instead of flushing per line.
+    def flush() -> None:
+        nonlocal last_flush
+        if pending_lines:
+            append_log(job_id, *pending_lines)
+            pending_lines.clear()
+        if pending_update:
+            update_job(job_id, **pending_update)
+            pending_update.clear()
+        last_flush = time.monotonic()
+
+    # Consume what the reader thread queues. The blocking read is bounded rather than indefinite
+    # so cancel, shutdown and stall are still noticed while yt-dlp is producing nothing at all.
+    try:
+        while True:
+            now = time.monotonic()
+            # A download is the longest thing this process does; without a touch here the
+            # healthcheck would call a perfectly healthy multi-hour transfer dead.
+            touch_heartbeat()
+
+            # Cancel is polled rather than pushed, since the request arrives in the database from
+            # the web process. On its own timer so a chatty download doesn't check it per line.
+            if now - last_cancel_check >= CANCEL_POLL_INTERVAL_SECONDS:
+                last_cancel_check = now
+                if _shutdown.is_set():
+                    outcome = 'shutdown'
+                    break
+                if is_cancelled(job_id):
+                    outcome = 'cancelled'
+                    break
+
+            # Silence, not slowness, is the failure signal: a stalled transfer keeps the process
+            # alive and the job in 'downloading' forever, where a slow one still emits progress.
+            if now - last_output_at >= DOWNLOAD_STALL_TIMEOUT_SECONDS:
+                warn(f'Job {job_id}: no yt-dlp output for {DOWNLOAD_STALL_TIMEOUT_SECONDS}s, giving up')
+                pending_lines.append(f'No output for {DOWNLOAD_STALL_TIMEOUT_SECONDS}s; download abandoned')
+                outcome = 'stalled'
+                break
+
+            # Bounded, so the checks above get another turn while the subprocess is silent.
+            try:
+                item = line_queue.get(timeout=1)
+            except queue.Empty:
+                if time.monotonic() - last_flush >= PROGRESS_UPDATE_INTERVAL_SECONDS:
+                    flush()
+                continue
+
+            if item is _OUTPUT_EOF:
+                break
+
+            last_output_at = time.monotonic()
+            stripped = item.rstrip()
+
+            completion_speed = parse_completion_speed(stripped)
+            if completion_speed:
+                final_speed = completion_speed
+
+            progress, speed = parse_progress_line(stripped)
+            if progress:
+                # Stored exactly as parsed. yt-dlp fetches the video and audio streams one after
+                # the other, so a 100% here is one stream finishing rather than the job; the
+                # authoritative final value is written by record_completed_download().
+                pending_update['progress'] = progress
+                if speed:
+                    pending_update['speed'] = speed
+                # Sampled, or thousands of near-identical lines land in the log column and Loki.
+                if time.monotonic() - last_flush >= PROGRESS_UPDATE_INTERVAL_SECONDS:
+                    log(stripped)
+                    pending_lines.append(stripped)
+                    flush()
+                continue
+
+            # A full staging disk fails every download after this one too, so it pages once
+            # per run, whichever tool (yt-dlp or its ffmpeg) printed it.
+            if 'No space left on device' in stripped and not out_of_space_logged:
+                out_of_space_logged = True
+                log_error(f'Job {job_id}: no space left on device writing to {DOWNLOAD_PATH}: {stripped}')
+
+            # Routed through log() or warn() so yt-dlp's output carries the same timestamped level
+            # prefix as everything else rather than arriving unlabelled. yt-dlp's own WARNING: and
+            # ERROR: lines go out at WARN only: one failed download is retried, not paged.
+            if stripped.startswith('ERROR:'):
+                last_error_line = stripped
+            if stripped.startswith(('WARNING:', 'ERROR:')):
+                warn(stripped)
+            else:
+                log(stripped)
+            pending_lines.append(stripped)
+            if time.monotonic() - last_flush >= PROGRESS_UPDATE_INTERVAL_SECONDS:
+                flush()
+    except BaseException:
+        outcome = 'error'
+        raise
+    finally:
+        # A process still running here was cancelled, stalled, or raised past this loop; left
+        # alone it keeps downloading into staging with nothing watching it. Only a stream that
+        # ended at EOF gets time to exit on its own.
+        terminate_process_group(process, grace_seconds=60.0 if outcome == 'finished' else 0.0)
+        reader_thread.join(timeout=5)
+
+    if final_speed:
+        pending_update['speed'] = final_speed
+    flush()
+    return outcome, last_error_line
+
+
+# =======================================================
+#            METADATA DISCOVERY AND STORAGE
+# =======================================================
+
+# Discover metadata for a job using yt-dlp. fail_on_error marks the job 'failed' on a discovery
+# error, which parents want; a video job passes False so a download is still attempted.
+def discover_metadata(job: Download, fail_on_error: bool = True) -> Optional[dict]:
+    command = [
+        'yt-dlp',
+        '--dump-single-json',
+        '--skip-download',
+        *ytdlp_common_args(),
+    ]
+
+    # Only the playlist/channel's own metadata is wanted; scan_video_ids() lists the videos.
+    # Without this flag --dump-single-json resolves every video it contains and buffers that
+    # blob twice (capture_output, then json.loads), enough to get the container OOM-killed.
+    if job.request_type in PARENT_REQUEST_TYPES:
+        command.append('--flat-playlist')
+
+    command.append(job.url)
+
+    # The reason is stored whatever fail_on_error says: that flag decides who owns the job's
+    # status, not whether yt-dlp's message is worth keeping.
+    def record_failure(message: str) -> None:
+        # Logged as well as stored, since the stored error only ever surfaces in the web UI.
+        warn(f'Job {job.id}: metadata discovery failed: {" ".join(message.split())[:500]}')
+        if fail_on_error:
+            update_job(job.id, status='failed', error=message)
+        else:
+            update_job(job.id, error=message)
+
+    try:
+        result = run_command(command)
+    except subprocess.TimeoutExpired:
+        # Recorded rather than raised: propagating leaves the job, and the loop, stuck.
+        record_failure(f'Timed out after {COMMAND_TIMEOUT_SECONDS}s discovering metadata')
+        return None
+    except subprocess.CalledProcessError as exc:
+        # yt-dlp prints its warnings ahead of the ERROR: line; relayed on their own, they cannot
+        # crowd the reason out of the truncated log line or the front of the stored error.
+        record_failure(relay_ytdlp_warnings(exc.stderr) or exc.stderr or str(exc))
+        return None
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        record_failure(str(exc))
+        return None
+
+
+# Drop yt-dlp's bulky list fields; what is left is still the video's descriptive record.
+def strip_bulky_metadata(metadata: dict) -> dict:
+    return {key: value for key, value in metadata.items() if key not in BULKY_METADATA_KEYS}
+
+
+# Serialize a yt-dlp info dictionary for the metadata_json column, bulky list fields dropped.
+# Returns None rather than raising when a value will not serialize, so a download is never lost to
+# a metadata problem; the caller leaves the existing column alone in that case.
+def serialize_metadata(metadata: dict) -> Optional[str]:
+    try:
+        return json.dumps(strip_bulky_metadata(metadata), ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as exc:
+        log(f'Failed to serialize metadata for storage: {exc}')
+        return None
+
+
+# Serialize a list-valued metadata field (tags, categories) for storage, ignoring empty lists.
+def serialize_list_field(values) -> Optional[str]:
+    if not values or not isinstance(values, (list, tuple)):
+        return None
+    return json.dumps([str(value) for value in values], ensure_ascii=False)
+
+
+# Coerce a yt-dlp numeric field to int, tolerating strings, floats, and missing values.
+def as_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+# Pick a thumbnail URL out of a yt-dlp info dictionary. Under --flat-playlist, which every
+# channel scan uses, it often carries only the raw 'thumbnails' list, lowest resolution first.
+def extract_thumbnail_url(metadata: dict) -> Optional[str]:
+    thumbnail = metadata.get('thumbnail')
+    if thumbnail:
+        return thumbnail
+    thumbnails = metadata.get('thumbnails')
+    if thumbnails:
+        best = thumbnails[-1]
+        if isinstance(best, dict):
+            return best.get('url')
+    return None
+
+
+# Extract the stored fields, normalizing the several key names yt-dlp uses for the same thing.
+def extract_metadata_fields(metadata: dict) -> dict:
+    return {
+        'id': normalize_youtube_id(metadata.get('id')),
+        'title': metadata.get('title') or metadata.get('fulltitle'),
+        'description': metadata.get('description'),
+        'upload_date': metadata.get('upload_date') or metadata.get('release_date'),
+        'thumbnail': extract_thumbnail_url(metadata),
+        'duration': as_int(metadata.get('duration')),
+        'view_count': as_int(metadata.get('view_count')),
+        'like_count': as_int(metadata.get('like_count')),
+        'tags': serialize_list_field(metadata.get('tags')),
+        'categories': serialize_list_field(metadata.get('categories')),
+        'channel_id': metadata.get('channel_id') or metadata.get('uploader_id'),
+        'channel_name': metadata.get('channel') or metadata.get('uploader'),
+        'channel_url': metadata.get('channel_url') or metadata.get('uploader_url'),
+        'playlist_id': metadata.get('playlist_id') or metadata.get('playlist'),
+        'playlist_title': metadata.get('playlist_title') or metadata.get('playlist'),
+        'playlist_index': metadata.get('playlist_index'),
+    }
+
+
+# Apply yt-dlp metadata to a job: descriptive fields, YouTube ID, channel and playlist links.
+# Videos and parents share this, since they differ only in what the top-level "id" refers to.
+# Opens its own session and commits; the passed job is re-read there, not written through.
+def apply_metadata(job: Download, metadata: dict) -> None:
+    with Session() as db:
+        db_job = db.get(Download, job.id)
+
+        if not db_job:
+            return
+
+        fields = extract_metadata_fields(metadata)
+        request_type = db_job.request_type
+
+        if fields['title']:
+            db_job.title = fields['title']
+
+        # Kept so the organizer can still build a complete NFO once the sidecar is cleaned up.
+        serialized = serialize_metadata(metadata)
+        if serialized:
+            db_job.metadata_json = serialized
+
+        # Resolve (or create) the channel this job belongs to. For a channel request the info
+        # dictionary describes the channel itself, so its top-level id/title are the channel's.
+        channel = None
+        channel_id = fields['channel_id'] or (fields['id'] if request_type == 'channel' else None)
+        if channel_id:
+            channel_name = fields['channel_name'] or (fields['title'] if request_type == 'channel' else None)
+            # Only a channel request carries channel-level description and artwork.
+            channel = get_or_create_channel(
+                db, channel_id, channel_name, fields['channel_url'],
+                thumbnail=fields['thumbnail'] if request_type == 'channel' else None,
+                description=fields['description'] if request_type == 'channel' else None,
+            )
+            db_job.channel = channel
+
+        # Only a video row carries per-video detail. Each field is written only when the metadata
+        # supplied one, so a partial refresh tops the row up instead of blanking it; youtube_id
+        # additionally falls back to the URL, since the organizer tags every filename with it.
+        if request_type == 'video':
+            db_job.youtube_id = fields['id'] or db_job.youtube_id or extract_youtube_id(db_job.url)
+            if fields['description']:
+                db_job.description = fields['description']
+            if fields['upload_date']:
+                db_job.upload_date = fields['upload_date']
+            if fields['thumbnail'] and not db_job.thumbnail:
+                db_job.thumbnail = fields['thumbnail']
+            for column in ('duration', 'view_count', 'like_count', 'tags', 'categories'):
+                if fields[column] is not None:
+                    setattr(db_job, column, fields[column])
+
+            # The Playlist link is established once, at expansion (see create_child_jobs), and
+            # never re-derived here: yt-dlp reports a playlist_id for a standalone video too, via
+            # YouTube's implicit "uploads" playlist, which would misfile it as an episode.
+            if db_job.playlist_id:
+                playlist_index = as_int(fields['playlist_index'])
+                if playlist_index:
+                    db_job.playlist_index = playlist_index
+
+            # A channel-grouped video has no curated position, so its index comes from
+            # upload_date. The whole channel resequences, since it may belong anywhere in it.
+            elif db_job.group_by_channel and db_job.channel_id and fields['upload_date']:
+                db.flush()
+                resequence_channel_index(db, db_job.channel_id)
+
+        elif request_type == 'playlist':
+            # A playlist request's info dictionary describes the playlist itself.
+            playlist_id = fields['id'] or fields['playlist_id']
+            if playlist_id:
+                db_job.youtube_id = playlist_id
+                playlist = get_or_create_playlist(
+                    db, playlist_id, fields['title'] or db_job.title, channel=channel
+                )
+                # Carry the playlist's own description and artwork over for the show NFO/poster.
+                if fields['description']:
+                    playlist.description = fields['description']
+                if fields['thumbnail']:
+                    playlist.thumbnail = fields['thumbnail']
+                db_job.playlist = playlist
+                db_job.description = fields['description'] or db_job.description
+
+        elif request_type == 'channel':
+            # A channel request has no playlist; its identity is the channel it points at.
+            if channel_id:
+                db_job.youtube_id = channel_id
+            if fields['description']:
+                db_job.description = fields['description']
+
+        db.commit()
+
+
+# =======================================================
+#        REDOWNLOAD, RENAME AND RESTART RECOVERY
+# =======================================================
+
+# Re-discover metadata and optionally redownload/rename files for a job. Returns True on success.
+# A parent re-expands or requeues its children; a video is renamed in staging, re-organized where it
+# already sits in the library, or falls through to a full download_video(), so this can block for
+# the length of a download.
+def redownload_or_rename(job: Download) -> bool:
+    log(f'Redoing metadata/filename for job {job.id} ({job.request_type})')
+    append_log(job.id, 'Redownload/rename requested...')
+
+    # A parent refreshes its own metadata first, then pushes the work down to its children. It
+    # never downloads anything itself. Unlike the video path below, a failure here is fatal to the
+    # call: without fresh metadata there is nothing to propagate.
+    if job.request_type in PARENT_REQUEST_TYPES:
+        metadata = discover_metadata(job)
+
+        if not metadata:
+            append_log(job.id, 'Redownload/rename failed for parent job.')
+            log(f'Job {job.id}: redownload/rename failed')
+            return False
+
+        apply_metadata(job, metadata)
+        append_log(job.id, 'Redownload/metadata applied successfully for parent.')
+
+        # Re-fetched in its own session: `job` came from the queue and its children may have
+        # changed since, and the whole child rewrite below has to commit as one transaction.
+        with Session() as db:
+            db_parent = db.get(Download, job.id)
+            if not db_parent:
+                return False
+
+            # A parent with no children was never expanded -- the redownload becomes that first
+            # expansion instead of a refresh.
+            if not db_parent.children:
+                append_log(job.id, 'No children found; expanding parent to create child jobs')
+                try:
+                    expand_playlist(db_parent)
+                except Exception as exc:
+                    append_log(job.id, f'Failed to expand parent: {exc}')
+                    return False
+                return True
+
+            # A child with a file on disk gets a rename-first refresh; the rest are queued.
+            for child in db_parent.children:
+                child.organized_at = None
+                child.error = None
+                child.progress = None
+                child.speed = None
+                # Cancelling a parent flags every child, finished ones included, so a child that
+                # kept the flag would be cancelled again the moment this redownload picked it up.
+                child.cancel_requested = False
+                if child.filename:
+                    child.status = 'redownload'
+                    append_log(job.id, f'Marked child {child.id} for redownload')
+                else:
+                    child.status = 'queued'
+                    append_log(job.id, f'Marked child {child.id} queued for redownload')
+
+            # The parent shows queued while its children work; sync_parent_status settles it
+            # again once they finish. One commit covers the whole hierarchy.
+            db_parent.cancel_requested = False
+            db_parent.status = 'queued'
+            db_parent.error = None
+            db_parent.progress = None
+            db_parent.speed = None
+            db.commit()
+        return True
+
+    # Past here the job is a single video. fail_on_error=False so a metadata lookup that fails
+    # leaves the existing row untouched rather than half-updated.
+    metadata = discover_metadata(job, fail_on_error=False)
+
+    if not metadata:
+        append_log(job.id, 'Redownload/rename failed for video job.')
+        log(f'Job {job.id}: redownload/rename failed')
+        return False
+
+    apply_metadata(job, metadata)
+    append_log(job.id, 'Redownload/metadata applied successfully for video.')
+
+    # Resolve what the row points at now. A relative path is read against staging, and a path
+    # that no longer resolves is discarded so the recovery below can search for the real file.
+    current_file = None
+    if job.filename:
+        current_file = Path(job.filename)
+        if not current_file.is_absolute():
+            current_file = DOWNLOAD_PATH / current_file
+        if not current_file.exists():
+            current_file = None
+
+    # The recorded path goes stale while the file itself is fine when Tdarr transcodes in place
+    # under a different extension. Recovered by youtube_id, which survives a remux.
+    if current_file is None:
+        recovered = find_existing_media(job)
+        if recovered:
+            log(f'Job {job.id}: recorded path was stale ({job.filename}); found {recovered}')
+            append_log(job.id, f'Recorded path was stale; using {recovered}')
+            update_job(job.id, filename=str(recovered))
+            job.filename = str(recovered)
+            current_file = recovered
+
+    # A file already in the Jellyfin library must never be renamed back into flat staging, which
+    # is all resolve_expected_output_path() below can produce. Re-organize this one job instead,
+    # rewriting its NFO -- correct only because the user targeted this job explicitly.
+    if current_file and current_file.is_relative_to(MEDIA_PATH):
+        append_log(job.id, 'Existing file is already in the media library; refreshing metadata in place')
+        update_job(job.id, status='completed', completed_at=utcnow(), progress='100%', organized_at=None)
+        try:
+            organizer_organize_single_job(job.id)
+        except Exception as exc:
+            log_error(f'Job {job.id}: organizer run failed', exc)
+        return True
+
+    # A file still in staging is renamed to the filename yt-dlp would produce now.
+    expected_path = resolve_expected_output_path(job)
+    if current_file and expected_path:
+        # The .info.json travels with the video: leaving it under the old stem would strand it,
+        # and find_sidecar() matches on the stem, so the organizer would stop finding it.
+        expected_info = expected_path.with_name(expected_path.stem + '.info.json')
+        current_info = current_file.with_name(current_file.stem + '.info.json')
+        renamed = True
+
+        # resolve() on both sides so a path that only differs by symlink or case is recognised
+        # as already correct rather than renamed onto itself.
+        if current_file.resolve() != expected_path.resolve():
+            expected_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                current_file.rename(expected_path)
+                if current_info.exists():
+                    current_info.rename(expected_info)
+                append_log(job.id, f'Renamed existing file to {expected_path}')
+            except Exception as exc:
+                append_log(job.id, f'Failed to rename existing file: {exc}')
+                log_error(f'Job {job.id}: failed to rename {current_file} to {expected_path}', exc)
+                renamed = False
+
+        # Completing on a failed rename would point the job at a path nothing ever created, so
+        # that case drops through to the full download below instead.
+        if renamed:
+            update_job(
+                job.id,
+                status='completed',
+                completed_at=utcnow(),
+                progress='100%',
+                filename=str(expected_path),
+                metadata_file=str(expected_info) if expected_info.exists() else None,
+            )
+            return True
+
+    # No existing file was found or it could not be renamed; download it normally.
+    append_log(job.id, 'No existing file found; queuing for full redownload')
+    update_job(job.id, status='queued')
+    download_video(job)
+    return True
+
+
+# True while a video job still has no title, which is the whole test download_video() applies before
+# spending a metadata lookup. Any other field missing from the row goes unnoticed.
+def needs_video_metadata(job: Download) -> bool:
+    return not job.title
+
+
+# Re-read from the database on every call: the flag is set by the web process, not this one.
+def is_cancelled(job_id: int) -> bool:
+    with Session() as db:
+        job = db.get(Download, job_id)
+        return bool(job and job.cancel_requested)
+
+
+# Re-home jobs left in RESTART_RECOVERY_STATUSES by an unclean restart.
+def recover_stuck_jobs() -> None:
+    with Session() as db:
+        stuck_jobs = db.query(Download).filter(Download.status.in_(RESTART_RECOVERY_STATUSES)).all()
+
+        if not stuck_jobs:
+            log('No stuck jobs to recover')
+            return
+
+        for job in stuck_jobs:
+            log(f'Recovering stuck job {job.id} ({job.request_type}) status={job.status}')
+
+            # Whatever the interrupted job reported last is stale by definition.
+            job.progress = None
+            job.speed = None
+
+            if job.cancel_requested:
+                job.status = 'cancelled'
+                job.error = 'Cancelled during restart'
+            else:
+                job.error = None
+                # Interrupted mid-expansion; 'expanding' keeps the UI showing discovery pending.
+                if job.request_type in PARENT_REQUEST_TYPES and not job.children:
+                    job.status = 'expanding'
+                else:
+                    job.status = 'queued'
+
+        db.commit()
+        log(f'Recovered {len(stuck_jobs)} stuck job(s)')
+
+
+
+# Populate metadata for parent jobs still missing a title, e.g. queued before discovery ran.
+def populate_missing_parent_metadata() -> None:
+    with Session() as db:
+        parents = (
+            db.query(Download)
+            .filter(Download.request_type.in_(PARENT_REQUEST_TYPES), Download.title.is_(None))
+            .all()
+        )
+
+        # Only parents that already expanded: one still waiting to expand gets its title from
+        # that pass anyway, and discovering it here would spend a network call to duplicate it.
+        candidates = [p for p in parents if p.children]
+        # Logged unconditionally: each candidate costs a network round trip bounded only by
+        # COMMAND_TIMEOUT_SECONDS, which would otherwise be a silent gap in the log.
+        if candidates:
+            log(f'populate_missing_parent_metadata: {len(candidates)} parent(s) missing a title, discovering...')
+
+        updated = 0
+        for parent in candidates:
+            log(f'populate_missing_parent_metadata: discovering metadata for parent {parent.id} ({parent.url})')
+
+            # Guarded per parent so one unreachable URL doesn't abandon the rest of the batch;
+            # a parent that fails simply keeps its missing title and is retried next cycle.
+            metadata = None
+            try:
+                metadata = discover_metadata(parent)
+            except Exception as exc:
+                log_error(f'populate_missing_parent_metadata: parent {parent.id} failed', exc)
+
+            if metadata:
+                apply_metadata(parent, metadata)
+                updated += 1
+
+        if updated:
+            log(f'Populated metadata for {updated} parent job(s)')
+
+
+# =======================================================
+#               PARENT STATUS AGGREGATION
+# =======================================================
+
+# Bring a parent's stored status in line with its children, using the shared rule from jobstate
+# so the row and the UI cannot disagree. True once the parent has settled into a terminal state.
+# Mutates the row in the caller's session and leaves the commit to them.
+def sync_parent_status(parent: Download) -> bool:
+    resolved = resolve_parent_status(parent)
+
+    # Nothing to derive from (no children yet), or the parent carries a display-only state.
+    if not resolved or resolved not in STORABLE_STATUSES:
+        return False
+
+    parent.status = resolved
+
+    # Record when the parent settled, and clear it again if a redownload reopened the job.
+    if resolved in TERMINAL_STATUS_SET:
+        parent.completed_at = parent.completed_at or utcnow()
+        # A settled parent has nothing left to cancel, and a stale flag would make
+        # compute_effective_status() report 'cancel requested' over the real outcome forever.
+        parent.cancel_requested = False
+        return True
+
+    parent.completed_at = None
+    return False
+
+
+# Settle a child's parent now that the child has stopped, marking the parent finished once none
+# of its children have work left. Returns True when the parent has just reached a terminal state.
+def finalize_parent_if_done(child_job_id: int) -> bool:
+    with Session() as db:
+        child = db.get(Download, child_job_id)
+
+        if not child or not child.parent_id:
+            return False
+
+        parent = db.get(Download, child.parent_id)
+
+        if not parent:
+            return False
+
+        # Any child still active -- 'redownload' and 'expanding' too -- keeps the parent going.
+        finished = sync_parent_status(parent)
+        db.commit()
+
+    if finished:
+        try:
+            compute_and_persist_parent_progress(parent.id)
+        except Exception as exc:
+            log_error(f'Failed to aggregate progress for parent {parent.id}', exc)
+
+    return finished
+
+
+# Persist a parent's aggregate progress and speed so a reader of the row sees the same numbers
+# the UI computes. The aggregation rules live in jobstate.py, shared with the web app.
+def compute_and_persist_parent_progress(parent_id: int) -> None:
+    with Session() as db:
+        parent = db.get(Download, parent_id)
+        if not parent or not parent.children:
+            return
+
+        progress_str = compute_parent_progress(parent)
+        speed_str = compute_parent_speed(parent)
+
+        # Persist only if values changed to avoid noisy DB commits
+        changed = False
+        if progress_str != parent.progress:
+            parent.progress = progress_str
+            changed = True
+        if speed_str != parent.speed:
+            parent.speed = speed_str
+            changed = True
+        if changed:
+            db.commit()
+
+
+# =======================================================
+#            PLAYLIST AND CHANNEL EXPANSION
+# =======================================================
+
+# Scan a playlist or channel URL for the video IDs it contains, without downloading anything.
+# Returns (ids, error_message); exactly one of the two is meaningful.
+def scan_video_ids(url: str) -> tuple[list[str], Optional[str]]:
+    log(f'Scanning: {url}')
+
+    command = [
+        'yt-dlp',
+        *ytdlp_common_args(),
+        '--flat-playlist',
+        '--print',
+        '%(id)s',
+        url,
+    ]
+
+    try:
+        result = run_command(command)
+    except subprocess.TimeoutExpired:
+        # Reported rather than raised: propagating leaves the job, and the loop, stuck.
+        return [], f'Timed out after {COMMAND_TIMEOUT_SECONDS}s scanning playlist/channel'
+    except subprocess.CalledProcessError as exc:
+        return [], exc.stderr or str(exc)
+
+    # Normalized so they match stored youtube_id values.
+    ids = [normalize_youtube_id(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    return ids, None
+
+
+# Scan on behalf of a stored job, recording any failure against that job.
+def run_scan(job: Download) -> list[str]:
+    ids, error = scan_video_ids(job.url)
+
+    # A scan that could not run at all is a job failure; an empty playlist is handled by the caller.
+    if error:
+        update_job(job.id, status='failed', error=error)
+        return []
+
+    log(f'run_scan: found {len(ids)} ids for job {job.id}')
+    return ids
+
+
+# Re-derive a parent's status from its known children without touching YouTube, so a failed
+# expansion leaves it reflecting reality rather than stuck mid-transition.
+def resume_from_existing_children(job_id: int, reason: str) -> None:
+    log(f'Job {job_id}: {reason}, resuming with existing children')
+    with Session() as db:
+        parent = db.get(Download, job_id)
+        if parent:
+            sync_parent_status(parent)
+            db.commit()
+
+
+# Expand a playlist or channel job into one child download job per video it contains.
+def expand_playlist(job: Download) -> None:
+    log(f'Expanding playlist/channel job {job.id}: {job.url}')
+
+    # A parent that already has children is being re-scanned (retry, redownload, interrupted
+    # expansion): every failure below falls back to those children rather than failing the
+    # parent, so a network hiccup cannot discard a set of perfectly good queued children.
+    with Session() as db:
+        db_job = db.get(Download, job.id)
+        already_has_children = bool(db_job.children) if db_job else False
+
+    update_job(job.id, status='expanding')
+
+    metadata = discover_metadata(job, fail_on_error=not already_has_children)
+
+    # A cancel that arrived during discovery still applies.
+    with Session() as db:
+        db_parent = db.get(Download, job.id)
+        if db_parent and db_parent.cancel_requested:
+            update_job(job.id, status='cancelled', error='Cancelled by user')
+            log(f'Parent job {job.id} cancelled during discovery')
+            return
+
+    if not metadata:
+        if already_has_children:
+            resume_from_existing_children(job.id, 'metadata refresh failed')
+            return
+        warn(f'Failed to discover playlist/channel metadata for job {job.id}')
+        update_job(job.id, status='failed', error='Failed to discover playlist/channel')
+        return
+
+    apply_metadata(job, metadata)
+
+    # Scanned directly, not via run_scan(), which fails the job on error before this function
+    # gets its chance to fall back to existing children.
+    video_ids, scan_error = scan_video_ids(job.url)
+
+    # A channel scan can run for minutes, so the cancel is re-read here rather than trusted from
+    # before it: creating hundreds of children for a request the user already cancelled is worse
+    # than losing the scan.
+    with Session() as db:
+        db_parent = db.get(Download, job.id)
+        if db_parent and db_parent.cancel_requested:
+            update_job(job.id, status='cancelled', error='Cancelled by user')
+            log(f'Parent job {job.id} cancelled after scan')
+            return
+
+    # A failed or empty scan falls back to children from an earlier run where there are any --
+    # YouTube rate-limiting a re-scan must not strip a playlist that already expanded.
+    if scan_error:
+        if already_has_children:
+            resume_from_existing_children(job.id, f'scan failed ({scan_error})')
+            return
+        update_job(job.id, status='failed', error=scan_error)
+        return
+
+    if not video_ids:
+        if already_has_children:
+            resume_from_existing_children(job.id, 'scan returned no videos')
+            return
+        log(f'No videos found during scan for job {job.id}')
+        update_job(job.id, status='failed', error='No videos found')
+        return
+
+    # Indexes are backfilled after the children exist, and from the same id list, so episode
+    # numbers follow the order the scan returned rather than the order rows happened to be made.
+    log(f'expand_playlist: creating children for parent {job.id}, video_ids_count={len(video_ids)}')
+    created = create_child_jobs(job, video_ids)
+    backfill_playlist_indexes(job.id, video_ids)
+    log(f'Created {created} child jobs for parent job {job.id}')
+
+
+# Create one child Download per video, without duplicating videos that already have a row.
+def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
+    # Materialized so the IDs can be iterated more than once below.
+    video_ids = list(video_ids)
+
+    if not video_ids:
+        update_job(parent.id, status='failed', error='No videos found')
+        return 0
+
+    with Session() as db:
+        parent = db.get(Download, parent.id)
+
+        if not parent:
+            return 0
+
+        if parent.cancel_requested:
+            parent.status = 'cancelled'
+            db.commit()
+            return 0
+
+        # Every row for these videos in one query, split into two sets: already a child of this
+        # parent (skip it), and present anywhere else (adopt rather than download a second copy).
+        # One query, because a per-video lookup makes a 500-video playlist 500 round trips.
+        matches = db.query(Download).filter(Download.youtube_id.in_(video_ids)).all()
+        existing_ids_all = {d.youtube_id for d in matches if d.youtube_id}
+        existing_ids_parent = {d.youtube_id for d in matches if d.youtube_id and d.parent_id == parent.id}
+        log(f'create_child_jobs: parent={parent.id} video_ids={len(video_ids)} existing_all={len(existing_ids_all)} existing_parent={len(existing_ids_parent)}')
+
+        added = 0
+        adopted = 0
+
+        # Only a playlist's scan order is a curated sequence worth keeping as playlist_index;
+        # channel children get theirs from resequence_channel_index, in upload_date order.
+        index_children = parent.request_type == 'playlist'
+        # Channel children share one per-channel library folder; playlist children become
+        # episodes of a show via playlist_id instead.
+        group_by_channel = parent.request_type == 'channel'
+
+        # One commit at the end: committing per video turns a 500-video playlist into 500
+        # transactions and 500 extra parent lookups.
+        for playlist_index, video_id in enumerate(video_ids, start=1):
+            if video_id in existing_ids_parent:
+                existing_child = next(
+                    (d for d in matches if d.youtube_id == video_id and d.parent_id == parent.id), None
+                )
+                if existing_child and existing_child.playlist_index is None and index_children:
+                    existing_child.playlist_index = playlist_index
+                continue
+
+            # Every unparented row for this video is adopted, not just the first: rows may share
+            # a youtube_id, and skipping the rest leaves a duplicate filed separately on disk.
+            # The associations mirror the fresh child below, or it organizes as a movie.
+            existing_unparented_rows = [d for d in matches if d.youtube_id == video_id and d.parent_id is None]
+            if existing_unparented_rows:
+                for existing_unparented in existing_unparented_rows:
+                    existing_unparented.parent_id = parent.id
+                    existing_unparented.playlist_id = parent.playlist_id
+                    existing_unparented.channel_id = parent.channel_id
+                    existing_unparented.group_by_channel = group_by_channel
+                    existing_unparented.playlist_index = playlist_index if index_children else None
+                    # An adopted video may already sit in the library as its own movie; clearing
+                    # organized_at refiles it under the playlist's show or the channel's folder.
+                    if existing_unparented.organized_at is not None:
+                        existing_unparented.organized_at = None
+                    adopted += 1
+                    log(f'Adopted existing download {existing_unparented.id} into parent {parent.id}')
+                continue
+
+            # A fresh child, even when the video already exists under another parent.
+            db.add(Download(
+                url=f'https://www.youtube.com/watch?v={video_id}',
+                youtube_id=video_id,
+                request_type='video',
+                parent_id=parent.id,
+                playlist_id=parent.playlist_id,
+                channel_id=parent.channel_id,
+                group_by_channel=group_by_channel,
+                playlist_index=playlist_index if index_children else None,
+                status='queued',
+            ))
+            added += 1
+
+        # Make the new rows visible on parent.children before the status is derived from them.
+        db.flush()
+        db.refresh(parent)
+
+        # A cancel that arrived while the children were being created applies to all of them.
+        if parent.cancel_requested:
+            for child in parent.children:
+                if child.status in ACTIVE_STATUS_SET:
+                    child.status = 'cancelled'
+                    child.cancel_requested = True
+                    child.progress = None
+                    child.speed = None
+            parent.status = 'cancelled'
+            db.commit()
+            log(f'Parent {parent.id}: cancelled during child creation')
+            return added
+
+        # Adopted children may already carry an upload_date, so their order is known now.
+        if group_by_channel and parent.channel_id:
+            resequence_channel_index(db, parent.channel_id)
+
+        # The shared rule covers freshly queued children, adopted children already finished, and
+        # a playlist that was fully downloaded before.
+        if parent.children:
+            sync_parent_status(parent)
+        else:
+            # Nothing attached at all: queued, so the worker revisits rather than sitting in
+            # 'expanding' forever.
+            parent.status = 'queued'
+
+        db.commit()
+        log(f'create_child_jobs: parent={parent.id} added={added} adopted={adopted} status={parent.status}')
+
+    return added
+
+
+# Create download jobs for a subscription, skipping videos that already have a row. queue=False
+# still creates them, as SKIPPED_STATUS, so a later scan cannot mistake them for new.
+def create_download_jobs_for_subscription(db, subscription: Subscription, video_ids: Iterable[str], queue: bool = True) -> int:
+    if not video_ids:
+        return 0
+
+    video_ids = list(video_ids)
+    group_by_channel = subscription.subscription_type == 'channel'
+
+    # Full rows, not just ids, so a standalone download can be adopted rather than skipped. A
+    # list per id, since rows may share a youtube_id and only the last would ever be seen.
+    existing_by_id: dict[str, list[Download]] = {}
+    for row in db.query(Download).filter(Download.youtube_id.in_(video_ids)).all():
+        if row.youtube_id:
+            existing_by_id.setdefault(row.youtube_id, []).append(row)
+
+    added = 0
+    adopted = 0
+    for video_id in video_ids:
+        existing_rows = existing_by_id.get(video_id)
+        if existing_rows:
+            any_unparented = False
+            for existing in existing_rows:
+                # A video already parented by another playlist/channel expansion stays put.
+                if existing.parent_id is not None:
+                    continue
+                any_unparented = True
+                # Only associations this subscription has an opinion about: a channel one's
+                # playlist_id is always None, and that None must not overwrite a real value.
+                needs_update = (
+                    (subscription.channel_id is not None and existing.channel_id != subscription.channel_id)
+                    or (subscription.playlist_id is not None and existing.playlist_id != subscription.playlist_id)
+                    or existing.group_by_channel != group_by_channel
+                )
+                if not needs_update:
+                    continue
+                if subscription.channel_id is not None:
+                    existing.channel_id = subscription.channel_id
+                if subscription.playlist_id is not None:
+                    existing.playlist_id = subscription.playlist_id
+                existing.group_by_channel = group_by_channel
+                # Clearing organized_at refiles it into the shared folder, as in create_child_jobs.
+                if existing.organized_at is not None:
+                    existing.organized_at = None
+                adopted += 1
+                log(f'Adopted existing download {existing.id} into subscription {subscription.id}')
+            if any_unparented:
+                continue
+
+        download = Download(
+            url=f'https://www.youtube.com/watch?v={video_id}',
+            request_type='video',
+            youtube_id=video_id,
+            channel_id=subscription.channel_id,
+            playlist_id=subscription.playlist_id,
+            group_by_channel=group_by_channel,
+            status='queued' if queue else SKIPPED_STATUS,
+        )
+        db.add(download)
+        added += 1
+
+    # Adopted videos may already carry an upload_date, as in create_child_jobs.
+    if group_by_channel and subscription.channel_id and (added or adopted):
+        resequence_channel_index(db, subscription.channel_id)
+
+    # Committing is left to check_subscriptions, which shares this session and commits once per
+    # subscription. A second Session() here would deadlock against it: SQLite takes one writer.
+    if added or adopted:
+        verb = 'Queued' if queue else 'Recorded (not queued)'
+        log(f'{verb} {added} new and adopted {adopted} existing download(s) for subscription {subscription.id}')
+
+    return added
+
+
+# =======================================================
+#        PERIODIC TASKS: RETRY AND SUBSCRIPTIONS
+# =======================================================
+
+# Attempt count and earliest next retry per top-level job. In memory, so a restart retries at
+# once -- which is what a restart should do.
+_retry_backoff: dict[int, tuple[int, float]] = {}
+
+
+# Automatically retry every failed top-level job. Genuine failures only, never an explicit user
+# cancel, unlike the manual Retry button. Each retry of the same job waits twice as long as the
+# last, or a permanently dead video costs a YouTube request every five minutes forever.
+def retry_failed_jobs() -> None:
+    now = time.monotonic()
+
+    with Session() as db:
+        # A parent qualifies on its own stored 'failed' status or on any child's, since the
+        # parent's stored status may not have caught up yet -- see resolve_parent_status.
+        candidates = (
+            db.query(Download)
+            .filter(
+                Download.parent_id.is_(None),
+                or_(
+                    Download.status == 'failed',
+                    Download.id.in_(
+                        db.query(Download.parent_id).filter(
+                            Download.parent_id.isnot(None),
+                            Download.status == 'failed',
+                        )
+                    ),
+                ),
+            )
+            .all()
+        )
+
+        # A job that is no longer failing starts from the shortest delay again.
+        candidate_ids = {job.id for job in candidates}
+        for job_id in list(_retry_backoff):
+            if job_id not in candidate_ids:
+                del _retry_backoff[job_id]
+
+        retried = 0
+        deferred = 0
+        for job in candidates:
+            # A job still inside its backoff window is counted and skipped, not reset.
+            attempts, retry_after = _retry_backoff.get(job.id, (0, 0.0))
+            if now < retry_after:
+                deferred += 1
+                continue
+
+            # Only 'failed' is passed, never 'cancelled': an explicit cancel must not be undone
+            # by an automatic retry. A parent shows queued while its children rerun.
+            if apply_status_update_to_hierarchy(job, lambda target: reset_job_for_retry(target, frozenset({'failed'}))):
+                if job.children:
+                    job.status = 'queued'
+                retried += 1
+
+            # The window doubles per attempt whether or not this pass reset anything, so a
+            # permanently dead video backs off to RETRY_BACKOFF_MAX_SECONDS instead of retrying
+            # on every cycle forever.
+            delay = min(RETRY_INTERVAL_SECONDS * 2 ** attempts, RETRY_BACKOFF_MAX_SECONDS)
+            _retry_backoff[job.id] = (attempts + 1, now + delay)
+
+        if retried or deferred:
+            log(f'Auto-retried {retried} failed job(s), {deferred} still backing off')
+        db.commit()
+
+
+# Consecutive failed checks per subscription id, cleared by a successful scan. In memory, so a
+# worker restart starts every count from zero and can delay the ERROR by up to two more checks.
+_subscription_failures: dict[int, int] = {}
+
+# Every this-many consecutive failed checks of one subscription log ERROR rather than WARN: one
+# failed scan is usually a proxy or rate-limit blip, a run of them needs a human.
+SUBSCRIPTION_FAILURES_BEFORE_ERROR = 3
+
+
+# Log one failed check of a subscription and count it: WARN, except on every
+# SUBSCRIPTION_FAILURES_BEFORE_ERROR-th failure in a row, which logs ERROR so the alert pages.
+def record_subscription_failure(subscription_id: int, detail: str) -> None:
+    count = _subscription_failures.get(subscription_id, 0) + 1
+    _subscription_failures[subscription_id] = count
+    if count % SUBSCRIPTION_FAILURES_BEFORE_ERROR == 0:
+        log_error(f'Subscription {subscription_id}: {count} consecutive checks failed, latest: {detail}')
+    else:
+        warn(f'Subscription {subscription_id}: {detail}')
+
+
+# Forget a subscription's run of failed checks once a scan of it succeeds.
+def clear_subscription_failures(subscription_id: int) -> None:
+    _subscription_failures.pop(subscription_id, None)
+
+
+# Scan every enabled subscription for new videos and stamp its last_checked. A failed resolve or
+# scan counts towards that subscription's run of failures; see record_subscription_failure().
+def check_subscriptions() -> None:
+    log('Checking subscriptions')
+
+    with Session() as db:
+        subscriptions = (
+            db.query(Subscription)
+            .filter(Subscription.enabled.is_(True))
+            .all()
+        )
+
+        for subscription in subscriptions:
+            # Each subscription costs at least one yt-dlp call, so a long list keeps the main loop
+            # -- and its heartbeat -- waiting for minutes at a time.
+            touch_heartbeat()
+            try:
+                if not is_safe_url(subscription.url):
+                    warn(f'Subscription {subscription.id}: refusing unsupported URL {subscription.url!r}')
+                    continue
+
+                # An unresolved subscription has both ids unset, leaving every video it creates
+                # with no channel or playlist. Retried every scan until it succeeds once.
+                if subscription.channel_id is None and subscription.playlist_id is None:
+                    if not resolve_subscription_target(db, subscription):
+                        continue
+
+                # Not run_scan(): there is no Download row to record a failure against.
+                video_ids, error = scan_video_ids(subscription.url)
+                if error:
+                    record_subscription_failure(subscription.id, f'scan failed: {error}')
+                else:
+                    clear_subscription_failures(subscription.id)
+
+                if video_ids:
+                    # "Only new videos from now on" happens on the first scan: the current
+                    # lineup is recorded as a baseline, never queued.
+                    is_first_scan = subscription.last_checked is None
+                    queue_now = subscription.backfill_existing or not is_first_scan
+                    create_download_jobs_for_subscription(db, subscription, video_ids, queue=queue_now)
+                subscription.last_checked = utcnow()
+                db.add(subscription)
+                # Each subscription commits as its own unit rather than one giant commit.
+                db.commit()
+            except Exception as exc:
+                # Without the rollback, one failure breaks the session for every subscription
+                # still to come in this run.
+                db.rollback()
+                log_error(f'Subscription {subscription.id} check failed', exc)
+
+
+# =======================================================
+#           INDEX BACKFILLS AND RESEQUENCING
+# =======================================================
+
+# Fill in playlist_index from scan order for children that have none; existing indexes are kept.
+def backfill_playlist_indexes(parent_id: int, video_ids: Iterable[str]) -> None:
+    if not video_ids:
+        return
+
+    # Scan position is the episode number, so the mapping is built from the order yt-dlp
+    # returned rather than from anything stored.
+    mapping = {video_id: idx for idx, video_id in enumerate(list(video_ids), start=1)}
+
+    with Session() as db:
+        parent = db.get(Download, parent_id)
+        if not parent:
+            return
+
+        # Only children with no index yet: overwriting would renumber episodes already filed
+        # under their old number in the library.
+        updated = False
+        for child in parent.children:
+            if child.playlist_index is None and child.youtube_id in mapping:
+                child.playlist_index = mapping[child.youtube_id]
+                updated = True
+
+        # Committed only when something changed, so a re-scan of a settled playlist takes no
+        # write lock at all.
+        if updated:
+            db.commit()
+
+
+# Recompute playlist_index for a channel's videos in upload_date order, since a channel listing
+# is no curated sequence. Rewritten in full, as a newly found older video shifts every later
+# one. Takes an open session and does not commit, so it composes with the caller.
+def resequence_channel_index(db, channel_id: int) -> None:
+    videos = (
+        db.query(Download)
+        .filter(
+            Download.channel_id == channel_id,
+            Download.group_by_channel.is_(True),
+            Download.upload_date.isnot(None),
+        )
+        .order_by(Download.upload_date, Download.id)
+        .all()
+    )
+    for index, video in enumerate(videos, start=1):
+        if video.playlist_index != index:
+            video.playlist_index = index
+
+
+# Backfill playlist_index for playlist parents whose children lack one. Each parent costs a
+# network round trip. Playlists only: channel children keep it NULL, so they would match forever.
+def backfill_all_playlist_indexes() -> None:
+    with Session() as db:
+        parents = (
+            db.query(Download)
+            .filter(
+                Download.request_type == 'playlist',
+                Download.id.in_(
+                    db.query(Download.parent_id).filter(
+                        Download.parent_id.isnot(None),
+                        Download.playlist_index.is_(None),
+                    )
+                ),
+            )
+            .all()
+        )
+
+    # Logged unconditionally, same reasoning as populate_missing_parent_metadata.
+    if parents:
+        log(f'backfill_all_playlist_indexes: {len(parents)} playlist(s) missing an index, scanning...')
+
+    for parent in parents:
+        log(f'backfill_all_playlist_indexes: scanning parent {parent.id} ({parent.url})')
+        try:
+            video_ids = run_scan(parent)
+            if video_ids:
+                backfill_playlist_indexes(parent.id, video_ids)
+        except Exception as exc:
+            log_error(f'Failed to backfill playlist indexes for parent {parent.id}', exc)
+
+
+# Resequence every channel with at least one group_by_channel video, catching up any never
+# resequenced. Pure database work, so it is cheap enough to run for every channel on startup.
+def resequence_all_channel_indexes() -> None:
+    with Session() as db:
+        channel_ids = [
+            row[0]
+            for row in db.query(Download.channel_id)
+            .filter(Download.group_by_channel.is_(True), Download.channel_id.isnot(None))
+            .distinct()
+            .all()
+        ]
+        for channel_id in channel_ids:
+            resequence_channel_index(db, channel_id)
+        if channel_ids:
+            db.commit()
+
+
+# Backfill youtube_id for video jobs created before the ID was recorded at queue time. Without
+# one the organizer's "[id]" filename tag reads "[None]" and its existing-file lookups have no key.
+def backfill_missing_youtube_ids() -> None:
+    with Session() as db:
+        jobs = (
+            db.query(Download)
+            .filter(Download.request_type == 'video', Download.youtube_id.is_(None))
+            .all()
+        )
+
+        updated = 0
+        for job in jobs:
+            youtube_id = extract_youtube_id(job.url)
+            if youtube_id:
+                job.youtube_id = youtube_id
+                updated += 1
+
+        if updated:
+            db.commit()
+            log(f'Backfilled youtube_id for {updated} video job(s)')
+
+
+# =======================================================
+#                 DOWNLOADING ONE VIDEO
+# =======================================================
+
+# Only a child of a 'channel' request gets the per-uploader subfolder; everything else is flat.
+def resolve_output_template(job: Download) -> str:
+    if job.parent_id:
+        with Session() as db:
+            parent = db.get(Download, job.parent_id)
+            if parent and parent.request_type == 'channel':
+                return OUTPUT_TEMPLATE_CHANNEL
+    return OUTPUT_TEMPLATE_FLAT
+
+
+# The -P/-o arguments that put a download's finished files in staging and its intermediates under
+# STAGING_TEMP. The template stays relative: yt-dlp ignores -P whenever -o is an absolute path.
+def ytdlp_output_args(output_template: str) -> list[str]:
+    return ['-P', f'home:{DOWNLOAD_PATH}', '-P', f'temp:{STAGING_TEMP}', '-o', output_template]
+
+
+# Ask yt-dlp what it would name this job's output, using the download's own ytdlp_output_args() so
+# both agree on the path. A caller that already resolved the template passes it in rather than
+# have it looked up again.
+def resolve_expected_output_path(job: Download, output_template: Optional[str] = None) -> Optional[Path]:
+    output_template = output_template or resolve_output_template(job)
+    filename_cmd = [
+        'yt-dlp',
+        *ytdlp_common_args(),
+        '--get-filename',
+        *ytdlp_output_args(output_template),
+        job.url,
+    ]
+
+    try:
+        result = run_command(filename_cmd)
+    except subprocess.TimeoutExpired:
+        warn(f'Job {job.id}: timed out determining expected filename after {COMMAND_TIMEOUT_SECONDS}s for {job.url}')
+        return None
+    except subprocess.CalledProcessError as exc:
+        warn(f'Job {job.id}: failed to determine expected filename: {exc}')
+        return None
+
+    # Indexing straight into splitlines() raises IndexError when yt-dlp prints nothing at all.
+    output_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not output_lines:
+        warn(f'Job {job.id}: yt-dlp returned empty expected filename for {job.url}')
+        return None
+
+    expected_path = Path(output_lines[0])
+    if not expected_path.is_absolute():
+        expected_path = DOWNLOAD_PATH / expected_path
+    return expected_path
+
+
+# Find the media file produced for a job, preferring the exact path yt-dlp said it would write.
+# Confined to staging: a match in the library is a file the organizer already filed.
+def find_downloaded_video_file(job: Download, expected_path: Optional[Path] = None) -> Optional[Path]:
+    if expected_path and is_media_file(expected_path):
+        return expected_path
+    return find_existing_media(job, search_paths=[DOWNLOAD_PATH])
+
+
+# Where yt-dlp reports job `job_id`'s final media path. tempfile.gettempdir() is the /tmp tmpfs in
+# the container, so the report never reaches the SD card.
+def final_path_file(job_id: int) -> Path:
+    return Path(tempfile.gettempdir()) / f'ytm-job-{job_id}.path'
+
+
+# The media path yt-dlp last appended to `path_file`, or None when the file is missing, unreadable
+# or empty, or its last line is not finished media inside DOWNLOAD_PATH.
+def read_final_path(path_file: Path) -> Optional[Path]:
+    try:
+        text = path_file.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return None
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    # normpath first, so a '..' segment cannot pass the lexical containment test.
+    reported = Path(os.path.normpath(lines[-1]))
+    if reported.is_relative_to(DOWNLOAD_PATH) and is_media_file(reported):
+        return reported
+    return None
+
+
+# Delete a job's final-path file if it exists, logging rather than raising on failure. yt-dlp
+# appends to the file, so one left by an earlier attempt would be read back as this one's report.
+def discard_final_path_file(path_file: Path) -> None:
+    try:
+        path_file.unlink(missing_ok=True)
+    except OSError as exc:
+        warn(f'Could not remove {path_file}: {exc}')
+
+
+# The yt-dlp argv for one video, writing into staging under `output_template`. The sidecars it
+# requests (description, info.json, thumbnail) are what the organizer reads to build the NFO, and
+# the final media path goes to final_path_file(job_id). `url` becomes a positional argument, so
+# callers must screen it through is_safe_url() first.
+def build_download_command(url: str, output_template: str, job_id: int) -> list[str]:
+    command = [
+        'yt-dlp',
+        *ytdlp_common_args(),
+        '--remote-components',
+        'ejs:github',
+        '--write-description',
+        '--write-info-json',
+        '--write-thumbnail',
+        '--embed-thumbnail',
+        '--embed-metadata',
+        '--convert-thumbnails',
+        'jpg',
+        *ytdlp_output_args(output_template),
+        # after_move fires once the file sits in staging, already-downloaded ones included. Unlike
+        # --print, this implies neither --quiet nor --simulate, so progress output keeps flowing.
+        '--print-to-file',
+        'after_move:filepath',
+        str(final_path_file(job_id)),
+    ]
+
+    if PROXY:
+        command.extend(['--proxy', PROXY])
+
+    command.append(url)
+
+    return command
+
+
+# Fold a yt-dlp .info.json sidecar into the job's database row, which is how the full yt-dlp
+# record survives for the organizer's NFO once the sidecar itself has been cleaned up. A sidecar
+# whose id is not the row's is refused with a WARN (False, nothing folded in): it would rewrite
+# the row's identity.
+def apply_metadata_from_info_file(job: Download, info_path: Optional[Path]) -> bool:
+    if not info_path or not info_path.exists():
+        return False
+
+    try:
+        with open(info_path, 'r', encoding='utf-8') as fh:
+            info = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        warn(f'Job {job.id}: failed to read metadata sidecar {info_path}: {exc}')
+        return False
+
+    # Compared with the row, not `job`: apply_metadata() writes the id through its own session.
+    with Session() as db:
+        row = db.get(Download, job.id)
+        row_id = normalize_youtube_id(row.youtube_id) if row else None
+    info_id = normalize_youtube_id(info.get('id')) if isinstance(info, dict) else None
+    if row_id and info_id != row_id:
+        warn(f'Job {job.id}: not applying {info_path}, it describes {info_id!r} rather than {row_id!r}')
+        return False
+
+    apply_metadata(job, info)
+    return True
+
+
+# Record a finished download: point the job at its media file, capture the metadata yt-dlp wrote
+# beside it, mark it completed. The final 100% is written here, not from the progress stream,
+# which reaches 100% once per format the download merges.
+def record_completed_download(job: Download, media_path: Path) -> None:
+    info_path = media_path.with_name(media_path.stem + '.info.json')
+    log(f'Job {job.id}: download completed, recorded filename {media_path}')
+
+    update_job(
+        job.id,
+        status='completed',
+        completed_at=utcnow(),
+        progress='100%',
+        filename=str(media_path),
+        metadata_file=str(info_path) if info_path.exists() else None,
+    )
+
+    apply_metadata_from_info_file(job, info_path)
+
+
+# Shared tail for a stopped video job: settle its parent, then file whatever is ready.
+def finalize_after_download(job: Download) -> None:
+    parent_completed = finalize_parent_if_done(job.id)
+
+    # Child videos are only organized once their whole parent is done.
+    if job.parent_id and not parent_completed:
+        return
+
+    try:
+        append_log(job.id, 'Organizer: running scan after completion')
+        organizer_scan_and_process(dry_run=False)
+    except Exception as exc:
+        log_error('Organizer run failed', exc)
+
+
+# Remove what a cancelled download left in staging; see organizer.remove_staging_leftovers().
+# A failure is logged at WARN and swallowed, so it never turns the cancel into a failed job.
+def remove_cancelled_leftovers(job: Download) -> None:
+    try:
+        organizer_remove_staging_leftovers(job)
+    except Exception as exc:
+        warn(f'Job {job.id}: could not remove staging leftovers: {exc}')
+
+
+# Download one video job to completion, in the caller's thread: adopt an existing file if staging
+# already has one, fetch metadata, run yt-dlp while streaming its output into the job row, record
+# the file yt-dlp reports, then hand off to the organizer. Blocks for the whole download. Reports
+# outcome by writing the row's status rather than returning it, and swallows its own failures so
+# the worker loop survives.
+def download_video(job: Download) -> None:
+    log(f'Downloading: {job.url}')
+
+    # Resolved first so an already-downloaded file is found before any bandwidth is spent. None
+    # only means the pre-check could not run.
+    output_template = resolve_output_template(job)
+    expected_path = resolve_expected_output_path(job, output_template)
+
+    # Media already in the staging directory is adopted instead of downloaded again.
+    actual_media_path = find_downloaded_video_file(job, expected_path)
+    if actual_media_path:
+        log(f'Job {job.id}: existing downloaded media found at {actual_media_path}, marking completed')
+        record_completed_download(job, actual_media_path)
+        finalize_after_download(job)
+        return
+
+    log(f'Job {job.id}: no existing downloaded media found for expected path {expected_path}, continuing to download')
+
+    # Metadata before bytes, so the organizer has a title and id to file by even if the download
+    # later fails. Non-fatal: yt-dlp writes an .info.json alongside the video anyway, which
+    # apply_metadata_from_info_file() folds in once the download finishes.
+    if needs_video_metadata(job):
+        update_job(job.id, status='metadata')
+        metadata = discover_metadata(job, fail_on_error=False)
+
+        if metadata:
+            apply_metadata(job, metadata)
+
+    # The lookups above can spend two COMMAND_TIMEOUT_SECONDS on the network, long enough for a
+    # cancel to arrive before a single byte is fetched.
+    if is_cancelled(job.id):
+        update_job(job.id, status='cancelled', error='Cancelled by user')
+        remove_cancelled_leftovers(job)
+        finalize_parent_if_done(job.id)
+        return
+
+    update_job(job.id, status='downloading')
+
+    command = build_download_command(job.url, output_template, job.id)
+    path_file = final_path_file(job.id)
+    discard_final_path_file(path_file)
+
+    try:
+        # start_new_session so the download and the ffmpeg it forks form one signallable process
+        # group. encoding='utf-8' explicit for the same reason as run_command().
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            start_new_session=True,
+        )
+    except Exception as exc:
+        log_error('Failed to start yt-dlp', exc)
+        update_job(job.id, status='failed', error=str(exc))
+        return
+
+    try:
+        outcome, last_error_line = stream_process_output(process, job.id)
+    except Exception as error:
+        log_error(f'Job {job.id}: download failed', error)
+        update_job(job.id, status='failed', error=str(error))
+        finalize_parent_if_done(job.id)
+        return
+    finally:
+        # stream_process_output leaves nothing running, but a raise on the way there would
+        # orphan a yt-dlp that keeps writing into staging with nothing watching it.
+        terminate_process_group(process)
+        if process.stdout:
+            process.stdout.close()
+        # The path file is read only once yt-dlp has exited, then deleted whatever the outcome.
+        reported_path = read_final_path(path_file)
+        discard_final_path_file(path_file)
+
+    if outcome == 'cancelled':
+        update_job(job.id, status='cancelled', error='Cancelled by user')
+        remove_cancelled_leftovers(job)
+        finalize_parent_if_done(job.id)
+        return
+
+    # A shutdown is nobody's failure: the job goes back on the queue for the next start.
+    if outcome == 'shutdown':
+        update_job(job.id, status='queued')
+        return
+
+    if outcome == 'stalled':
+        update_job(job.id, status='failed', error=f'No yt-dlp output for {DOWNLOAD_STALL_TIMEOUT_SECONDS}s')
+    elif process.returncode == 0:
+        # yt-dlp's own report is authoritative. The lookup by predicted name and '[id]' tag only
+        # stands in when --print-to-file wrote nothing usable.
+        media_path = reported_path
+        if not media_path:
+            warn(f'Job {job.id}: yt-dlp reported no usable final path in {path_file}; falls back to a lookup in staging')
+            media_path = find_downloaded_video_file(job, expected_path)
+        if media_path:
+            record_completed_download(job, media_path)
+        else:
+            # Completing with no file leaves a row the organizer skips forever and auto-retry
+            # never revisits.
+            warn(f'Job {job.id}: yt-dlp succeeded but no media file was found')
+            update_job(job.id, status='failed', error='yt-dlp reported success but produced no media file')
+    else:
+        # yt-dlp's own last ERROR: line says why; the exit code alone tells the user nothing.
+        error = last_error_line or f'yt-dlp exited with code {process.returncode}'
+        warn(f'Job {job.id}: download failed: {error}')
+        update_job(job.id, status='failed', error=error)
+
+    # However it ended, the job has stopped: settle the parent and organize whatever is ready.
+    finalize_after_download(job)
+
+
+# =======================================================
+#               ENTRY POINT AND MAIN LOOP
+# =======================================================
+
+# Run one job, keeping the loop alive whatever it does. An unhandled error here ends the
+# process; the container restarts, recovery requeues the job, and it happens again.
+def run_job_guarded(job: Download) -> None:
+    try:
+        process_job(job)
+    except Exception as exc:
+        log_error(f'Job {job.id}: processing failed', exc)
+        try:
+            # Failing it moves the row out of WORKER_PICKUP_STATUSES; left pickable, the loop
+            # would hand it straight back.
+            update_job(job.id, status='failed', error=str(exc))
+        except Exception as update_exc:
+            log_error(f'Job {job.id}: could not record the failure', update_exc)
+
+
+# SIGTERM/SIGINT handler. Only sets the flag: the loop and the download-output reader poll it and
+# stop at their next check, so nothing is interrupted mid-write.
+def _request_shutdown(signum, _frame) -> None:
+    log(f'Received signal {signum}, finishing the current step and stopping')
+    _shutdown.set()
+
+
+# The worker process's entry point, and the only caller of the job loop. Runs startup housekeeping
+# once, then takes one job at a time until shutdown, interleaving the periodic tasks -- organize,
+# subscription check, auto-retry, parent backfill -- between jobs on their own timers. Returns
+# only when a signal sets _shutdown; every step is guarded so no single failure ends the process.
+def worker() -> None:
+    log('YouTube worker started')
+
+    # `docker stop` sends SIGTERM and SIGKILLs ten seconds later; handling it kills the running
+    # download and requeues its job rather than leaving the row claimed until the next startup.
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
+    # Startup housekeeping is local DB work with no network calls, so it can block here. Each
+    # step is wrapped separately so a raise pinpoints which one.
+    try:
+        recover_stuck_jobs()
+    except Exception as exc:
+        log_error('recover_stuck_jobs failed', exc)
+
+    try:
+        backfill_missing_youtube_ids()
+    except Exception as exc:
+        log_error('backfill_missing_youtube_ids failed', exc)
+
+    # Cheap and network-free, unlike the playlist backfill in the loop below.
+    log('Resequencing channel indexes...')
+    try:
+        resequence_all_channel_indexes()
+    except Exception as exc:
+        log_error('resequence_all_channel_indexes failed', exc)
+    log('Startup housekeeping done, entering main loop')
+
+    # Monotonic: an NTP correction on this clockless Pi would otherwise postpone every periodic
+    # task by the size of the step.
+    last_organize = time.monotonic()
+    last_subscription_check = time.monotonic()
+    last_retry = time.monotonic()
+    # Backdated so the backfills run on the loop's first pass rather than ahead of it: each makes
+    # a network call per affected parent, holding up every newly queued job.
+    last_parent_backfill = time.monotonic() - SUBSCRIPTION_CHECK_INTERVAL_SECONDS
+
+    last_job_id = None
+    repeat_count = 0
+
+    while not _shutdown.is_set():
+        touch_heartbeat()
+        job = get_next_job()
+
+        if job:
+            repeat_count = repeat_count + 1 if job.id == last_job_id else 0
+            last_job_id = job.id
+
+            # A job that keeps coming back is one no branch of process_job can move out of the
+            # queue; left alone it spins the loop at full CPU.
+            if repeat_count >= MAX_JOB_PICKUP_REPEATS:
+                log(f'Job {job.id}: still queued after {repeat_count} passes, failing it')
+                update_job(job.id, status='failed', error='Worker made no progress on this job')
+                continue
+
+            run_job_guarded(job)
+        else:
+            last_job_id = None
+            _shutdown.wait(1)
+
+        # The periodic tasks run between jobs, never during one, so none of them can contend with
+        # a download for the write lock. Each is independently guarded: one failing must not stop
+        # the others or end the loop.
+        now = time.monotonic()
+
+        if now - last_organize >= ORGANIZER_INTERVAL_SECONDS:
+            last_organize = now
+            try:
+                organizer_scan_and_process(dry_run=False)
+            except Exception as exc:
+                log_error('Periodic organizer run failed', exc)
+
+        if now - last_retry >= RETRY_INTERVAL_SECONDS:
+            last_retry = now
+            try:
+                retry_failed_jobs()
+            except Exception as exc:
+                log_error('Periodic retry failed', exc)
+
+        if now - last_subscription_check >= SUBSCRIPTION_CHECK_INTERVAL_SECONDS:
+            last_subscription_check = now
+            try:
+                check_subscriptions()
+            except Exception as exc:
+                log_error('Periodic subscription check failed', exc)
+
+        # Both backfills share the subscription interval: they are the two network-bound repair
+        # passes, and running them on the same clock keeps their YouTube requests in one burst.
+        if now - last_parent_backfill >= SUBSCRIPTION_CHECK_INTERVAL_SECONDS:
+            last_parent_backfill = now
+            try:
+                populate_missing_parent_metadata()
+            except Exception as exc:
+                log_error('Periodic parent metadata backfill failed', exc)
+            try:
+                backfill_all_playlist_indexes()
+            except Exception as exc:
+                log_error('Periodic playlist index backfill failed', exc)
+
+    log('YouTube worker stopped')
+
+
+if __name__ == '__main__':
+    # Line buffering, so container logs appear as the worker runs rather than in blocks.
+    sys.stdout.reconfigure(line_buffering=True)
+    applog.configure()
+
+    # Create the staging directory, and yt-dlp's temp dir inside it, if they do not exist, so a
+    # fresh container can start without issues. It runs here rather than at import, so importing
+    # this module creates nothing.
+    DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
+    STAGING_TEMP.mkdir(parents=True, exist_ok=True)
+
+    # The web process owns schema creation, so the worker waits rather than racing it.
+    log('Waiting for database schema to become available...')
+    if wait_for_schema(timeout_seconds=60):
+        worker()
+    else:
+        logging.error('Timed out waiting for database schema')

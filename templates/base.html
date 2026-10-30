@@ -1,0 +1,415 @@
+{# Base layout every page extends: partials/nav.html, an optional flash banner, and the shared
+   stylesheet. Children fill `title` (falls back to "YouTube Manager") and `content`, and must put
+   everything inside one of them -- output placed outside a block is emitted ahead of the doctype
+   below, which drops the browser into quirks mode. #}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>{% block title %}YouTube Manager{% endblock %}</title>
+
+    <style>
+        /* Reset default margins and set a clean font and background color. */
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f7f8fb;
+            color: #1f2937;
+        }
+
+        /* Center the main content and provide padding for readability. */
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* Style links with a primary color and remove underline by default. */
+        a {
+            color: #2563eb;
+            text-decoration: none;
+        }
+
+        /* Underline links on hover for better visibility. */
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* Horizontal navigation bar with spacing, rounded corners, and subtle shadow. */
+        .nav-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 12px 16px;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+            font-size: 0.95rem;
+        }
+
+        /* Shared styling for navigation links and button-like nav controls. */
+        .nav-link,
+        .nav-button {
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: #f3f4f6;
+            border: 1px solid transparent;
+            color: #111827;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        /* Hover and focus states for navigation items. */
+        .nav-link:hover,
+        .nav-button:hover,
+        .nav-link:focus,
+        .nav-button:focus {
+            background: #e5e7eb;
+            border-color: #d1d5db;
+        }
+
+        /* Divider between navigation and page content. */
+        .divider {
+            border: none;
+            border-top: 1px solid #d1d5db;
+            margin: 16px 0 24px;
+        }
+
+        /* Flash messages use a green background to indicate status and feedback. */
+        .flash {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        /* Headings are reset for consistent spacing and hierarchy. */
+        h1,
+        h2 {
+            margin: 0;
+        }
+        
+        h1 {
+            font-size: 1.8rem;
+            margin-bottom: 16px;
+        }
+
+        h2 {
+            font-size: 1.25rem;
+            margin: 24px 0 12px;
+        }
+
+        /* Forms have some spacing below them to separate blocks. */
+        form {
+            margin-bottom: 24px;
+        }
+
+        /* Align form inputs and buttons horizontally with consistent gaps. */
+        .form-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            margin-top: 12px;
+        }
+
+        /* Base styles for text inputs, selects, and buttons. */
+        input,
+        select,
+        button {
+            font: inherit;
+            padding: 10px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+        }
+
+        /* Ensure form fields have a minimum width for usability. */
+        input,
+        select {
+            min-width: 240px;
+        }
+
+        /* Checkboxes and radio buttons must not inherit the wide min-width meant for text
+           inputs and selects above, or a bulk-select checkbox ends up 240px wide. */
+        input[type="checkbox"],
+        input[type="radio"] {
+            min-width: 0;
+            width: auto;
+            padding: 0;
+        }
+
+        /* A radio button and its label read as one clickable unit. */
+        .radio-option {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: normal;
+            cursor: pointer;
+        }
+
+        /* Primary button styling for submit actions. */
+        button {
+            background: #2563eb;
+            color: white;
+            border-color: #2563eb;
+            cursor: pointer;
+        }
+
+        /* Hover state for buttons to show interactivity. */
+        button:hover {
+            background: #1d4ed8;
+        }
+
+        /* Table styling for structured data listings. */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background: white;
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+        }
+
+        /* Table cells use borders and padding for readability. */
+        th,
+        td {
+            border: 1px solid #e5e7eb;
+            padding: 12px 14px;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        /* Table headers use a muted background and bold text. */
+        th {
+            background: #f3f4f6;
+            font-weight: 600;
+        }
+
+        /* Highlight status text in tables. */
+        .status {
+            font-weight: 700;
+        }
+
+        /* Error messages are styled in red and allow long text to wrap. */
+        .error {
+            color: #b91c1c;
+            max-width: 420px;
+            word-break: break-word;
+        }
+
+        /* Container for action buttons on detail pages. */
+        .job-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        /* Groups of buttons preserve spacing and line breaks. */
+        .button-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        /* Row actions for each table row are aligned to the right and stacked vertically. */
+        .row-actions {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            justify-content: flex-start;
+            gap: 8px;
+        }
+
+        /* Ensure button groups within row actions are aligned to the right. */
+        .row-actions .button-group {
+            justify-content: flex-end;
+        }
+
+        /* The shared action macro is also used inside table rows, where the detail-page spacing
+           would be excessive and the buttons need to wrap on narrow screens. */
+        .row-actions .job-actions {
+            margin-bottom: 0;
+            flex-wrap: wrap;
+        }
+
+        /* Secondary detail under a status cell (e.g. "8/10 done") stays quiet next to the status. */
+        .status small {
+            display: inline-block;
+            margin-top: 4px;
+            font-weight: 400;
+            color: #6b7280;
+        }
+
+        /* Parent links in tables are bold to indicate hierarchy and navigation. */
+        .parent-link {
+            font-weight: 600;
+        }
+
+        /* Section headers use flex layout to align titles and action buttons. */
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        /* Secondary buttons are lower emphasis than primary actions. */
+        .button-secondary {
+            background: #f3f4f6;
+            color: #111827;
+            border-color: #d1d5db;
+        }
+
+        /* Hover state for secondary actions. */
+        .button-secondary:hover {
+            background: #e5e7eb;
+        }
+
+        /* Danger buttons are visually distinct for destructive actions. */
+        .button-danger {
+            background: #fca5a5;
+            color: #7f1d1d;
+            border-color: #f87171;
+        }
+
+        /* Stronger hover state for danger buttons. */
+        button.button-danger:hover,
+        .button-danger:hover {
+            background: #f87171 !important;
+            color: #7f1d1d !important;
+            border-color: #f87171 !important;
+        }
+
+        /* Warning color for cancelling jobs. */
+        .status-cancelling {
+            color: #b45309;
+        }
+
+        /* Warning color for cancel requests pending approval. */
+        .status-cancel-requested {
+            color: #92400e;
+        }
+
+        /* Informational color for discovery and metadata states. */
+        .status-expanding,
+        .status-metadata {
+            color: #1d4ed8;
+        }
+
+        /* Log output styling for readable preformatted content. */
+        .log-output {
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: #111827;
+            color: #f8fafc;
+            padding: 16px;
+            border-radius: 10px;
+            overflow: auto;
+            max-height: 420px;
+            border: 1px solid #374151;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {# Shared site navigation included on every page. #}
+        {% include "partials/nav.html" %}
+
+        {# The only context this layout reads, and it is optional: app.render_template sets
+           `flash_message` when the flash cookie is there and clears the cookie as it renders,
+           so the banner appears exactly once. #}
+        {% if flash_message %}
+            <div id="flash-message" class="flash">{{ flash_message }}</div>
+        {% endif %}
+
+        <main>{% block content %}{% endblock %}</main>
+    </div>
+
+    <script>
+        // Used by partials/downloads_table.html but defined out here: the dashboard replaces
+        // that table's innerHTML, which never re-runs embedded <script> tags, so a function
+        // living inside the partial would vanish on the first refresh.
+
+        // Set every row checkbox to match the "select all" checkbox, then refresh button states.
+        function toggleAllRows(masterCheckbox) {
+            var checked = masterCheckbox.checked;
+            document.querySelectorAll('.row-select').forEach(function (cb) {
+                cb.checked = checked;
+            });
+            updateBulkActionButtons();
+        }
+
+        // Show a bulk button only when some checked row qualifies for it. Each row carries
+        // job_actions.html's per-row conditions as data-* attributes, because a selection can
+        // mix rows in every state and only the row itself knows which actions it accepts.
+        function updateBulkActionButtons() {
+            var checked = Array.prototype.slice.call(document.querySelectorAll('.row-select:checked'));
+            var buttons = {
+                cancelable: document.getElementById('bulk-cancel-btn'),
+                retriable: document.getElementById('bulk-retry-btn'),
+                redownloadable: document.getElementById('bulk-redownload-btn'),
+                deletable: document.getElementById('bulk-delete-btn'),
+            };
+            Object.keys(buttons).forEach(function (key) {
+                var button = buttons[key];
+                if (!button) {
+                    return;
+                }
+                var eligible = checked.some(function (cb) {
+                    return cb.dataset[key] === '1';
+                });
+                button.style.display = eligible ? '' : 'none';
+            });
+
+            // "Retry All"/"Cancel All"/"Fetch Metadata for All" act on every row in view, not just what's
+            // checked -- seeing those alongside "...Selected" once specific rows are checked reads
+            // as contradictory (checking rows deliberately means "not all"), so hide them the
+            // moment anything is checked and bring them back once the selection is cleared.
+            var anySelected = checked.length > 0;
+            document.querySelectorAll('.all-action').forEach(function (el) {
+                el.style.display = anySelected ? 'none' : '';
+            });
+        }
+
+        // Remove the flash banner immediately, used by the "Dismiss" button and back/forward cache handling.
+        function cleanupFlash() {
+            const flash = document.getElementById('flash-message');
+            if (flash) {
+                flash.remove();
+            }
+        }
+
+        // Matches the cookie's max-age, so the banner and the thing driving it expire together.
+        window.addEventListener('load', () => {
+            const flash = document.getElementById('flash-message');
+            if (flash) {
+                setTimeout(() => flash.remove(), 10000);
+            }
+        });
+
+        // A page served from the back/forward cache carries the banner it was rendered with,
+        // however old, and none of the load-time timers run again to clear it.
+        window.addEventListener('pageshow', (event) => {
+            const navigation = performance.getEntriesByType('navigation')[0];
+            const isBackForward =
+                event.persisted ||
+                (navigation && navigation.type === 'back_forward') ||
+                (performance.navigation && performance.navigation.type === 2);
+
+            if (isBackForward) {
+                cleanupFlash();
+            }
+        });
+    </script>
+</body>
+</html>

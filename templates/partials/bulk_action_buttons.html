@@ -1,0 +1,14 @@
+{# Bulk actions for whichever rows are checked in partials/downloads_table.html. Requires `jobs`,
+   and requires that table on the same page: `form=` binds each button to its #bulk-form by id,
+   which is what lets a page put these in its own header. They start hidden, and are shown by
+   updateBulkActionButtons() (base.html) only once a checked row would actually be affected. #}
+{% if jobs %}
+    <button type="submit" id="bulk-retry-btn" form="bulk-form" formaction="/bulk/retry" class="button-secondary"
+            style="display:none" onclick="return confirm('Retry all selected items?');">Retry Selected</button>
+    <button type="submit" id="bulk-cancel-btn" form="bulk-form" formaction="/bulk/cancel" class="button-danger"
+            style="display:none" onclick="return confirm('Cancel all selected items?');">Cancel Selected</button>
+    <button type="submit" id="bulk-redownload-btn" form="bulk-form" formaction="/bulk/redownload" class="button-secondary"
+            style="display:none" onclick="return confirm('Fetch fresh metadata for all selected items?');">Fetch Metadata for Selected</button>
+    <button type="submit" id="bulk-delete-btn" form="bulk-form" formaction="/bulk/delete" class="button-danger"
+            style="display:none" onclick="return confirm('Delete all selected items and their files? This cannot be undone.');">Delete Selected</button>
+{% endif %}

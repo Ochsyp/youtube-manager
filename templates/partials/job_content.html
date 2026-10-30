@@ -1,0 +1,170 @@
+{# Everything on the job details page below the nav: the metadata table, the child list, and the
+   tail of the log. Rendered inline by job.html and served on its own by GET /api/job/<id>/section,
+   which that page swaps into #job-content on a timer. Requires `job`; `job_log` is optional and
+   its section is dropped when it is absent. #}
+
+{% import "partials/status_label.html" as status %}
+{% import "partials/job_actions.html" as actions %}
+
+{# The compute_* and format_* helpers used here are app.py globals -- see downloads_table.html. #}
+{% set effective_status = compute_effective_status(job) %}
+
+<div class="section-header">
+    <h1>Job Details</h1>
+    {{ actions.job_actions(job, show_view_log=True, show_view_parent=True, show_redownload=True, show_delete=True) }}
+</div>
+
+<section>
+    <table>
+        <tr>
+            <th>ID</th>
+            <td>{{ job.id }}</td>
+        </tr>
+        <tr>
+            <th>Type</th>
+            <td>{{ job.request_type }}</td>
+        </tr>
+        <tr>
+            {# noreferrer as well as noopener: the target is a third-party page. #}
+            <th>URL</th>
+            <td><a href="{{ job.url }}" target="_blank" rel="noopener noreferrer">{{ job.url }}</a></td>
+        </tr>
+        <tr>
+            <th>Title</th>
+            <td>{{ job.title or 'N/A' }}</td>
+        </tr>
+        <tr>
+            <th>Status</th>
+            <td>{{ status.status_label(effective_status) }}</td>
+        </tr>
+        <tr>
+            <th>Created</th>
+            <td>{{ job.created_at }}</td>
+        </tr>
+        <tr>
+            <th>Completed</th>
+            <td>{{ job.completed_at or '-' }}</td>
+        </tr>
+        <tr>
+            <th>Channel</th>
+            <td>{{ job.channel.name if job.channel else '-' }}</td>
+        </tr>
+        <tr>
+            <th>Playlist</th>
+            <td>{{ job.playlist.title if job.playlist else '-' }}</td>
+        </tr>
+        <tr>
+            <th>Playlist index</th>
+            <td>{{ job.playlist_index or '-' }}</td>
+        </tr>
+        <tr>
+            {# For a parent this is completion across all of its children; for a single video it is
+               the video's own download progress. #}
+            <th>Progress</th>
+            <td>
+                {{ compute_parent_progress(job) or '-' }}
+                {% set children_summary = format_children_summary(job) %}
+                {% if children_summary %}
+                    <br><small>{{ children_summary }}</small>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            {# While a child is downloading this is that child's live speed; once nothing is
+               transferring it becomes the average speed across all children. #}
+            <th>Speed</th>
+            <td>
+                {{ compute_parent_speed(job) or '-' }}
+                {% if job.children %}
+                    <br><small>{{ 'current child' if effective_status == 'downloading' else 'average across children' }}</small>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <th>Duration</th>
+            <td>{{ '%d:%02d'|format(job.duration // 60, job.duration % 60) if job.duration else '-' }}</td>
+        </tr>
+        <tr>
+            {# yt-dlp reports this as YYYYMMDD, and it is shown as-is. #}
+            <th>Uploaded</th>
+            <td>{{ job.upload_date or '-' }}</td>
+        </tr>
+        <tr>
+            {# Counts as they stood at download time; nothing refreshes them afterwards. #}
+            <th>Views / Likes</th>
+            <td>
+                {{ '{:,}'.format(job.view_count) if job.view_count else '-' }}
+                /
+                {{ '{:,}'.format(job.like_count) if job.like_count else '-' }}
+            </td>
+        </tr>
+        <tr>
+            {# Where the organizer filed the media file, once it has been moved into the library. #}
+            <th>File</th>
+            <td>{{ job.filename or '-' }}</td>
+        </tr>
+        <tr>
+            {# Only while the job is actually failed/cancelled: a stored error outlives the retry
+               that cleared it, and showing it next to a green status reads as a fresh failure. #}
+            <th>Error</th>
+            {% if job.error and effective_status in FAILED_OR_CANCELLED %}
+                <td class="error">{{ job.error }}</td>
+            {% else %}
+                <td>-</td>
+            {% endif %}
+        </tr>
+    </table>
+</section>
+
+<section>
+    <h2>Child Items</h2>
+    {# A playlist/channel parent has these once it has expanded; a single video never does. #}
+    {% if job.children %}
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Speed</th>
+                    <th>Playlist index</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {% for child in job.children %}
+                    <tr>
+                        <td><a href="/job/{{ child.id }}">{{ child.id }}</a></td>
+                        <td><a href="/job/{{ child.id }}">{{ child.title or child.url or 'Child download' }}</a></td>
+                        <td>{{ status.status_label(compute_effective_status(child)) }}</td>
+                        {# Each child's own figures, not the parent aggregate shown above. #}
+                        <td>{{ child.progress or '-' }}</td>
+                        <td>{{ child.speed or '-' }}</td>
+                        <td>{{ child.playlist_index or '-' }}</td>
+                        <td>{{ child.created_at }}</td>
+                        {# Refresh just this one video's metadata/NFO without having to redownload
+                           the whole parent playlist/channel. #}
+                        <td>
+                            <form action="/job/{{ child.id }}/redownload" method="post" style="margin:0;">
+                                <button class="button-secondary">Fetch Metadata</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No child items for this job.</p>
+    {% endif %}
+</section>
+
+{% if job_log %}
+<section>
+    {# The tail only; the View Log button opens the whole thing. #}
+    <h2>Recent log output</h2>
+    <div class="log-output">{{ job_log }}</div>
+</section>
+{% endif %}

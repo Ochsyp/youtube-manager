@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{# Dashboard page (GET /): the add-download form above the live queue. Requires `jobs` for the
+   queue table and `last_update`, the polling baseline below, which is an empty string when no job
+   carries a timestamp yet. No `return_to` is passed: the table partial's fallback resolves to "/"
+   here, which is where a bulk action should land anyway. #}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h1>YouTube Manager</h1>
+
+<section>
+    <h2>Add Download</h2>
+    <form action="/add" method="post">
+        <div class="form-row">
+            {# The selected type must match what the URL actually is; /add rejects a mismatch
+               rather than guessing, since a watch+list URL could be read either way. #}
+            <input type="text" name="url" placeholder="YouTube URL" required />
+            <select name="request_type">
+                <option value="video">Single Video</option>
+                <option value="playlist">Playlist Download</option>
+                <option value="channel">Channel Download</option>
+            </select>
+            <button type="submit">Add</button>
+        </div>
+    </form>
+</section>
+
+{# Replaced wholesale by refreshQueueSection() below, from /api/queue/section. #}
+<div id="queue-content">
+    {% include "partials/queue_section.html" %}
+</div>
+
+{% include "partials/polling_manager.html" %}
+
+<script>
+    // Every 5s /api/queue is asked only whether anything changed; the callback below fetches and
+    // swaps the HTML when it has. Seeding the poller with this render's timestamp is what stops
+    // the first tick from swapping in a fragment identical to what is already on screen.
+    const queuePollInterval = 5000;
+    // tojson emits a quoted literal that no character in the value can end.
+    const queueLastUpdate = {{ last_update | default("") | tojson }};
+
+    // Swap in a freshly rendered queue section, keeping whatever rows were ticked: the refresh
+    // replaces the whole table, so a selection made while a download is running would otherwise
+    // be wiped every few seconds, mid-selection.
+    async function refreshQueueSection(data) {
+        try {
+            // Fetch the latest queue section HTML from the server.
+            const response = await fetch('/api/queue/section', { cache: 'no-store' });
+            if (!response.ok) return;
+
+            // Get the HTML content of the response.
+            const html = await response.text();
+            const container = document.getElementById('queue-content');
+            if (!container) return;
+
+            // Preserve the selection state of checkboxes before replacing the content.
+            const selected = new Set();
+            document.querySelectorAll('.row-select:checked').forEach(function (cb) {
+                selected.add(cb.value);
+            });
+
+            // Replace the queue section content with the new HTML.
+            container.innerHTML = html;
+
+            // Restore the selection state of checkboxes after the content has been replaced.
+            document.querySelectorAll('.row-select').forEach(function (cb) {
+                cb.checked = selected.has(cb.value);
+            });
+            updateBulkActionButtons();
+        } catch (error) {
+            console.warn('Queue refresh failed:', error);
+        }
+    }
+
+    // Start polling the queue endpoint for changes, and refresh the section when it does.
+    // The PollingManager class is defined in the included partial above.
+    window.addEventListener('load', () => {
+        const queuePoller = new PollingManager(
+            '/api/queue',
+            queuePollInterval,
+            refreshQueueSection
+        );
+
+        // If the server provided a last_update timestamp, use it to avoid an unnecessary refresh on first poll.
+        if (queueLastUpdate) {
+            queuePoller.setLatestTimestamp(queueLastUpdate);
+        }
+
+        // Start the polling process.
+        queuePoller.start();
+    });
+</script>
+{% endblock %}

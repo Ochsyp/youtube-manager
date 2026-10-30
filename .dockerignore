@@ -1,0 +1,17 @@
+# Keep runtime state, caches, secrets and VCS metadata out of the build context.
+# data/.gitkeep stays so the image has a data directory for entrypoint.sh to chown.
+.git
+.github
+.env*
+data/*
+!data/.gitkeep
+.cache/
+__pycache__/
+*.py[cod]
+*.db
+*.db-*
+*.log
+# The test suite and its tooling run from the checkout, never inside the image.
+tests/
+requirements-dev.txt
+pytest.ini

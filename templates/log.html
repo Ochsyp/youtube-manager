@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% import "partials/status_label.html" as status %}
+
+{# Full log page for one job (GET /job/<id>/log). Requires `log_content` and `job`, which is None
+   when the id matches nothing: the page still renders, with the reason in `log_content` and no
+   polling. `job_last_update` is the polling baseline and may be None, which the script below
+   renders as an empty string so the poller starts without one. #}
+{% block title %}Job Log{% endblock %}
+
+{% block content %}
+{# Both scripts have to be included inside the block, for the reason base.html's header gives. #}
+{% include "partials/polling_manager.html" %}
+{% include "partials/log_display.html" %}
+
+{# Page heading. The Back to Job link needs an id to link to, so it appears only when one resolved. #}
+<div class="section-header">
+    <h1>Job Log</h1>
+    {% if job %}
+    <div class="button-group">
+        <form action="/job/{{ job.id }}" method="get" style="margin:0;">
+            <button class="button-secondary">Back to Job</button>
+        </form>
+    </div>
+    {% endif %}
+</div>
+
+{# A missing job still renders this page, with the reason in log_content. #}
+{% if job %}
+    <section>
+        <table>
+            <tr>
+                <th>Job ID</th>
+                <td><a href="/job/{{ job.id }}">{{ job.id }}</a></td>
+            </tr>
+            <tr>
+                <th>Type</th>
+                <td>{{ job.request_type }}</td>
+            </tr>
+            <tr>
+                <th>Title</th>
+                <td>{{ job.title or 'N/A' }}</td>
+            </tr>
+            <tr>
+                {# compute_effective_status is a Jinja global app.py registers -- see
+                   partials/downloads_table.html. #}
+                <th>Status</th>
+                <td>{{ status.status_label(compute_effective_status(job)) }}</td>
+            </tr>
+        </table>
+    </section>
+
+    <section>
+        <h2>Log Output</h2>
+        {# The element LogDisplay binds to, by class: rendered once with log_content here, then its
+           text replaced from each poll response, with the reader's scroll position preserved. #}
+        <div class="log-output">{{ log_content }}</div>
+    </section>
+{% else %}
+    <p>{{ log_content }}</p>
+{% endif %}
+
+<script>
+    // 3s here, against the 5s the dashboard and job pages poll at. A missing job renders jobId as
+    // '0', which is what keeps the poller below from ever starting.
+    const logPollInterval = 3000;
+    const jobId = '{{ job.id if job else 0 }}';
+    // default(…, true) so a None baseline renders as "" -- the one-argument form only replaces an
+    // undefined value, which would hand tojson None and put null in here. tojson emits a quoted
+    // literal that no character in the value can end.
+    const jobLastUpdate = {{ job_last_update | default("", true) | tojson }};
+
+    const logState = LogDisplay.createState();
+
+    // The poll response already carries the whole log, so render from it rather than fetching the
+    // same endpoint again, which would cost two full-log responses per tick.
+    function refreshLogContent(data) {
+        if (!data || data.log_content === undefined) return;
+
+        // Capture scroll position before updating content to preserve manual scrolling.
+        const scrollPosition = LogDisplay.captureScrollPosition();
+        LogDisplay.updateContent(logState, data.log_content);
+        LogDisplay.restoreScrollPosition(logState, scrollPosition);
+    }
+
+    // Start polling for log updates once the page is fully loaded. The PollingManager will call
+    // refreshLogContent() whenever the log changes, which will update the log display.
+    window.addEventListener('load', () => {
+        if (jobId && jobId !== '0') {
+            LogDisplay.initialize(logState);
+
+            // alwaysUpdate: new log lines are worth rendering even when the change flag is
+            // false, and start() polls once immediately, so the first render costs nothing extra.
+            const logPoller = new PollingManager(
+                `/api/job/${jobId}/log`,
+                logPollInterval,
+                refreshLogContent,
+                null,
+                true
+            );
+
+            // If the server provided a last update timestamp, use it to avoid unnecessary refreshes.
+            if (jobLastUpdate) {
+                logPoller.setLatestTimestamp(jobLastUpdate);
+            }
+
+            // Start the polling loop. It will call refreshLogContent() whenever the log changes.
+            logPoller.start();
+        }
+    });
+</script>
+
+{% endblock %}

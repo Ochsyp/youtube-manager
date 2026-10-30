@@ -1,0 +1,16 @@
+{# The status vocabulary in one place: status_label(status) renders one effective status, colouring
+   the transient ones and title-casing everything else, so no view spells a state its own way.
+   Imported as `status` wherever a job is shown; takes no page context. #}
+{% macro status_label(status) %}
+    {% if status == 'expanding' %}
+        <span class="status-expanding">Expanding...</span>
+    {% elif status == 'metadata' %}
+        <span class="status-metadata">Fetching metadata</span>
+    {% elif status == 'cancelling' %}
+        <span class="status-cancelling">Cancelling...</span>
+    {% elif status == 'cancel requested' %}
+        <span class="status-cancel-requested">Cancel requested</span>
+    {% else %}
+        {{ status.capitalize() if status else '-' }}
+    {% endif %}
+{% endmacro %}

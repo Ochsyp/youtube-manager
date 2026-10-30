@@ -1,0 +1,54 @@
+{# The dashboard's Active Queue: the header buttons above the shared downloads table. Rendered
+   inline by index.html and served on its own by GET /api/queue/section, which that page swaps into
+   #queue-content every 5s. Requires `jobs`; `return_to` is optional and only passed through to
+   partials/downloads_table.html, where the contract for it is written down. #}
+
+<section id="queue-section">
+    <div class="section-header">
+        <h2>Active Queue</h2>
+        {% set flags = namespace(cancel=False, retry=False) %}
+
+        {# Checks the same shared status lists job_actions.html checks per row, so "Cancel All"
+           can never appear when no row actually has a Cancel button. #}
+        {% for job in jobs %}
+            {% set eff = compute_effective_status(job) %}
+            {% if not flags.cancel and eff in CANCELABLE_EFFECTIVE_STATUSES %}
+                {% set flags.cancel = true %}
+            {% endif %}
+            {% if not flags.retry and eff in FAILED_OR_CANCELLED %}
+                {% set flags.retry = true %}
+            {% endif %}
+        {% endfor %}
+
+        {# Every status QUEUE_STATUSES can contain falls into flags.cancel or flags.retry, so
+           "jobs is non-empty" and "this div renders" are equivalent -- which is what makes it
+           safe to put the per-selection bulk buttons in here too. #}
+        {% if flags.cancel or flags.retry %}
+            <div class="button-group">
+                {# "all-action" marks buttons that act on every row in view regardless of
+                   selection; updateBulkActionButtons() (base.html) hides these the moment any
+                   row checkbox is checked, since seeing both "Retry All" and "Retry Selected"
+                   at once when specific rows are checked reads as contradictory. #}
+                {% if flags.cancel %}
+                    <form action="/cancel-all" method="post" style="margin:0;" class="all-action">
+                        <button class="button-danger">Cancel All</button>
+                    </form>
+                {% endif %}
+                {# Wider than it looks: /retry-all requeues every failed or cancelled row in the
+                   table, children included, so entries that have aged out of this section into
+                   history go back into the queue too. The confirm says so, since the count of
+                   what it actually touches isn't on this page and querying it would cost a
+                   round trip on every poll. #}
+                {% if flags.retry %}
+                    <form action="/retry-all" method="post" style="margin:0;" class="all-action"
+                          onsubmit="return confirm('Requeue every failed or cancelled download, including child videos and entries that have already dropped out of this list into history?');">
+                        <button class="button-secondary">Retry All</button>
+                    </form>
+                {% endif %}
+                {% include "partials/bulk_action_buttons.html" %}
+            </div>
+        {% endif %}
+    </div>
+
+    {% include "partials/downloads_table.html" %}
+</section>
