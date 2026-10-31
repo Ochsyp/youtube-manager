@@ -60,7 +60,7 @@ from organizer import scan_and_process as organizer_scan_and_process
 
 PROXY = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
 
-# Base URL of the local bgutil PO token provider (docker-compose.yml). YouTube withholds its
+# Base URL of the bgutil PO token provider, usually a sidecar container. YouTube withholds its
 # full DASH format list from a client with no PO token, leaving yt-dlp on low-bitrate HLS.
 # Left unset, no token arguments are passed at all.
 POT_PROVIDER_URL = os.getenv('POT_PROVIDER_URL', '')
@@ -113,7 +113,8 @@ OUTPUT_TEMPLATE_FLAT = '%(title)s [%(id)s].%(ext)s'
 COMMAND_TIMEOUT_SECONDS = 120
 
 # A download printing nothing for this long is treated as dead. yt-dlp reports progress
-# continuously while transferring; the gap only has to clear a slow ffmpeg merge on the Pi.
+# continuously while transferring; the gap only has to clear a slow ffmpeg merge on a small
+# ARM host.
 DOWNLOAD_STALL_TIMEOUT_SECONDS = 1800
 
 # Longest wait for a signalled process group to actually die before escalating to SIGKILL.
@@ -135,8 +136,8 @@ MAX_STORED_LOG_CHARS = 256 * 1024
 _shutdown = threading.Event()
 
 # Liveness marker for the container healthcheck: this process serves nothing over HTTP, so it
-# proves itself by touching a file. /tmp is a tmpfs in docker-compose.yml, so this never reaches
-# the SD card, and the file being absent after a restart is correct -- a process that has not
+# proves itself by touching a file. /tmp is a tmpfs in compose.example.yaml, so this stays off
+# the disk, and the file being absent after a restart is correct -- a process that has not
 # reached its loop yet has not proved anything. The healthcheck's staleness window has to clear
 # the longest gap between touches, which is one COMMAND_TIMEOUT_SECONDS-bounded yt-dlp call.
 HEARTBEAT_PATH = Path(os.getenv('WORKER_HEARTBEAT_PATH', '/tmp/worker-heartbeat'))
@@ -162,20 +163,21 @@ def touch_heartbeat() -> None:
         warn(f'Could not update the heartbeat marker: {exc}')
 
 
-# Log a message at INFO level, which is what the worker's stdout handler renders to Loki.
+# Log a message at INFO level, which is what the worker's stdout handler writes to the
+# container log.
 def log(msg: str) -> None:
     logging.info(msg)
 
 
-# Log something worth seeing in Loki that needs no human: a failure that clears itself or is
-# retried later, or a warning yt-dlp relayed. WARN never pages; see log_error() for ERROR.
+# Log something worth seeing that needs no human: a failure that clears itself or is retried
+# later, or a warning yt-dlp relayed. WARN never pages; see log_error() for ERROR.
 def warn(msg: str) -> None:
     logging.warning(msg)
 
 
 # Log a failure with its traceback, indented so it stays one entry downstream.
-# The jelly-stack alert pages on any ERROR from this container, so ERROR is kept for what needs
-# a human: unexpected exceptions, a full disk, a subscription failing check after check.
+# Deployments alert on ERROR lines from this service, so ERROR is kept for what needs a human:
+# unexpected exceptions, a full disk, a subscription failing check after check.
 def log_error(msg: str, exc: BaseException | None = None) -> None:
     logging.error(msg, exc_info=exc)
 
@@ -467,7 +469,7 @@ _last_youtube_request_at = 0.0
 
 # Sleep just long enough that consecutive yt-dlp calls stay YTDLP_MIN_INTERVAL_SECONDS apart.
 # Called only from the worker thread, so a module-level timestamp is enough. Monotonic, or the
-# NTP step this clockless Pi takes at boot skips the throttle entirely.
+# NTP step a host without a real-time clock takes at boot skips the throttle entirely.
 def throttle_youtube_requests() -> None:
     global _last_youtube_request_at
 
@@ -1910,8 +1912,8 @@ def find_downloaded_video_file(job: Download, expected_path: Optional[Path] = No
     return find_existing_media(job, search_paths=[DOWNLOAD_PATH])
 
 
-# Where yt-dlp reports job `job_id`'s final media path. tempfile.gettempdir() is the /tmp tmpfs in
-# the container, so the report never reaches the SD card.
+# Where yt-dlp reports job `job_id`'s final media path. tempfile.gettempdir() is /tmp, a tmpfs in
+# compose.example.yaml, so the report stays off the disk there.
 def final_path_file(job_id: int) -> Path:
     return Path(tempfile.gettempdir()) / f'ytm-job-{job_id}.path'
 
@@ -2223,8 +2225,8 @@ def worker() -> None:
         log_error('resequence_all_channel_indexes failed', exc)
     log('Startup housekeeping done, entering main loop')
 
-    # Monotonic: an NTP correction on this clockless Pi would otherwise postpone every periodic
-    # task by the size of the step.
+    # Monotonic: an NTP correction on a host without a real-time clock would otherwise postpone
+    # every periodic task by the size of the step.
     last_organize = time.monotonic()
     last_subscription_check = time.monotonic()
     last_retry = time.monotonic()

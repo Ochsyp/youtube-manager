@@ -166,8 +166,8 @@ def test_unknown_host_rejected(client, db):
     assert download_rows(db) == []
 
 
-# The nginx name (from YTM_ALLOWED_HOSTS) and the blackbox probe's container name serve the
-# dashboard, and the healthcheck names serve /health.
+# The proxy's name (from YTM_ALLOWED_HOSTS) and the Compose service name serve the dashboard,
+# and the healthcheck names serve /health.
 @pytest.mark.parametrize(
     'url',
     [
@@ -181,7 +181,7 @@ def test_probe_and_healthcheck_hosts_allowed(client, url):
     assert client.get(url).status_code == 200
 
 
-# The compose healthcheck sends Host 127.0.0.1:8080; TrustedHost ignores the port.
+# A container healthcheck sends Host 127.0.0.1:8080; TrustedHost ignores the port.
 @pytest.mark.parametrize('url', ['http://127.0.0.1:8080/health', 'http://localhost:8080/health'])
 def test_healthcheck_host_with_port_allowed(client, url):
     response = client.get(url)

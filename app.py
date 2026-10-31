@@ -93,9 +93,9 @@ HISTORY_PAGE_SIZE = 50
 # The app has no authentication, so these keep other sites out: Host pinning against DNS
 # rebinding, an origin check on every state-changing request, and browser hardening headers.
 
-# Hosts the UI always answers to: the container name the blackbox probe uses and the loopback
-# names the compose healthcheck uses. The name nginx serves the UI under comes from
-# YTM_ALLOWED_HOSTS, which adds to these.
+# Hosts the UI always answers to: its Compose service name, for probes on the same network, and
+# the loopback names a container healthcheck uses. The name the reverse proxy serves the UI under
+# comes from YTM_ALLOWED_HOSTS, which adds to these.
 DEFAULT_ALLOWED_HOSTS = ('youtube-manager', 'localhost', '127.0.0.1')
 
 # Methods no route here changes state on, so a cross-site request using one is harmless.

@@ -45,7 +45,7 @@ def fresh_organizer_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(organizer.requests, 'post', refuse_network)
 
 
-# Make safe_move take its copy branch, as it does between the Pi's staging and library disks.
+# Make safe_move take its copy branch, as it does when staging and the library are separate disks.
 @pytest.fixture
 def cross_device(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(organizer, 'same_filesystem', lambda src, dest: False)

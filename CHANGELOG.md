@@ -22,6 +22,7 @@ The first code commit imports the web UI, the download worker and the organizer,
 - `LIBRARY_SENTINEL`, an opt-in file on the library disk. While it is missing the organizer files
   nothing and creates nothing under `/media`, logs ERROR at most once an hour, and leaves the
   jobs to be filed once the disk is back. (phase 5)
+- `compose.example.yaml`, an example deployment of the web UI, the worker and the bgutil provider.
 
 ### Changed
 
@@ -49,6 +50,10 @@ The first code commit imports the web UI, the download worker and the organizer,
   playlist IDs in the tests and a deploy path in an early README were replaced, and commit dates
   are recorded in UTC. Every commit ID changed: re-clone, or reset an existing clone with
   `git fetch` and `git reset --hard origin/main`. Do not pull or merge the old history.
+- The README and SECURITY.md describe deployment on any Docker host behind any reverse proxy
+  instead of one particular stack. Code comments no longer assume that stack's host, probes or
+  log pipeline.
+- SECURITY.md names GitHub's private vulnerability reporting as the way to report a problem.
 
 ### Security
 

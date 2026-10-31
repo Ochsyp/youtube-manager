@@ -4,9 +4,6 @@ Self-hosted YouTube downloader that files everything into a Jellyfin library. Qu
 videos, playlists and channels from a web UI, subscribe to channels, and get properly
 named movies and shows with NFO metadata and artwork.
 
-> **Status:** repository bootstrap. The source is imported in the next commit; full
-> documentation and diagrams follow.
-
 ## Features
 
 - Web UI to queue single videos, playlists and whole channels, with live progress and
@@ -53,7 +50,7 @@ One image, two containers, one SQLite database in WAL mode.
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
 | `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
-| `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name nginx serves the UI under, such as `ytdl.home.arpa`; any other `Host` gets 400 |
+| `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name the reverse proxy serves the UI under, such as `ytdl.home.arpa`; any other `Host` gets 400 |
 | `PUID`, `PGID` | `1000` | User and group the containers run as |
 | `TZ` | | Timezone of the log timestamps |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | | Egress proxy; `NO_PROXY` must cover Jellyfin and the bgutil provider |
@@ -65,20 +62,19 @@ Volumes: `/app/data` (SQLite), `/downloads` (staging) and `/media` (library).
 
 ## Security notes
 
-- The web UI has **no authentication**: anyone who can reach it can use it. Keep it
-  LAN-only. In jelly-stack, publish no host port for it (close `8085`) and let the
-  nginx server for the UI's name `allow` the LAN and the stack's Docker subnets, which
-  the blackbox probe comes from, before `deny all`.
+- The web UI has **no authentication**: anyone who can reach it can use it. Keep it on a
+  trusted network behind a reverse proxy (see Deploying), and add a login in the proxy
+  if you need one.
 - Web pages a user opens elsewhere cannot drive it through that user's browser:
-  - **Host pinning.** The app answers only to `youtube-manager` (the blackbox probe),
-    `localhost` and `127.0.0.1` (the healthcheck), plus the entries of
-    `YTM_ALLOWED_HOSTS`, such as the UI's nginx name, whatever the port. Any other
-    `Host` gets 400, which defeats DNS rebinding.
+  - **Host pinning.** The app answers only to `youtube-manager` (its Compose service
+    name), `localhost` and `127.0.0.1` (healthchecks), plus the entries of
+    `YTM_ALLOWED_HOSTS`, such as the name the proxy serves the UI under, whatever the
+    port. Any other `Host` gets 400, which defeats DNS rebinding.
   - **Cross-origin guard.** Every request other than GET, HEAD and OPTIONS must come
     from the UI's own pages. A browser that sends `Sec-Fetch-Site` must send
-    `same-origin` or `none`; otherwise, as over plain HTTP behind nginx, the `Origin`
-    header's host and port must equal `Host`. Anything else, including a missing or
-    `null` Origin, gets 403 and one WARN line in the app log.
+    `same-origin` or `none`; otherwise, as over plain HTTP, the `Origin` header's host
+    and port must equal `Host`. Anything else, including a missing or `null` Origin,
+    gets 403 and one WARN line in the app log.
   - **Headers.** Every response carries a Content-Security-Policy limited to the app's
     own origin (inline scripts and styles allowed), `X-Frame-Options: DENY`,
     `X-Content-Type-Options: nosniff`, and same-origin Referrer and
@@ -86,25 +82,42 @@ Volumes: `/app/data` (SQLite), `/downloads` (staging) and `/media` (library).
 - A manual POST must therefore send the UI's origin:
   `curl -X POST -H 'Origin: http://ytdl.home.arpa' http://ytdl.home.arpa/retry-all`,
   with your UI's name in place of `ytdl.home.arpa`.
-- Until jelly-stack closes port 8085, `http://<pi-ip>:8085` answers 400 unless
-  `YTM_ALLOWED_HOSTS` lists the Pi's address.
+- A client that reaches the published port directly, not through the proxy, needs the
+  address it uses in `YTM_ALLOWED_HOSTS`, or it gets 400.
 - The Jellyfin refresh call does not verify TLS, so that a self-signed Jellyfin
   certificate on an internal network works. The API key is therefore sent without
   verifying the server, and urllib3's `InsecureRequestWarning` is silenced
   process-wide.
 
-## Deploying in jelly-stack
+## Deploying
 
-The Compose definition (both services, the bgutil sidecar, healthchecks and port
-mapping) lives in [jelly-stack](https://github.com/Ochsyp/jelly-stack), which clones this
-repository into a `youtube-manager` folder of its checkout. Compose builds the image from that
-checkout and bind-mounts it over `/app`, so a `git pull` followed by a restart of both
-`youtube-manager` and `youtube-worker` deploys code changes; dependency, Dockerfile and
-yt-dlp updates need a rebuild. The container names `youtube-manager`, `youtube-worker`
-and `bgutil-provider` are an interface: the stack's Squid ACLs, firewall rules, probes,
-log pipeline and reverse proxy address them by name. nginx must forward the `Host` the
-browser sent: `proxy_set_header Host $host` matches `Origin` only while nginx listens on
-port 80, and on any other port it needs `$http_host`, or every POST gets 403.
+Run one web container and one worker from the same image, next to a bgutil PO-token
+provider. [compose.example.yaml](compose.example.yaml) is a complete example that builds
+the image from this checkout:
+
+```sh
+docker compose -f compose.example.yaml up -d --build
+```
+
+- **Services.** The web UI is the image's default command and listens on port 8080; the
+  worker runs `python worker.py`. Both use the SQLite database under `/app/data`, so run
+  exactly one of each.
+- **Volumes.** `/app/data` holds the database, so back it up. `/downloads` is the staging
+  area and `/media` the library. They may sit on different disks: filing copies to a
+  hidden temporary file, syncs it and renames it into place.
+- **Reverse proxy.** Serve the UI through any reverse proxy and set `YTM_ALLOWED_HOSTS` to
+  the name it serves the UI under. The proxy must pass on the `Host` header the browser
+  sent, port included, or every POST gets 403. In nginx that is
+  `proxy_set_header Host $http_host;`, because `$host` drops the port; Caddy and Traefik
+  pass it on by default. Let the proxy admit only the clients and probes that should
+  reach the UI, and publish the container's port to nothing else.
+- **Healthchecks.** The web UI answers `GET /health` without touching the database. The
+  worker touches `WORKER_HEARTBEAT_PATH` from every long-running loop; treat it as dead
+  once that file is more than 600 seconds old.
+- **Stopping.** On SIGTERM the worker stops at its next check. Give it a stop grace
+  period of 60 seconds, since Docker's default of 10 can kill a step mid-write.
+- **Updating.** Pull the new code, rebuild the image and recreate both containers
+  together.
 
 ## Running tests
 
@@ -135,6 +148,7 @@ tests/              pytest suite and its fixtures (conftest.py)
 data/               SQLite database (runtime, git-ignored)
 Dockerfile          image build; also installs yt-dlp and the bgutil plugin
 entrypoint.sh       drops root to PUID/PGID
+compose.example.yaml  example deployment: web UI, worker and bgutil provider
 requirements.txt    Python dependencies
 requirements-dev.txt  test-only dependencies (pytest, httpx)
 pytest.ini          pytest settings and the posix marker

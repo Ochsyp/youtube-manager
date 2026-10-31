@@ -6,7 +6,7 @@
 
 ## Deploy notes
 
-<!-- Changes the jelly-stack Compose files, nginx, Squid or the Pi need, or "none". -->
+<!-- What a deployment has to change (environment, volumes, reverse proxy, image tag), or "none". -->
 
 ## Checklist
 

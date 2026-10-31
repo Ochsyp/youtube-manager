@@ -1,11 +1,13 @@
 # Security policy
 
-This is a private, single-maintainer repository.
+youtube-manager is a single-maintainer project.
 
 ## Reporting a problem
 
-Contact [@Ochsyp](https://github.com/Ochsyp) directly. Never paste tokens, keys or logs
-that contain them into issues, pull requests or commits.
+Report a vulnerability privately through GitHub's
+[private vulnerability reporting](https://github.com/Ochsyp/youtube-manager/security/advisories/new),
+not in a public issue. Never paste tokens, keys or logs that contain them into issues,
+pull requests or commits.
 
 ## Secrets
 
@@ -24,8 +26,8 @@ authenticating reverse proxy.
 It does refuse requests that other web pages make through a visitor's browser:
 
 - Host pinning: any `Host` other than `youtube-manager`, `localhost`, `127.0.0.1` or an
-  entry of the comma-separated `YTM_ALLOWED_HOSTS` (the UI's nginx name) gets 400, which
-  blocks DNS rebinding. The port is not compared.
+  entry of the comma-separated `YTM_ALLOWED_HOSTS` (the name the reverse proxy serves the
+  UI under) gets 400, which blocks DNS rebinding. The port is not compared.
 - A cross-origin guard on every request other than GET, HEAD and OPTIONS. It accepts a
   `Sec-Fetch-Site` of `same-origin` or `none`, or, when the browser sends no
   `Sec-Fetch-Site`, an `Origin` whose host and port equal `Host`. Anything else,
@@ -35,10 +37,10 @@ It does refuse requests that other web pages make through a visitor's browser:
   and same-origin Referrer and Cross-Origin-Resource policies on every response.
 
 None of this stops a client on the network that sends the right headers itself. Keep
-the UI LAN-only: in jelly-stack, publish no host port for it (close `8085`) and let
-the nginx server for the UI's name allow only the LAN and the stack's Docker subnets.
-Until port 8085 is closed, `http://<pi-ip>:8085` answers 400 unless
-`YTM_ALLOWED_HOSTS` lists the Pi's address.
+the UI on a trusted network: publish the container's port only to the reverse proxy, and
+let the proxy admit only the clients and probes that should reach it. A client that
+reaches the port directly needs the address it uses in `YTM_ALLOWED_HOSTS`, or it gets
+400.
 
 ## Automated checks
 
