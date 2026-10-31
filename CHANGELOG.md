@@ -45,6 +45,10 @@ The first code commit imports the web UI, the download worker and the organizer,
   other job uses it, and otherwise keeps both files and logs a WARN naming them. (phase 5)
 - The check whether another job uses a file refuses, rather than allows, a delete or overwrite
   when it has no database session. (phase 5)
+- The git history was rewritten on 2026-10-31 and the GitHub repository was recreated. Two
+  playlist IDs in the tests and a deploy path in an early README were replaced, and commit dates
+  are recorded in UTC. Every commit ID changed: re-clone, or reset an existing clone with
+  `git fetch` and `git reset --hard origin/main`. Do not pull or merge the old history.
 
 ### Security
 
