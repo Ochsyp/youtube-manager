@@ -5,19 +5,24 @@
 # a Jellyfin library layout. Playlist-linked and channel-grouped videos become episodes of a
 # per-playlist/per-channel show; everything else becomes a movie. Naming follows Sonarr/Radarr
 # conventions plus a [{video_id}] collision guard. Safe to re-run: organized_at, or a destination
-# file that already exists, means already-organized.
+# file that already exists, means already-organized, unless no other row uses it and its size
+# differs.
 # -------------------------------------------------------
 
+import errno
 import glob
 import json
 import logging
 import os
 import re
 import shutil
+import time
 import unicodedata
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, BinaryIO, Callable, Iterator, NamedTuple, Optional
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -74,6 +79,17 @@ VCODEC_LABELS = {
 # Upper bound on <tag> elements in an NFO: YouTube tag lists run to hundreds of near-duplicate
 # keywords, which clutters the library UI.
 MAX_NFO_TAGS = 25
+
+# Domains artwork may be fetched from: YouTube's thumbnail CDN and the two hosts serving channel
+# avatars. Any other host is refused before a request goes out, so a foreign or redirecting URL
+# fails fast with one WARN.
+IMAGE_HOST_DOMAINS = ('ytimg.com', 'ggpht.com', 'googleusercontent.com')
+
+# Cap on one artwork download. Thumbnails and avatars are far smaller; a larger body is not one.
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+# Seconds between repeats of the missing-library ERROR while the library stays unavailable.
+LIBRARY_ERROR_INTERVAL_SECONDS = 3600
 
 
 # Prefixed so organizer output is easy to grep out of the worker's logs.
@@ -248,6 +264,126 @@ def video_id_tag(job: Download) -> str:
 
 
 # =======================================================
+#               WRITING INTO THE LIBRARY
+# =======================================================
+# Nothing lands under its final name until it is complete, and nothing is filed while the library
+# disk looks unmounted. Temps are hidden '.<name>.partial' files, which Jellyfin never indexes.
+
+# The hidden temp a write to `dest` goes through: beside it, so the final rename stays on one
+# filesystem, and ending '.partial' so neither Jellyfin nor is_media_file() reads it as media.
+def partial_path(dest: Path) -> Path:
+    return dest.with_name(f'.{dest.name}.partial')
+
+
+# Yield partial_path(dest) for the caller to fill, then rename it over `dest` on a clean exit. On
+# any exception the temp is removed and the exception re-raised, leaving `dest` as it was. A stale
+# temp from an interrupted run is cleared first.
+@contextmanager
+def partial_file(dest: Path) -> Iterator[Path]:
+    temp = partial_path(dest)
+    try:
+        temp.unlink(missing_ok=True)
+        yield temp
+        os.replace(temp, dest)
+    except BaseException:
+        # Suppressed, so a failed cleanup never hides the error that caused it.
+        with suppress(OSError):
+            temp.unlink(missing_ok=True)
+        raise
+
+
+# Write `dest` atomically: `write` fills the temp through a binary handle, which is fsynced before
+# the rename, so a crash leaves the old file or the new one, never a truncated one. Raises on
+# failure.
+def write_atomically(dest: Path, write: Callable[[BinaryIO], None]) -> None:
+    with partial_file(dest) as temp:
+        with open(temp, 'wb') as fh:
+            write(fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+
+
+# Copy `src` to `dest` with shutil.copy2's metadata (mtime and mode), its bytes fsynced to disk.
+def copy_synced(src: Path, dest: Path) -> None:
+    shutil.copyfile(src, dest)
+    # Opened for append, which writes nothing: Windows only fsyncs a handle open for writing.
+    with open(dest, 'ab') as fh:
+        os.fsync(fh.fileno())
+    # Last, as copy2 orders it: the mode copied here may make the file read-only.
+    shutil.copystat(src, dest)
+
+
+# Flush a rename into `folder` to disk. Best-effort: Windows cannot open a directory this way, and
+# the rename itself has happened either way.
+def fsync_directory(folder: Path) -> None:
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+# True when `src` and the folder `dest` lands in share a filesystem, so os.replace can rename across
+# them. Its own function so the tests can force safe_move's copy branch on a single disk.
+def same_filesystem(src: Path, dest: Path) -> bool:
+    return src.stat().st_dev == dest.parent.stat().st_dev
+
+
+# Move `src` over `dest` so that one complete copy exists at every moment. On one filesystem that is
+# a rename. Across two -- staging and the library are separate disks, so this is the normal case --
+# a synced copy is renamed into place before `src` is unlinked. Raises on failure with `src` intact
+# and no temp left. `dest`'s folder must already exist.
+def safe_move(src: Path, dest: Path) -> None:
+    if same_filesystem(src, dest):
+        try:
+            os.replace(src, dest)
+            return
+        except OSError as exc:
+            # Two bind mounts of one filesystem share st_dev, yet a rename between them fails.
+            if exc.errno != errno.EXDEV:
+                raise
+
+    with partial_file(dest) as temp:
+        copy_synced(src, temp)
+    fsync_directory(dest.parent)
+    src.unlink()
+
+
+# time.monotonic() of the last missing-library ERROR; None while the library is ready, so the first
+# refused pass of each outage logs at once. Module state, which the tests reset.
+_library_error_logged_at: Optional[float] = None
+
+
+# True when organizing may write into the library. Opt-in: with LIBRARY_SENTINEL unset it is always
+# True; set, the file it names must exist, so a USB disk that failed to mount is never filed into.
+# A refusal logs ERROR at most once an hour, and the sentinel's return logs one INFO line.
+def library_ready() -> bool:
+    global _library_error_logged_at
+    # Read per call rather than at import, so a test can set it without reloading the module.
+    sentinel = os.getenv('LIBRARY_SENTINEL')
+    if not sentinel:
+        return True
+
+    if Path(sentinel).exists():
+        if _library_error_logged_at is not None:
+            log(f'Library sentinel {sentinel} is back; organizing resumes')
+            _library_error_logged_at = None
+        return True
+
+    now = time.monotonic()
+    if _library_error_logged_at is None or now - _library_error_logged_at >= LIBRARY_ERROR_INTERVAL_SECONDS:
+        error(f'Library sentinel {sentinel} is missing, so {MEDIA_PATH} looks unmounted; '
+              'not organizing until it is back')
+        _library_error_logged_at = now
+    return False
+
+
+# =======================================================
 #                   NFO CONSTRUCTION
 # =======================================================
 # A whole document is described as one plain dict and rendered by append_nfo_element().
@@ -292,14 +428,16 @@ def append_nfo_element(parent: ET.Element, tag: str, value: Any) -> None:
 
 
 # Write a Jellyfin/Kodi-compatible NFO file. ElementTree does the XML escaping, so a title or
-# description containing & or < is written safely whatever it contains.
+# description containing & or < is written safely whatever it contains. Written atomically: an
+# interrupted write must not leave a truncated NFO that execute_plan() would take as healthy.
 def write_nfo(path: Path, root_tag: str, fields: dict) -> None:
     root = ET.Element(root_tag)
     for tag, value in fields.items():
         append_nfo_element(root, tag, value)
 
     ET.indent(root, space='  ')
-    ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
+    tree = ET.ElementTree(root)
+    write_atomically(path, lambda fh: tree.write(fh, encoding='utf-8', xml_declaration=True))
 
 
 # Shorten a raw yt-dlp acodec ("mp4a.40.2") to its family ("mp4a"). Unlike normalize_vcodec there
@@ -442,17 +580,64 @@ def get_or_assign_channel_folder_name(db, channel: Channel) -> str:
     return folder_name
 
 
-# Download an image into `dest`. Best-effort by design: artwork is never worth failing an
-# organize over, so a failure is logged and reported rather than raised.
-def download_image(url: str, dest: Path, description: str) -> bool:
+# True for an https URL on an IMAGE_HOST_DOMAINS host or a subdomain of one, with no userinfo and
+# no port but the default. hostname is lowercased by urlparse, and the dot in the suffix test keeps
+# a lookalike such as "evil-ytimg.com" out.
+def is_allowed_image_url(url: str) -> bool:
     try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(response.content)
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme != 'https' or '@' in parsed.netloc or port not in (None, 443):
+        return False
+    host = parsed.hostname or ''
+    return any(host == domain or host.endswith(f'.{domain}') for domain in IMAGE_HOST_DOMAINS)
+
+
+# An artwork response refused for what it is rather than for a transport failure.
+class ImageRejected(Exception):
+    pass
+
+
+# Copy a streamed response body into `fh`. Raises ImageRejected once it passes MAX_IMAGE_BYTES,
+# whatever Content-Length claimed.
+def write_capped_body(response: requests.Response, fh: BinaryIO) -> None:
+    received = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        received += len(chunk)
+        if received > MAX_IMAGE_BYTES:
+            raise ImageRejected(f'body exceeds {MAX_IMAGE_BYTES} bytes')
+        fh.write(chunk)
+
+
+# Download an image into `dest`. Best-effort by design: artwork is never worth failing an
+# organize over, so a failure is logged at WARN and reported rather than raised. Only
+# is_allowed_image_url() hosts are fetched, a redirect counts as a failure, and the body must be
+# image/* within MAX_IMAGE_BYTES; it is written atomically, so a failure leaves `dest` untouched.
+def download_image(url: str, dest: Path, description: str) -> bool:
+    if not is_allowed_image_url(url):
+        warn(f'Refusing to download {description} from {url}: not https on a YouTube image host')
+        return False
+
+    try:
+        with requests.get(url, timeout=15, stream=True, allow_redirects=False) as response:
+            response.raise_for_status()
+            # With redirects off, a 3xx arrives as an ordinary response carrying no image.
+            if response.status_code != 200:
+                raise ImageRejected(f'HTTP {response.status_code}')
+            content_type = response.headers.get('Content-Type', '')
+            if not content_type.lower().startswith('image/'):
+                raise ImageRejected(f'Content-Type {content_type!r} is not an image')
+            declared = response.headers.get('Content-Length', '')
+            if declared.isdigit() and int(declared) > MAX_IMAGE_BYTES:
+                raise ImageRejected(f'Content-Length {declared} exceeds {MAX_IMAGE_BYTES} bytes')
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            write_atomically(dest, lambda fh: write_capped_body(response, fh))
         return True
-    except (requests.RequestException, OSError) as exc:
-        log(f'Failed to download {description}: {exc}')
+    except (requests.RequestException, OSError, ImageRejected) as exc:
+        warn(f'Failed to download {description}: {exc}')
         return False
 
 
@@ -461,7 +646,8 @@ def download_image(url: str, dest: Path, description: str) -> bool:
 def copy_image(src: Path, dest: Path, description: str) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+        with partial_file(dest) as temp:
+            copy_synced(src, temp)
         return True
     except OSError as exc:
         log(f'Failed to copy {description}: {exc}')
@@ -823,13 +1009,18 @@ def remove_exclusive_folder(job: Download, folder: Path) -> bool:
 # True when a row other than `job` still points at `path`. Two rows share a file whenever the same
 # video is requested twice -- standalone and again inside a playlist -- because execute_plan() has
 # the second one adopt the file already at the destination instead of storing a copy.
-# no_autoflush: this runs mid-deletion, and a flush here would open the write transaction and hold
-# it across every remaining unlink, which is how the two processes end up fighting for the lock.
-def file_claimed_by_another_row(job: Download, path: Path) -> bool:
-    db = object_session(job)
+# Queries through `db`, else the session `job` is attached to; with neither it fails closed and
+# answers True, so no delete or overwrite proceeds unchecked.
+def file_claimed_by_another_row(job: Download, path: Path, db=None) -> bool:
     if db is None:
-        return False
+        db = object_session(job)
+    if db is None:
+        error(f'Job {job.id}: no database session to check who else uses {path}; treating it as shared')
+        return True
 
+    # no_autoflush: this runs mid-deletion or mid-organize, and a flush here would open the write
+    # transaction and hold it across every remaining unlink or copy, which is how the two
+    # processes end up fighting for the lock.
     with db.no_autoflush:
         others = db.query(Download).filter(Download.filename == str(path), Download.status != 'deleted')
         if job.id is not None:
@@ -956,6 +1147,13 @@ def cleanup_old_folder_if_exclusive(job: Download, old_video_path: Path, new_vid
         folder = folder.parent
 
 
+# Delete the '.partial' temps an interrupted run left beside a plan's video, thumbnail and NFO.
+# Nothing ever reads one, so any still there when a plan is carried out is garbage.
+def remove_stale_partials(job: Download, plan: OrganizePlan) -> None:
+    for dest in (plan.dest_video, plan.dest_thumb, plan.dest_nfo):
+        discard_file(job, partial_path(dest), 'stale partial copy')
+
+
 # Carry out a plan: move the video and its thumbnail into the library, write the NFO, discard the
 # sidecars it supersedes, and record the result on the job. force_nfo rewrites an existing NFO
 # instead of only a missing one; set only for a job the user targeted, never for the routine scan,
@@ -972,17 +1170,44 @@ def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: 
     if not info_src or not info_src.exists():
         info_src = find_sidecar(video_path, '.info.json')
 
+    if not dry_run:
+        remove_stale_partials(job, plan)
+
     # An existing destination means a previous run already filed this video; clean up whatever
-    # is still sitting in the staging directory and record it as organized.
+    # is still sitting in the staging directory and record it as organized. A source whose size
+    # differs is the exception: it replaces a destination no other row claims (most likely one an
+    # interrupted move truncated), and is kept beside one another row does claim.
     if plan.dest_video.exists():
         if dry_run:
             log(f'[dry-run] Job {job.id}: {plan.dest_video} already in place, would mark organized')
             return True
 
-        log(f'Job {job.id}: destination already exists ({plan.dest_video}), marking organized')
+        source_differs = (
+            video_path != plan.dest_video
+            and video_path.exists()
+            and video_path.stat().st_size != plan.dest_video.stat().st_size
+        )
+        keep_source = False
+        if not source_differs:
+            log(f'Job {job.id}: destination already exists ({plan.dest_video}), marking organized')
+        elif file_claimed_by_another_row(job, plan.dest_video, db):
+            # Two rows legitimately share one file, so a claimed copy is never replaced on a size
+            # difference alone.
+            warn(f'Job {job.id}: {plan.dest_video} belongs to another download and differs in size from '
+                 f'{video_path}; keeping both and marking organized')
+            keep_source = True
+        else:
+            warn(f'Job {job.id}: {plan.dest_video} differs in size from {video_path} and no other '
+                 f'download uses it; replacing it')
+            try:
+                safe_move(video_path, plan.dest_video)
+            except OSError as exc:
+                error(f'Job {job.id}: failed to organize {video_path} -> {plan.dest_video} ({exc})')
+                return False
+
         # Each source is discarded only when it is not the destination itself: re-organizing a
         # video already sitting at its final path would otherwise delete the filed copy.
-        if video_path != plan.dest_video:
+        if video_path != plan.dest_video and not keep_source:
             discard_file(job, video_path, 'original source file')
         if thumb_src and thumb_src != plan.dest_thumb:
             discard_file(job, thumb_src, 'original thumbnail')
@@ -1023,10 +1248,11 @@ def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: 
 
     try:
         # DOWNLOAD_PATH and MEDIA_PATH are separate mounts, so this is a copy+delete rather than
-        # a rename; shutil.move picks that up itself.
-        shutil.move(str(video_path), str(plan.dest_video))
+        # a rename; safe_move picks that up itself, and never deletes the source before the copy
+        # is complete under its final name.
+        safe_move(video_path, plan.dest_video)
         if thumb_src and thumb_src.exists():
-            shutil.move(str(thumb_src), str(plan.dest_thumb))
+            safe_move(thumb_src, plan.dest_thumb)
 
         # Written before the sidecars are discarded, so a failed write loses nothing.
         write_nfo(plan.dest_nfo, plan.nfo_root, plan.nfo_fields)
@@ -1085,8 +1311,10 @@ def organize_job(db, job: Download, dry_run: bool, force_nfo: bool = False) -> b
 
 # Re-run organizing for one job, rewriting its NFO even though the video is already in place.
 # Backs "Fetch Metadata": the user asked for this one job, so the scan's caution about healthy
-# NFOs doesn't apply.
+# NFOs doesn't apply. Returns False, touching nothing, while library_ready() refuses.
 def organize_single_job(job_id: int) -> bool:
+    if not library_ready():
+        return False
     SHOWS_DIR.mkdir(parents=True, exist_ok=True)
     MOVIES_DIR.mkdir(parents=True, exist_ok=True)
     with Session() as db:
@@ -1288,8 +1516,11 @@ def repair_missing_thumbnails(db, dry_run: bool = False) -> int:
 
 
 # File every completed video job that isn't organized yet. Called periodically by the worker, and
-# once after each parent job finishes.
+# once after each parent job finishes. Returns 0, touching nothing, while library_ready() refuses:
+# the jobs stay completed and unorganized for the first pass after the library is back.
 def scan_and_process(dry_run: bool = False) -> int:
+    if not library_ready():
+        return 0
     SHOWS_DIR.mkdir(parents=True, exist_ok=True)
     MOVIES_DIR.mkdir(parents=True, exist_ok=True)
     organized = 0

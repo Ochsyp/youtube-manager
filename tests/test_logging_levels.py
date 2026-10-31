@@ -279,7 +279,7 @@ def test_organizer_move_failure_logs_error(caplog, monkeypatch, library):
     def full_disk(src, dst):
         raise OSError(errno.ENOSPC, 'No space left on device')
 
-    monkeypatch.setattr(organizer.shutil, 'move', full_disk)
+    monkeypatch.setattr(organizer, 'safe_move', full_disk)
 
     assert organizer.execute_plan(None, job, plan, source, {}, dry_run=False) is False
 

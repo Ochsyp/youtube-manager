@@ -48,6 +48,7 @@ One image, two containers, one SQLite database in WAL mode.
 |---|---|---|
 | `DOWNLOAD_PATH` | `/downloads` | Staging directory yt-dlp writes into |
 | `MEDIA_PATH` | `/media` | Library root the organizer files into |
+| `LIBRARY_SENTINEL` | unset | Worker only: a file on the library disk, such as `/media/.library-mounted`, that must exist before anything is filed. While it is missing the organizer files nothing and logs ERROR at most once an hour. Create the file before setting the variable |
 | `YOUTUBE_DB_URI` | `sqlite:///<app dir>/data/youtube.db` | SQLAlchemy database URL |
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
