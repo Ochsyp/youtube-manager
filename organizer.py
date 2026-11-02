@@ -102,9 +102,9 @@ def warn(msg: str) -> None:
     logging.warning('[organizer] %s', msg)
 
 
-# ERROR with the same prefix. The jelly-stack alert pages on any ERROR from either YouTube
-# container, so this is kept for what needs a human: a failed move or NFO write, a rejected
-# Jellyfin token, a refused delete.
+# ERROR with the same prefix. Deployments alert on ERROR lines from either service, so this is
+# kept for what needs a human: a failed move or NFO write, a rejected Jellyfin token, a refused
+# delete.
 def error(msg: str) -> None:
     logging.error('[organizer] %s', msg)
 
@@ -1570,7 +1570,7 @@ def scan_and_process(dry_run: bool = False) -> int:
                     continue
 
             # One unfilable job must not strand the jobs behind it; the next scan retries it.
-            # Logged with its traceback, which applog indents into the same Loki entry.
+            # Logged with its traceback, which applog indents into the same log entry.
             try:
                 if organize_job(db, job, dry_run):
                     organized += 1

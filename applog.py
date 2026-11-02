@@ -1,18 +1,18 @@
 # -------------------------------------------------------
 # Shared logging setup
 #
-# Shared logging setup for the YouTube Manager services. Lines match the shell
-# scripts' shape ("[LEVEL]  [timestamp] message") so one Promtail regex reads both;
-# Promtail folds every following line that does not start with that tag into the
-# same Loki entry, which is what keeps a traceback whole.
+# Shared logging setup for the YouTube Manager services. Every record starts with a
+# "[LEVEL]  [timestamp] message" line and its continuation lines are indented, so a
+# log collector that opens a new entry at each tag (a Promtail multiline stage, say)
+# keeps a traceback whole.
 # -------------------------------------------------------
 
 import logging
 import sys
 import warnings
 
-# Match the shell scripts' vocabulary: they log WARN and CRIT, not Python's
-# longer WARNING/CRITICAL, which would also break the padded-tag alignment.
+# The short tags WARN and CRIT, not Python's longer WARNING/CRITICAL, which would
+# break the padded-tag alignment.
 logging.addLevelName(logging.WARNING, 'WARN')
 logging.addLevelName(logging.CRITICAL, 'CRIT')
 
@@ -26,17 +26,17 @@ _configured = False
 class StackFormatter(logging.Formatter):
     default_time_format = '%Y-%m-%d %H:%M:%S'
     # Suppress the ",%03d" milliseconds suffix formatTime appends by default;
-    # the shell scripts log whole seconds.
+    # the line format carries whole seconds.
     default_msec_format = ''
 
     # Render one record, appending any traceback or stack trace indented by four
-    # spaces so none of its lines can open a new Loki entry (see the header).
+    # spaces so none of its lines can open a new log entry (see the header).
     def format(self, record: logging.LogRecord) -> str:
         tag = f'[{record.levelname}]'.ljust(_TAG_WIDTH)
         line = f'{tag} [{self.formatTime(record, self.datefmt)}] {record.getMessage()}'
 
         # Indenting keeps a traceback line that itself starts with "[Something]" from
-        # matching Promtail's firstline pattern and splitting off its own entry.
+        # matching a collector's first-line pattern and splitting off its own entry.
         extra = ''
         if record.exc_info:
             extra = self.formatException(record.exc_info)
@@ -64,7 +64,7 @@ def configure(level: int = logging.INFO) -> None:
     root.setLevel(level)
 
     # Otherwise warnings.warn() writes straight to stderr as a bare two-line
-    # record that carries no level and fragments into two Loki entries.
+    # record that carries no level and fragments into two log entries.
     logging.captureWarnings(True)
 
     # The Jellyfin certificate is self-signed and trusted deliberately, so

@@ -12,14 +12,14 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir yt-dlp
-# Client half only: fetches PO tokens over HTTP from the bgutil-provider container
-# (see docker-compose.yml) and mints none itself.
+# Client half only: fetches PO tokens over HTTP from the bgutil provider at
+# POT_PROVIDER_URL and mints none itself.
 RUN pip install --no-cache-dir bgutil-ytdlp-pot-provider
 
 COPY . .
 RUN chmod +x entrypoint.sh
 
-# youtube-manager and youtube-worker share this image, differing only in the `command:`
-# docker-compose.yml passes; the entrypoint execs that command as PUID/PGID, not root.
+# The web UI and the worker share this image, differing only in the command the host passes
+# (see compose.example.yaml); the entrypoint execs that command as PUID/PGID, not root.
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

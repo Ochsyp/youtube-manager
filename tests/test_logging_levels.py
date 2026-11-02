@@ -1,8 +1,8 @@
 # -------------------------------------------------------
 # Log level tests
 #
-# Pins which worker and organizer failures log at WARN and which at ERROR. ERROR pages through the
-# jelly-stack alert, so it must stay limited to conditions a human has to look at. Nothing here
+# Pins which worker and organizer failures log at WARN and which at ERROR. Deployments alert on
+# ERROR, so it must stay limited to conditions a human has to look at. Nothing here
 # runs yt-dlp or reaches the network: subprocess calls, scans and HTTP requests are replaced.
 # -------------------------------------------------------
 
@@ -291,7 +291,7 @@ def test_organizer_move_failure_logs_error(caplog, monkeypatch, library):
 
 
 # An unexpected exception while organizing one job logs ERROR with its traceback, which applog
-# renders indented under the message so Promtail keeps it in the same entry.
+# renders indented under the message so a log collector keeps it in the same entry.
 def test_organizer_catch_all_logs_traceback(caplog, monkeypatch, make_job, library):
     caplog.set_level(logging.INFO)
     video = library.staging / 'Title [dQw4w9WgXcQ].mp4'

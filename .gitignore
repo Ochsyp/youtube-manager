@@ -2,8 +2,8 @@
 .env*
 !.env.example
 
-# Runtime state. Compose bind-mounts the checkout over /app, so the containers
-# write the SQLite database and yt-dlp's cache into the source tree.
+# Runtime state a run from this checkout can leave in the tree: the SQLite
+# database in data/ and, with the checkout mounted at /app, yt-dlp's .cache/.
 /data/*
 !/data/.gitkeep
 /.cache/
