@@ -18,7 +18,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ABSOLUTE_DEFAULTS = (Path('/downloads'), Path('/media'), Path('/tmp/worker-heartbeat'))
 
 # Imported in the child; argv[1] is the repo root, put first on sys.path.
-IMPORT_SCRIPT = 'import sys; sys.path.insert(0, sys.argv[1]); import app, worker, organizer, database'
+IMPORT_SCRIPT = (
+    'import sys; sys.path.insert(0, sys.argv[1]); '
+    'from youtube_manager import app, worker, organizer, database'
+)
 
 
 # Every file and directory under `root` mapped to its (size, mtime_ns), skipping the subtrees

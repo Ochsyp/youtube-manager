@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, or_
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-import applog
+from youtube_manager import applog
 
 from fastapi import FastAPI, Form, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -27,11 +27,11 @@ from sqlalchemy.orm import aliased, joinedload, selectinload
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from database import Download, Session, Subscription, initialize_database, utcnow
+from youtube_manager.database import Download, Session, Subscription, initialize_database, utcnow
 
 # Job-state vocabulary and progress/speed aggregation, shared with the worker so
 # both processes describe a job the same way.
-from jobstate import (
+from youtube_manager.jobstate import (
     ACTIVE_STATUSES,
     ACTIVE_STATUS_SET,
     CANCELABLE_EFFECTIVE_STATUSES,
@@ -51,8 +51,8 @@ from jobstate import (
     is_retriable,
     reset_job_for_retry,
 )
-from media import extract_youtube_id
-from organizer import remove_downloaded_files
+from youtube_manager.media import extract_youtube_id
+from youtube_manager.organizer import remove_downloaded_files
 
 # Install the shared log format before anything else emits a line, including
 # uvicorn's own startup/access logging -- see applog.py.

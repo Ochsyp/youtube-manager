@@ -11,8 +11,8 @@
 import re
 from typing import Callable, Optional
 
-from database import utcnow
-from media import SEARCH_PATHS, find_existing_media
+from youtube_manager.database import utcnow
+from youtube_manager.media import SEARCH_PATHS, find_existing_media
 
 # =======================================================
 #                   STATUS VOCABULARY

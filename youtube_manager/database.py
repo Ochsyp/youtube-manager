@@ -31,7 +31,8 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 # =======================================================
 # Where the database lives, and the per-connection PRAGMAs that let two processes share it.
 
-DATABASE_DIR = Path(__file__).resolve().parent / 'data'
+# data/ at the repo root, beside this package; /app/data in the image.
+DATABASE_DIR = Path(__file__).resolve().parent.parent / 'data'
 
 # YOUTUBE_DB_URI overrides the local SQLite file; the directory is only created when that default
 # is actually in use, so an override never has to be writable here.

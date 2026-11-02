@@ -8,8 +8,8 @@
 
 import pytest
 
-from database import Download
-from jobstate import (
+from youtube_manager.database import Download
+from youtube_manager.jobstate import (
     compute_effective_status,
     compute_parent_progress,
     parse_speed_value,

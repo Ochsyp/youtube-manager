@@ -66,7 +66,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 # pooled connections so Windows can delete it.
 @pytest.fixture
 def empty_db(tmp_path: Path):
-    import database
+    from youtube_manager import database
 
     path = tmp_path / 'youtube.db'
     database.configure_database(sqlite_url(path))
@@ -78,7 +78,7 @@ def empty_db(tmp_path: Path):
 # shared Session factory, now bound to that file.
 @pytest.fixture
 def db(empty_db: Path):
-    import database
+    from youtube_manager import database
 
     database.initialize_database()
     return database.Session
@@ -88,7 +88,7 @@ def db(empty_db: Path):
 # .staging and .media; both are the module-level paths media, organizer and worker read.
 @pytest.fixture
 def library() -> SimpleNamespace:
-    import media
+    from youtube_manager import media
 
     for root in (media.DOWNLOAD_PATH, media.MEDIA_PATH):
         # Only ever empty a directory under the harness's own temp root.
@@ -104,7 +104,7 @@ def library() -> SimpleNamespace:
 def client(db):
     from fastapi.testclient import TestClient
 
-    from app import app
+    from youtube_manager.app import app
 
     with TestClient(app, base_url=APP_ORIGIN, headers={'Origin': APP_ORIGIN}) as test_client:
         yield test_client
@@ -114,7 +114,7 @@ def client(db):
 # and returns it detached. Its columns stay readable; its relationships are not loaded.
 @pytest.fixture
 def make_job(db):
-    from database import Download
+    from youtube_manager.database import Download
 
     # Insert one Download built from a queued single-video request, overridden by `fields`.
     def make(**fields) -> Download:

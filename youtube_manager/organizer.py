@@ -28,9 +28,9 @@ from xml.etree import ElementTree as ET
 import requests
 from sqlalchemy.orm import object_session
 
-from database import Channel, Download, Playlist, Session, Subscription, utcnow
-from jobstate import ACTIVE_STATUS_SET
-from media import (
+from youtube_manager.database import Channel, Download, Playlist, Session, Subscription, utcnow
+from youtube_manager.jobstate import ACTIVE_STATUS_SET
+from youtube_manager.media import (
     DOWNLOAD_PATH,
     MEDIA_PATH,
     STAGING_TEMP,
@@ -1587,11 +1587,12 @@ def scan_and_process(dry_run: bool = False) -> int:
     return organized
 
 
-# Allow running the organizer standalone for testing, e.g. `python organizer.py --dry-run`.
+# Allow running the organizer standalone for testing, e.g. with
+# `python -m youtube_manager.organizer --dry-run`.
 if __name__ == '__main__':
     import sys
 
-    import applog
+    from youtube_manager import applog
 
     applog.configure()
 

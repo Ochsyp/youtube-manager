@@ -5,8 +5,8 @@
 # goes, and one that still has a subdirectory, which rmtree would take along, stays.
 # -------------------------------------------------------
 
-import organizer
-from database import Download
+from youtube_manager import organizer
+from youtube_manager.database import Download
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 

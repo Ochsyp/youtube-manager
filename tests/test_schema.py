@@ -8,8 +8,8 @@
 
 from sqlalchemy import inspect, text
 
-import database
-from database import Base, Download
+from youtube_manager import database
+from youtube_manager.database import Base, Download
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 

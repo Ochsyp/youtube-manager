@@ -5,7 +5,7 @@
 # the dashboard on an empty database, and queuing a video from the add form.
 # -------------------------------------------------------
 
-from database import Download
+from youtube_manager.database import Download
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 

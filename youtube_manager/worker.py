@@ -23,9 +23,16 @@ from typing import Iterable, Optional
 
 from sqlalchemy import or_
 
-import applog
-from database import Channel, Download, Playlist, Session, Subscription, wait_for_schema
-from jobstate import (
+from youtube_manager import applog
+from youtube_manager.database import (
+    Channel,
+    Download,
+    Playlist,
+    Session,
+    Subscription,
+    wait_for_schema,
+)
+from youtube_manager.jobstate import (
     ACTIVE_STATUS_SET,
     PARENT_REQUEST_TYPES,
     RESET_PROGRESS_ON_STATUSES,
@@ -40,7 +47,7 @@ from jobstate import (
     reset_job_for_retry,
     resolve_parent_status,
 )
-from media import (
+from youtube_manager.media import (
     DOWNLOAD_PATH,
     MEDIA_PATH,
     STAGING_TEMP,
@@ -49,9 +56,9 @@ from media import (
     is_media_file,
     normalize_youtube_id,
 )
-from organizer import organize_single_job as organizer_organize_single_job
-from organizer import remove_staging_leftovers as organizer_remove_staging_leftovers
-from organizer import scan_and_process as organizer_scan_and_process
+from youtube_manager.organizer import organize_single_job as organizer_organize_single_job
+from youtube_manager.organizer import remove_staging_leftovers as organizer_remove_staging_leftovers
+from youtube_manager.organizer import scan_and_process as organizer_scan_and_process
 
 
 # =======================================================

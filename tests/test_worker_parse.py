@@ -7,7 +7,7 @@
 
 import pytest
 
-from worker import parse_completion_speed, parse_progress_line
+from youtube_manager.worker import parse_completion_speed, parse_progress_line
 
 
 # A progress line yields its percentage and instantaneous rate exactly as printed; a rate yt-dlp

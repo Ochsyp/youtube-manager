@@ -8,7 +8,13 @@
 
 import pytest
 
-from media import STAGING_TEMP, extract_youtube_id, find_existing_media, is_format_fragment, is_media_file
+from youtube_manager.media import (
+    STAGING_TEMP,
+    extract_youtube_id,
+    find_existing_media,
+    is_format_fragment,
+    is_media_file,
+)
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 
