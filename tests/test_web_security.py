@@ -14,9 +14,9 @@ from html.parser import HTMLParser
 import pytest
 from fastapi.routing import APIRoute
 
-from app import SecurityHeaders, app, load_allowed_hosts, templates
 from conftest import APP_ORIGIN
-from database import Download, Subscription
+from youtube_manager.app import SecurityHeaders, app, load_allowed_hosts, templates
+from youtube_manager.database import Download, Subscription
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 ADD_FORM = {'url': f'https://www.youtube.com/watch?v={VIDEO_ID}', 'request_type': 'video'}

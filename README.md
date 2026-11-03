@@ -19,24 +19,28 @@ named movies and shows with NFO metadata and artwork.
 
 ## Architecture
 
-One image, two containers, one SQLite database in WAL mode.
+One image, two containers (the image's `web` and `worker` commands), one SQLite database
+in WAL mode.
 
 | Component | Role |
 |---|---|
-| `app.py` (FastAPI + Jinja2, uvicorn on `:8080`) | Web UI and the polling endpoints it uses |
-| `worker.py` | Job loop that drives yt-dlp, subscriptions and the organizer |
-| `organizer.py` | Moves finished files into the library layout and writes metadata |
+| `youtube_manager/app.py` (FastAPI + Jinja2, uvicorn on `:8080`) | Web UI and the polling endpoints it uses |
+| `youtube_manager/worker.py` | Job loop that drives yt-dlp, subscriptions and the organizer |
+| `youtube_manager/organizer.py` | Moves finished files into the library layout and writes metadata |
 | `bgutil-provider` sidecar | Mints the PO tokens YouTube requires |
 
 ## Requirements
 
-- Docker with Compose on Linux; the worker relies on POSIX process groups. Runs on a
-  Raspberry Pi (arm64).
-- Recommended: a `brainicism/bgutil-ytdlp-pot-provider` container the worker can reach.
-  Without PO tokens YouTube withholds the DASH formats and yt-dlp falls back to
-  low-bitrate HLS.
-- Egress to YouTube, its CDNs and GitHub: yt-dlp downloads its JavaScript challenge
-  solver from GitHub at run time (`--remote-components ejs:github`).
+- Docker with Compose on Linux, on amd64 or arm64: the release image is built for both.
+  The worker relies on POSIX process groups.
+- Recommended: a `brainicism/bgutil-ytdlp-pot-provider` container the worker can reach,
+  on the release of the image's bgutil plugin, which the worker's `Components:` line
+  names. The plugin refuses a provider of another major release and warns about any
+  other difference. Without PO tokens YouTube withholds the DASH formats and yt-dlp
+  falls back to low-bitrate HLS.
+- Egress to YouTube and its CDNs only. yt-dlp's JavaScript challenge solver (yt-dlp-ejs)
+  and deno, which runs it, ship in the image, so nothing is fetched from GitHub at run
+  time.
 - Optional: Jellyfin for the library refresh, and an HTTP(S) proxy for egress
 
 ## Configuration
@@ -46,7 +50,7 @@ One image, two containers, one SQLite database in WAL mode.
 | `DOWNLOAD_PATH` | `/downloads` | Staging directory yt-dlp writes into |
 | `MEDIA_PATH` | `/media` | Library root the organizer files into |
 | `LIBRARY_SENTINEL` | unset | Worker only: a file on the library disk, such as `/media/.library-mounted`, that must exist before anything is filed. While it is missing the organizer files nothing and logs ERROR at most once an hour. Create the file before setting the variable |
-| `YOUTUBE_DB_URI` | `sqlite:///<app dir>/data/youtube.db` | SQLAlchemy database URL |
+| `YOUTUBE_DB_URI` | `sqlite:////app/data/youtube.db` | SQLAlchemy database URL; by default `data/youtube.db` at the repository root, which is `/app` in the image |
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
 | `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
@@ -92,16 +96,26 @@ Volumes: `/app/data` (SQLite), `/downloads` (staging) and `/media` (library).
 ## Deploying
 
 Run one web container and one worker from the same image, next to a bgutil PO-token
-provider. [compose.example.yaml](compose.example.yaml) is a complete example that builds
-the image from this checkout:
+provider. [compose.example.yaml](compose.example.yaml) is a complete example. It runs the
+release that `YTM_VERSION` names, and every Compose command for that file needs the
+variable, so keep it in an `.env` file beside the example:
 
 ```sh
-docker compose -f compose.example.yaml up -d --build
+echo 'YTM_VERSION=1.0.0' > .env
+docker compose -f compose.example.yaml up -d
 ```
 
-- **Services.** The web UI is the image's default command and listens on port 8080; the
-  worker runs `python worker.py`. Both use the SQLite database under `/app/data`, so run
-  exactly one of each.
+- **Image.** Each release is published as `ghcr.io/ochsyp/youtube-manager:<version>`,
+  such as `1.0.0`, for amd64 and arm64, and `latest` moves with every release that is not
+  a prerelease. In production, pin the digest the release notes list as well, as in
+  `YTM_VERSION=1.0.0@sha256:<digest>`: a tag can be moved to another image, a digest
+  cannot.
+- **Commands.** The image has two: `web`, the default, serves the UI on port 8080, and
+  `worker` runs the download worker. Arguments after either go to its process, and any
+  other command runs as given. Every command runs as the `PUID`/`PGID` user, not root.
+  Both services use the SQLite database under `/app/data`, so run exactly one of each.
+- **Init.** tini is PID 1 in both containers: it passes `docker stop`'s SIGTERM on and
+  reaps orphaned yt-dlp and ffmpeg processes, so neither container needs `init: true`.
 - **Volumes.** `/app/data` holds the database, so back it up. `/downloads` is the staging
   area and `/media` the library. They may sit on different disks: filing copies to a
   hidden temporary file, syncs it and renames it into place.
@@ -111,13 +125,23 @@ docker compose -f compose.example.yaml up -d --build
   `proxy_set_header Host $http_host;`, because `$host` drops the port; Caddy and Traefik
   pass it on by default. Let the proxy admit only the clients and probes that should
   reach the UI, and publish the container's port to nothing else.
-- **Healthchecks.** The web UI answers `GET /health` without touching the database. The
-  worker touches `WORKER_HEARTBEAT_PATH` from every long-running loop; treat it as dead
-  once that file is more than 600 seconds old.
+- **Healthchecks.** The web UI answers `GET /health` without touching the database, and
+  the image includes curl to ask it. The worker touches `WORKER_HEARTBEAT_PATH` from
+  every long-running loop; treat it as dead once that file is more than 600 seconds old.
 - **Stopping.** On SIGTERM the worker stops at its next check. Give it a stop grace
   period of 60 seconds, since Docker's default of 10 can kill a step mid-write.
-- **Updating.** Pull the new code, rebuild the image and recreate both containers
-  together.
+- **Updating.** Set `YTM_VERSION` to the new release, with its digest, and run
+  `docker compose -f compose.example.yaml up -d`, which pulls the image and recreates
+  both containers together. Read the release's CHANGELOG section first: a major release
+  lists what the host has to change. Going back to the previous release works the same
+  way, unless that section has a `Migration (cannot be rolled back)` part.
+- **Startup log.** The web UI logs `YouTube Manager <version> web UI starting`. The
+  worker logs a `Components:` line with the release, the versions of yt-dlp, yt-dlp-ejs
+  and the bgutil plugin, and deno's path.
+- **Building from a checkout.** `docker build -t youtube-manager .` builds the image for
+  the local architecture, with `dev` as its version (`--build-arg YTM_VERSION=<version>`
+  sets another). It needs BuildKit, Docker's default builder since version 23. To run
+  such a build with the example, set both `image:` lines to `youtube-manager`.
 
 ## Running tests
 
@@ -133,29 +157,37 @@ Tests marked `posix` need `os.killpg` and `SIGKILL`. They are skipped on Windows
 in CI on Linux (`.github/workflows/ci.yml`) along with the rest of the suite. The suite
 writes only under pytest's temp directories, never to `data/`, `/downloads` or `/media`.
 
+CI also builds the image for amd64 and arm64 and runs `scripts/smoke-test-image.sh` on
+each build. On Linux with Docker, `bash scripts/smoke-test-image.sh youtube-manager` runs
+the same checks on a local build (Deploying, Building from a checkout).
+
 ## Repository layout
 
 ```text
-app.py              web UI and API
-worker.py           download worker
-organizer.py        library filing, NFOs and artwork
-database.py         SQLAlchemy models and migrations
-jobstate.py         job status and progress helpers
-media.py            paths and media lookup
-applog.py           shared log formatter
-templates/          Jinja2 templates
+youtube_manager/    the application package
+  app.py            web UI and API
+  worker.py         download worker
+  organizer.py      library filing, NFOs and artwork
+  database.py       SQLAlchemy models and migrations
+  jobstate.py       job status and progress helpers
+  media.py          paths and media lookup
+  applog.py         shared log formatter
+  templates/        Jinja2 templates
 tests/              pytest suite and its fixtures (conftest.py)
+scripts/            release check and image smoke test, run by the workflows
 data/               SQLite database (runtime, git-ignored)
-Dockerfile          image build; also installs yt-dlp and the bgutil plugin
-entrypoint.sh       drops root to PUID/PGID
+Dockerfile          image build: base images pinned by digest, deno, the pinned packages
+entrypoint.sh       drops root to PUID/PGID and maps the web and worker commands
 compose.example.yaml  example deployment: web UI, worker and bgutil provider
-requirements.txt    Python dependencies
+requirements.in     direct runtime dependencies, unpinned
+requirements.txt    exact pins uv compiles from requirements.in; the image installs these
 requirements-dev.txt  test-only dependencies (pytest, httpx)
 pytest.ini          pytest settings and the posix marker
-.github/            CI tests, secret scan, Dependabot and the pull request template
+.github/workflows/  CI (tests, image build and smoke test), release and secret scan
+.github/            Dependabot and the pull request template
 .githooks/          hooks that keep commits and pushes off main
 CHANGELOG.md        changes, newest first
-CONTRIBUTING.md     branch and pull request workflow
+CONTRIBUTING.md     branch, pull request and release workflow
 SECURITY.md         security policy
 ```
 
@@ -167,3 +199,14 @@ describes the workflow, and [CHANGELOG.md](CHANGELOG.md) lists what changed.
 ## License
 
 MIT License.
+
+## Third-party software
+
+The image carries this licence as `/app/LICENSE`. It also contains software by others,
+each under its own licence: Python, ffmpeg and the other Debian packages, deno, and the
+Python packages, yt-dlp among them. Release images carry a provenance attestation of the
+build and an SBOM that lists the image's packages. This prints the SBOM:
+
+```sh
+docker buildx imagetools inspect ghcr.io/ochsyp/youtube-manager:<version> --format '{{ json .SBOM }}'
+```

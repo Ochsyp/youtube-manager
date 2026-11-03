@@ -1,0 +1,113 @@
+# Runs when a release is published: checks the tag and CHANGELOG.md, builds,
+# smoke-tests and pushes ghcr.io/ochsyp/youtube-manager:X.Y.Z (and latest)
+# through image.yml, then adds the image digest to the release notes.
+# Actions are pinned to commit SHAs; Dependabot proposes updates.
+name: release
+
+on:
+  release:
+    types: [published]
+
+# Nothing at the top; each job asks for only what it uses.
+permissions: {}
+
+# One run per tag at a time, so a re-run never races an earlier push.
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+
+jobs:
+  # Stops the release before anything is built unless the tag is vX.Y.Z, has a
+  # dated CHANGELOG.md heading and names a commit on main.
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      latest: ${{ steps.check.outputs.latest }}
+    steps:
+      # The whole history, so origin/main is there to check the tag against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # latest is false for a release marked as a prerelease, which therefore
+      # never moves the latest tag.
+      - name: Check the tag, CHANGELOG.md and branch
+        id: check
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          version="$(python3 scripts/check_release.py)"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::v$version is not on main; releases come from main"
+            exit 1
+          fi
+          latest=true
+          if [ "$PRERELEASE" = true ]; then
+            latest=false
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "Release $version, latest: $latest"
+
+  image:
+    needs: check
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      push: true
+      version: ${{ needs.check.outputs.version }}
+      # Job outputs are strings, and a boolean input accepts only a boolean.
+      latest: ${{ needs.check.outputs.latest == 'true' }}
+
+  # Appends the image reference to the release notes, keeping the text already
+  # there. Only the notes change: an immutable release still allows that, and
+  # no asset is ever added.
+  notes:
+    needs: [check, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Add the image to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.check.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          if [ -z "$DIGEST" ]; then
+            echo "::error::image.yml returned no digest"
+            exit 1
+          fi
+          image="ghcr.io/ochsyp/youtube-manager:$VERSION"
+          # Everything from the marker on is this job's own section, so a
+          # re-run replaces it instead of adding a second one.
+          marker='<!-- Added by the release workflow. -->'
+          body="$(gh release view "$TAG" --json body --jq .body)"
+          body="$(printf '%s' "${body%%"$marker"*}")"
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            if [ -n "$body" ]; then
+              printf '%s\n\n' "$body"
+            fi
+            echo "$marker"
+            echo '## Container image'
+            echo
+            echo 'For amd64 and arm64, pinned by digest:'
+            echo
+            echo '```'
+            echo "$image@$DIGEST"
+            echo '```'
+            echo
+            echo "The same image by tag: \`$image\`"
+          } > "$notes"
+          gh release edit "$TAG" --notes-file "$notes"

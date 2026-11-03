@@ -14,10 +14,8 @@ import subprocess
 import pytest
 import requests
 
-import applog
-import organizer
-import worker
-from database import Channel, Download, Subscription
+from youtube_manager import applog, organizer, worker
+from youtube_manager.database import Channel, Download, Subscription
 
 # A scan result as scan_video_ids returns it after the proxy refused the request.
 FAILED_SCAN = ([], 'ERROR: [youtube:tab] Unable to download API page: HTTP Error 503: Service Unavailable')

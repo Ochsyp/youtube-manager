@@ -8,6 +8,10 @@
 
 <!-- What a deployment has to change (environment, volumes, reverse proxy, image tag), or "none". -->
 
+## Release impact
+
+<!-- patch, minor or major, and why (CONTRIBUTING, Releasing). -->
+
 ## Checklist
 
 - [ ] One phase or one change in this pull request

@@ -7,8 +7,13 @@
 
 import pytest
 
-from database import Download
-from organizer import MAX_NAME_LENGTH, append_id_tag, sanitize_filename, video_id_tag
+from youtube_manager.database import Download
+from youtube_manager.organizer import (
+    MAX_NAME_LENGTH,
+    append_id_tag,
+    sanitize_filename,
+    video_id_tag,
+)
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 

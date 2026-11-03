@@ -1,18 +1,17 @@
-# Example deployment: the web UI and the worker from one image built from this
-# checkout, plus the bgutil PO-token provider. Set the host paths and
-# YTM_ALLOWED_HOSTS, then run `docker compose -f compose.example.yaml up -d --build`.
-# README.md lists every variable under Configuration and explains these choices.
+# Example deployment, explained in README.md: the web UI and the worker from the
+# published image, plus the bgutil PO-token provider. Set YTM_VERSION (with the
+# release's digest in production) in .env beside this file, the host paths and
+# YTM_ALLOWED_HOSTS, then run `docker compose -f compose.example.yaml up -d`.
 name: youtube-manager
 
 services:
   # Keep this service name: the app answers to it, for probes on this network.
   youtube-manager:
-    build: .
-    # Both services name the same image, so Compose builds it only once.
-    image: youtube-manager:local
+    # YTM_VERSION is a release, such as 1.0.0, or a release with its digest:
+    # 1.0.0@sha256:<digest>. The image runs tini as PID 1, so neither service
+    # needs init: true.
+    image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as 1.0.0}
     restart: unless-stopped
-    # Reaps the child processes the app starts, which a Python PID 1 does not.
-    init: true
     environment:
       PUID: "1000"
       PGID: "1000"
@@ -37,11 +36,9 @@ services:
       start_period: 30s
 
   youtube-worker:
-    build: .
-    image: youtube-manager:local
-    command: ["python", "worker.py"]
+    image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as 1.0.0}
+    command: ["worker"]
     restart: unless-stopped
-    init: true
     # Docker's default of 10 s can kill a step mid-write after SIGTERM.
     stop_grace_period: 60s
     environment:
@@ -60,7 +57,8 @@ services:
       - ./data:/app/data
       - ./library:/media
       - ./staging:/downloads
-    # The heartbeat and yt-dlp's path reports live in /tmp, kept off the disk.
+    # The heartbeat, yt-dlp's path reports and the yt-dlp and deno caches live
+    # in /tmp, kept off the disk.
     tmpfs:
       - /tmp
     # The worker serves no HTTP, so this checks the age of its heartbeat file.
@@ -74,8 +72,9 @@ services:
     depends_on:
       - bgutil-provider
 
-  # Mints the PO tokens YouTube requires for its full format list. Keep its
-  # release in step with the bgutil-ytdlp-pot-provider plugin in the image.
+  # Mints the PO tokens YouTube requires for its full format list. Keep it on
+  # the release of the image's bgutil plugin, named in the worker's Components
+  # line: the plugin refuses another major and warns about any other mismatch.
   bgutil-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2
     restart: unless-stopped

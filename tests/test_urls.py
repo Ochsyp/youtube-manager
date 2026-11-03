@@ -7,7 +7,7 @@
 
 import pytest
 
-from app import detect_youtube_type, normalize_url, youtube_domain
+from youtube_manager.app import detect_youtube_type, normalize_url, youtube_domain
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 LIST_ID = 'PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'

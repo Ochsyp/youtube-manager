@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-import worker
-from database import Download
-from media import STAGING_TEMP
+from youtube_manager import worker
+from youtube_manager.database import Download
+from youtube_manager.media import STAGING_TEMP
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 FAKE_YTDLP = Path(__file__).parent / 'fakes' / 'yt_dlp_fake.py'

@@ -1,6 +1,7 @@
 # Runs the pytest suite on Linux on every push and pull request, including the
-# POSIX-only tests the Windows dev box skips. Actions are pinned to commit SHAs;
-# Dependabot proposes updates.
+# POSIX-only tests the Windows dev box skips. Pull requests and main also build
+# and smoke-test the image for amd64 and arm64 (image.yml, without pushing).
+# Actions are pinned to commit SHAs; Dependabot proposes updates.
 name: ci
 
 on:
@@ -22,3 +23,12 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pytest
+
+  # Pushes to other branches run pytest only, so a pull request builds the
+  # image once. permissions is set on this job because a called workflow gets
+  # the default token permissions unless its calling job sets them.
+  image:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image.yml

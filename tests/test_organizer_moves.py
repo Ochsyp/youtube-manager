@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 import requests
 
-import organizer
-from database import Download
+from youtube_manager import organizer
+from youtube_manager.database import Download
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 THUMB_URL = f'https://i.ytimg.com/vi/{VIDEO_ID}/maxresdefault.jpg'

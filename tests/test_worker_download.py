@@ -16,10 +16,9 @@ from pathlib import Path
 
 import pytest
 
-import organizer
-import worker
-from database import Download
-from media import DOWNLOAD_PATH, STAGING_TEMP
+from youtube_manager import organizer, worker
+from youtube_manager.database import Download
+from youtube_manager.media import DOWNLOAD_PATH, STAGING_TEMP
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 OTHER_ID = 'aaaaaaaaaaa'

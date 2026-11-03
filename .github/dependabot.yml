@@ -1,5 +1,6 @@
-# Weekly update pull requests, grouped so each ecosystem opens at most one at a time.
-# requirements.txt is unpinned, so pip updates arrive mainly as security alerts.
+# Update pull requests, grouped so each group has at most one open at a time.
+# requirements.txt pins every runtime dependency exactly, so their updates
+# arrive as pull requests rather than only as security alerts.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -12,19 +13,44 @@ updates:
       github-actions:
         patterns: ["*"]
 
-  - package-ecosystem: pip
+  # uv rather than pip: it recompiles requirements.txt with the uv command in
+  # its header, for every platform and Python 3.13, and also updates the pins
+  # in requirements-dev.txt. Checked daily, with each release held back seven
+  # days so a broken or compromised one is usually withdrawn first. yt-dlp,
+  # its JavaScript solver and its PO-token plugin skip the wait: their
+  # releases follow YouTube's changes.
+  - package-ecosystem: uv
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
+    cooldown:
+      default-days: 7
+      exclude: [yt-dlp, yt-dlp-ejs, bgutil-ytdlp-pot-provider]
     commit-message:
       prefix: "chore(deps)"
     groups:
+      yt-dlp:
+        patterns: [yt-dlp, yt-dlp-ejs, bgutil-ytdlp-pot-provider]
       python:
         patterns: ["*"]
+        exclude-patterns: [yt-dlp, yt-dlp-ejs, bgutil-ytdlp-pot-provider]
+    # compose.example.yaml runs the provider server at the plugin's release,
+    # and tests/test_build.py fails until a plugin update moves it as well. A
+    # new major, which every host's server has to follow, moves by hand.
+    ignore:
+      - dependency-name: bgutil-ytdlp-pot-provider
+        update-types: ["version-update:semver-major"]
 
+  # Digest updates still arrive. A Python minor upgrade is a deliberate change
+  # of CI, the tests and the image together, so newer python tags are ignored.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      - dependency-name: python
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
