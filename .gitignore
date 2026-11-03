@@ -1,12 +1,10 @@
-# Secrets. .env.example documents every variable.
+# Secrets and Compose's .env (README.md, Configuration and Deploying).
 .env*
-!.env.example
 
 # Runtime state a run from this checkout can leave in the tree: the SQLite
-# database in data/ and, with the checkout mounted at /app, yt-dlp's .cache/.
+# database in data/.
 /data/*
 !/data/.gitkeep
-/.cache/
 *.db
 *.db-*
 *.sqlite*

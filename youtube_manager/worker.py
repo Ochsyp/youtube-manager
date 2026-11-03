@@ -6,11 +6,13 @@
 # job at a time; both share one SQLite file, which allows a single writer.
 # -------------------------------------------------------
 
+import importlib.metadata
 import json
 import logging
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,7 +25,7 @@ from typing import Iterable, Optional
 
 from sqlalchemy import or_
 
-from youtube_manager import applog
+from youtube_manager import VERSION, applog
 from youtube_manager.database import (
     Channel,
     Download,
@@ -73,12 +75,15 @@ PROXY = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
 POT_PROVIDER_URL = os.getenv('POT_PROVIDER_URL', '')
 
 
-# Extractor arguments every yt-dlp invocation shares, built fresh per call so a caller extending
-# them into its own command list cannot mutate shared state.
+# Arguments every yt-dlp invocation shares, built fresh per call so a caller extending them into
+# its own command list cannot mutate shared state. --ignore-config always leads, so no yt-dlp
+# config file in the image, the staging directory or a home directory can change what a call does;
+# the PO-token extractor args follow when POT_PROVIDER_URL is set.
 def ytdlp_common_args() -> list[str]:
-    if not POT_PROVIDER_URL:
-        return []
-    return ['--extractor-args', f'youtubepot-bgutilhttp:base_url={POT_PROVIDER_URL}']
+    args = ['--ignore-config']
+    if POT_PROVIDER_URL:
+        args += ['--extractor-args', f'youtubepot-bgutilhttp:base_url={POT_PROVIDER_URL}']
+    return args
 
 # Sleep intervals for the worker loop and its sub-tasks. The organizer runs every 5 minutes, and
 # subscription checks every 30 minutes, so a failed job is retried at the next organizer pass.
@@ -1955,13 +1960,12 @@ def discard_final_path_file(path_file: Path) -> None:
 # The yt-dlp argv for one video, writing into staging under `output_template`. The sidecars it
 # requests (description, info.json, thumbnail) are what the organizer reads to build the NFO, and
 # the final media path goes to final_path_file(job_id). `url` becomes a positional argument, so
-# callers must screen it through is_safe_url() first.
+# callers must screen it through is_safe_url() first. YouTube's JS challenges are solved locally:
+# deno runs the yt-dlp-ejs solver that yt-dlp[default] installs, so nothing comes from GitHub.
 def build_download_command(url: str, output_template: str, job_id: int) -> list[str]:
     command = [
         'yt-dlp',
         *ytdlp_common_args(),
-        '--remote-components',
-        'ejs:github',
         '--write-description',
         '--write-info-json',
         '--write-thumbnail',
@@ -2200,6 +2204,32 @@ def _request_shutdown(signum, _frame) -> None:
     _shutdown.set()
 
 
+# The packages whose versions decide whether YouTube downloads work, named in the startup log.
+COMPONENT_PACKAGES = ('yt-dlp', 'yt-dlp-ejs', 'bgutil-ytdlp-pot-provider')
+
+
+# The installed version of each COMPONENT_PACKAGES entry, then deno's path, keyed by name in that
+# order. Never raises: a package that is not installed reads 'not installed', one whose metadata
+# cannot be read 'unknown', and a deno missing from PATH 'not found'.
+def component_versions() -> dict[str, str]:
+    versions = {}
+    for package in COMPONENT_PACKAGES:
+        try:
+            versions[package] = importlib.metadata.version(package) or 'unknown'
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = 'not installed'
+        except Exception:
+            versions[package] = 'unknown'
+    versions['deno'] = shutil.which('deno') or 'not found'
+    return versions
+
+
+# The startup line naming this release and every component_versions() entry, comma-separated.
+def components_line() -> str:
+    parts = {'youtube-manager': VERSION, **component_versions()}
+    return 'Components: ' + ', '.join(f'{name} {value}' for name, value in parts.items())
+
+
 # The worker process's entry point, and the only caller of the job loop. Runs startup housekeeping
 # once, then takes one job at a time until shutdown, interleaving the periodic tasks -- organize,
 # subscription check, auto-retry, parent backfill -- between jobs on their own timers. Returns
@@ -2310,6 +2340,8 @@ if __name__ == '__main__':
     # Line buffering, so container logs appear as the worker runs rather than in blocks.
     sys.stdout.reconfigure(line_buffering=True)
     applog.configure()
+    # Logged first, so the log of every run, a failed start included, names what it ran.
+    log(components_line())
 
     # Create the staging directory, and yt-dlp's temp dir inside it, if they do not exist, so a
     # fresh container can start without issues. It runs here rather than at import, so importing

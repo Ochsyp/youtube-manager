@@ -1,0 +1,16 @@
+# Direct runtime dependencies of the web UI and the worker, unpinned.
+# requirements.txt pins these and everything they pull in, and is what the
+# image installs; regenerate it with the uv command in its header, from the
+# repo root, whenever this list changes.
+fastapi
+uvicorn
+jinja2
+python-multipart
+sqlalchemy
+requests
+# The default extra adds yt-dlp-ejs, the JavaScript challenge solver built for
+# this yt-dlp release, which deno runs locally.
+yt-dlp[default]
+# Client half only: fetches PO tokens over HTTP from the bgutil provider at
+# POT_PROVIDER_URL and mints none itself.
+bgutil-ytdlp-pot-provider

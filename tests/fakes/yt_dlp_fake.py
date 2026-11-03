@@ -19,8 +19,7 @@ MODES = ('complete', 'fragment-then-fail')
 
 # Options that consume the next argument; every other dashed argument is a flag.
 VALUE_OPTIONS = {
-    '-P', '--paths', '-o', '--output', '--extractor-args', '--remote-components',
-    '--convert-thumbnails', '--proxy',
+    '-P', '--paths', '-o', '--output', '--extractor-args', '--convert-thumbnails', '--proxy',
 }
 
 # An output-template field, "%(title)s".

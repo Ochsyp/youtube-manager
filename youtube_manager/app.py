@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, or_
 from urllib.parse import parse_qs, urlparse, urlsplit
 
-from youtube_manager import applog
+from youtube_manager import VERSION, applog
 
 from fastapi import FastAPI, Form, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -65,8 +65,10 @@ TEMPLATES_DIR = BASE_DIR / 'templates'
 
 # Only this process creates the schema; the worker blocks until it appears
 # (database.wait_for_schema), so it has to land before the first request.
+# The release is logged first, so every start names the build that served it.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    logging.info('YouTube Manager %s web UI starting', VERSION)
     initialize_database()
     yield
 

@@ -1,17 +1,26 @@
 # Keep runtime state, caches, secrets and VCS metadata out of the build context.
-# data/.gitkeep stays so the image has a data directory for entrypoint.sh to chown.
+# The image copies only requirements.txt, entrypoint.sh, LICENSE and
+# youtube_manager/, and creates /app/data itself, so nothing in data/ is sent.
 .git
 .github
 .env*
 data/*
-!data/.gitkeep
 .cache/
-__pycache__/
-*.py[cod]
-*.db
-*.db-*
-*.log
-# The test suite and its tooling run from the checkout, never inside the image.
+.pytest_cache/
+# A pattern matches from the context root; **/ reaches into youtube_manager/.
+**/__pycache__/
+**/*.py[cod]
+**/*.db
+**/*.db-*
+**/*.log
+# The test suite, its tooling and the CI and release scripts run from the
+# checkout, never inside the image.
 tests/
+scripts/
 requirements-dev.txt
 pytest.ini
+# For people, not the image: the unpinned list requirements.txt is compiled
+# from, the example deployment and the docs.
+requirements.in
+compose.example.yaml
+*.md
