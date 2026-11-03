@@ -8,6 +8,11 @@ All notable changes to this project are listed here. The format follows
 The first code commit imports the web UI, the download worker and the organizer, with phases 1 to
 4 of the hardening plan applied. The entries compare it with the code that ran before.
 
+Hosts switch to the published image, `ghcr.io/ochsyp/youtube-manager:<version>`, and start the
+worker with the image's `worker` command instead of `python worker.py`. The image carries the
+code, so a host mounts only `/app/data`, `/downloads` and `/media`. `compose.example.yaml` shows
+the result. (phase 12)
+
 ### Added
 
 - A pytest suite with a temp SQLite database per test and a fake yt-dlp, and CI that runs it on
@@ -23,6 +28,21 @@ The first code commit imports the web UI, the download worker and the organizer,
   nothing and creates nothing under `/media`, logs ERROR at most once an hour, and leaves the
   jobs to be filed once the disk is back. (phase 5)
 - `compose.example.yaml`, an example deployment of the web UI, the worker and the bgutil provider.
+- Release images on ghcr.io: `ghcr.io/ochsyp/youtube-manager:X.Y.Z` for amd64 and arm64, with
+  provenance and SBOM attestations, and `latest`, which every release that is not a prerelease
+  moves. (phase 12)
+- The image's `web` and `worker` commands. `web`, the default, starts the web UI and `worker` the
+  download worker; extra arguments pass through, and any other command runs as given. (phase 12)
+- A release workflow, `.github/workflows/release.yml`. Publishing a GitHub release whose tag is
+  `vX.Y.Z` on main, with a dated CHANGELOG heading, builds and smoke-tests the image, pushes it
+  and adds its digest to the release notes. CONTRIBUTING.md's Releasing section gives the steps
+  and the versioning rules, and the pull request template asks for the release impact.
+  (phase 12)
+- CI builds the image for amd64 and arm64 on pull requests and on main and smoke-tests each build
+  with `scripts/smoke-test-image.sh`: the imports, yt-dlp, deno and ffmpeg, the web UI's
+  `/health`, and the worker's start and stop under tini. Nothing is pushed. (phase 12)
+- At start, the worker logs the release, the versions of yt-dlp, yt-dlp-ejs and the bgutil plugin,
+  and deno's path; the web UI logs the release. (phase 12)
 
 ### Changed
 
@@ -54,6 +74,32 @@ The first code commit imports the web UI, the download worker and the organizer,
   instead of one particular stack. Code comments no longer assume that stack's host, probes or
   log pipeline.
 - SECURITY.md names GitHub's private vulnerability reporting as the way to report a problem.
+- The modules move into the `youtube_manager` package: `uvicorn youtube_manager.app:app`,
+  `python -m youtube_manager.worker` and `python -m youtube_manager.organizer --dry-run` replace
+  `uvicorn app:app`, `python worker.py` and `python organizer.py --dry-run`. The database stays in
+  `data/` at the repository root, `/app/data` in the image. (phase 12)
+- `requirements.txt` pins every runtime dependency exactly. uv compiles it from the direct
+  dependencies in `requirements.in`, and the image installs only those pins, as wheels. `pip check`
+  and the tests verify that the pins fit together. yt-dlp, its yt-dlp-ejs solver and the bgutil
+  plugin are pinned like the rest, and Dependabot proposes their updates daily. (phase 12)
+- The base image, `python:3.13-slim-trixie`, and deno, from the `denoland/deno` image, are pinned
+  by digest. (phase 12)
+- yt-dlp solves YouTube's JavaScript challenges with the yt-dlp-ejs solver installed in the image
+  instead of downloading one from GitHub at run time, so the worker needs no egress to GitHub.
+  (phase 12)
+- Every yt-dlp call passes `--ignore-config`, so no yt-dlp config file in the image, the
+  staging directory or a home directory can change what it does. (phase 12)
+- tini runs as PID 1 in every container and reaps orphaned yt-dlp and ffmpeg processes, so a host
+  no longer needs `init: true`. (phase 12)
+- The image holds only the package, `entrypoint.sh`, `requirements.txt` and `LICENSE` instead of
+  the whole checkout, and yt-dlp and deno cache under `/tmp/.cache` instead of `/app/.cache`.
+  (phase 12)
+
+### Removed
+
+- aiofiles, an unused dependency. (phase 12)
+- The deno install script: deno comes from the pinned `denoland/deno` image instead of
+  `curl -fsSL https://deno.land/install.sh | sh`, and unzip is no longer installed. (phase 12)
 
 ### Security
 

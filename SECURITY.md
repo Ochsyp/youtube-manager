@@ -45,5 +45,12 @@ reaches the port directly needs the address it uses in `YTM_ALLOWED_HOSTS`, or i
 ## Automated checks
 
 - gitleaks scans every push and pull request (`.github/workflows/secret-scan.yml`).
-- Dependabot keeps the pinned GitHub Actions, the Python dependencies and the Docker
-  base image up to date.
+- CI builds the image for amd64 and arm64 on every pull request and on main, and
+  smoke-tests each build (`.github/workflows/image.yml`). A release builds the image
+  without the layer cache, so it has the Debian updates of that day, and pushes it only
+  after both of its builds pass the same smoke test.
+- Dependabot proposes updates to the exact pins in `requirements.txt`, checked daily, with
+  yt-dlp, its solver and its PO-token plugin exempt from the seven-day wait the other
+  packages get. Its security updates are on as well and skip that wait for every package.
+  It also keeps the base image digest, deno and the pinned GitHub Actions current.
+- Release images carry provenance and SBOM attestations.
