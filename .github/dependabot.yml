@@ -23,6 +23,10 @@ updates:
     directory: /
     schedule:
       interval: daily
+    # Every pin, not only the direct dependencies in requirements.in, so the
+    # pins they pull in, certifi's CA bundle among them, stay current too.
+    allow:
+      - dependency-type: all
     cooldown:
       default-days: 7
       exclude: [yt-dlp, yt-dlp-ejs, bgutil-ytdlp-pot-provider]
