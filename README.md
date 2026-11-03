@@ -40,7 +40,7 @@ in WAL mode.
   falls back to low-bitrate HLS.
 - Egress to YouTube and its CDNs only. yt-dlp's JavaScript challenge solver (yt-dlp-ejs)
   and deno, which runs it, ship in the image, so nothing is fetched from GitHub at run
-  time.
+  time. Pulling the image needs `ghcr.io` and `pkg-containers.githubusercontent.com`.
 - Optional: Jellyfin for the library refresh, and an HTTP(S) proxy for egress
 
 ## Configuration

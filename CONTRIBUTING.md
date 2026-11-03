@@ -69,20 +69,38 @@ To release X.Y.Z:
 
    vP.Q.R is the previous release. The first release links to its tag instead, as in
    `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`.
-2. After the merge, sign a tag on the commit the merge created on `main`, which
-   `gh pr view <number> --json mergeCommit` prints, so that nothing merged after it ships under
-   this version. Push the tag and publish the release. Its notes come from a file holding that
-   version's CHANGELOG section:
+2. After the merge, sign a tag on the commit the merge created on `main`, which the `gh pr view`
+   line below prints, so that nothing merged after it ships under this version. `git tag -s`
+   needs a signing key set up in Git (`gpg.format` and `user.signingkey`), and the key added to
+   GitHub as a signing key, so that the tag shows as verified. Then push the tag:
 
    ```text
    git switch main
    git pull --ff-only
+   gh pr view <number> --json mergeCommit --jq .mergeCommit.oid
    git tag -s vX.Y.Z -m vX.Y.Z <merge commit>
    git push origin vX.Y.Z
+   ```
+
+3. Check the tag before publishing, because publishing is final. Releases in this repository
+   are immutable: a published release locks its tag, and deleting the release does not free the
+   tag name. If the release workflow fails after that, the fix ships as the next patch release.
+
+   ```text
+   uv run --no-project --python 3.13 python scripts/check_release.py vX.Y.Z
+   git branch -r --contains vX.Y.Z
+   gh run list --commit <merge commit>
+   ```
+
+   The first prints X.Y.Z, the second lists `origin/main`, and the third shows CI green on the
+   merge commit, its image job included. Then publish the release. Its notes come from a file
+   holding that version's CHANGELOG section:
+
+   ```text
    gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <notes file>
    ```
 
-3. Publishing starts the release workflow (`.github/workflows/release.yml`). It checks that the tag
+4. Publishing starts the release workflow (`.github/workflows/release.yml`). It checks that the tag
    is vX.Y.Z on a commit of `main` and that CHANGELOG.md has its dated heading, builds and
    smoke-tests the image for amd64 and arm64, pushes `ghcr.io/ochsyp/youtube-manager:X.Y.Z` and
    `latest` with provenance and SBOM attestations, and appends the image's digest to the release
@@ -91,5 +109,5 @@ To release X.Y.Z:
 A release marked as a prerelease is pushed without `latest`, and promoting it to a full release
 later does not run the workflow again.
 
-First release only: the package on ghcr.io starts private. Make it public on its GitHub page,
-under Package settings, Change visibility. This cannot be undone.
+First release only: check the package's visibility on its GitHub page. If it is private, make it
+public under Package settings, Change visibility. This cannot be undone.
