@@ -16,8 +16,9 @@ concurrency:
   group: release-${{ github.event.release.tag_name }}
 
 jobs:
-  # Stops the release before anything is built unless the tag is vX.Y.Z, has a
-  # dated CHANGELOG.md heading and names a commit on main.
+  # Stops the image build unless the tag is vX.Y.Z, has a dated CHANGELOG.md
+  # heading and names a commit on main. The release is already published by
+  # then, so CONTRIBUTING.md has the same checks run before publishing.
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
