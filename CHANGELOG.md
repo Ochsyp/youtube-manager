@@ -1,17 +1,24 @@
 # Changelog
 
 All notable changes to this project are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). There are no releases yet.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) as CONTRIBUTING.md's Releasing section
+describes.
 
 ## [Unreleased]
 
-The first code commit imports the web UI, the download worker and the organizer, with phases 1 to
-4 of the hardening plan applied. The entries compare it with the code that ran before.
+## [1.0.0] - 2026-11-03
+
+The first release: the web UI, the download worker and the organizer, imported with phases 1 to 4
+of the maintainer's hardening plan applied, then phases 5 and 12. Each entry's phase tag names the
+step it came from, and the entries compare 1.0.0 with the code that ran before this repository.
 
 Hosts switch to the published image, `ghcr.io/ochsyp/youtube-manager:<version>`, and start the
 worker with the image's `worker` command instead of `python worker.py`. The image carries the
-code, so a host mounts only `/app/data`, `/downloads` and `/media`. `compose.example.yaml` shows
-the result. (phase 12)
+code, so a host mounts only `/app/data`, `/downloads` and `/media`. Run the bgutil provider at the
+release of the image's plugin, `brainicism/bgutil-ytdlp-pot-provider:2.0.2`, not `latest`: the
+plugin refuses a provider of another major release and warns about any other difference.
+`compose.example.yaml` shows the result. (phase 12)
 
 ### Added
 
@@ -40,7 +47,8 @@ the result. (phase 12)
   (phase 12)
 - CI builds the image for amd64 and arm64 on pull requests and on main and smoke-tests each build
   with `scripts/smoke-test-image.sh`: the imports, yt-dlp, deno and ffmpeg, the web UI's
-  `/health`, and the worker's start and stop under tini. Nothing is pushed. (phase 12)
+  `/health`, the worker's `Components:` line with nothing missing, and the worker's start and
+  stop under tini. Nothing is pushed. (phase 12)
 - At start, the worker logs the release, the versions of yt-dlp, yt-dlp-ejs and the bgutil plugin,
   and deno's path; the web UI logs the release. (phase 12)
 
@@ -80,13 +88,14 @@ the result. (phase 12)
   `data/` at the repository root, `/app/data` in the image. (phase 12)
 - `requirements.txt` pins every runtime dependency exactly. uv compiles it from the direct
   dependencies in `requirements.in`, and the image installs only those pins, as wheels. `pip check`
-  and the tests verify that the pins fit together. yt-dlp, its yt-dlp-ejs solver and the bgutil
-  plugin are pinned like the rest, and Dependabot proposes their updates daily. (phase 12)
+  and the tests verify that the pins fit together. Dependabot proposes updates to every pin daily,
+  each held back seven days, except yt-dlp, its yt-dlp-ejs solver and the bgutil plugin, which
+  skip the wait. A new major of the plugin moves by hand, together with the provider. (phase 12)
 - The base image, `python:3.13-slim-trixie`, and deno, from the `denoland/deno` image, are pinned
   by digest. (phase 12)
 - yt-dlp solves YouTube's JavaScript challenges with the yt-dlp-ejs solver installed in the image
   instead of downloading one from GitHub at run time, so the worker needs no egress to GitHub.
-  (phase 12)
+  Pulling the image needs `ghcr.io` and `pkg-containers.githubusercontent.com`. (phase 12)
 - Every yt-dlp call passes `--ignore-config`, so no yt-dlp config file in the image, the
   staging directory or a home directory can change what it does. (phase 12)
 - tini runs as PID 1 in every container and reaps orphaned yt-dlp and ffmpeg processes, so a host
@@ -109,7 +118,8 @@ the result. (phase 12)
 - Artwork is fetched only over HTTPS from `*.ytimg.com`, `*.ggpht.com` and
   `*.googleusercontent.com`, without following redirects, capped at 10 MB and only when the
   response is an image. (phase 5)
-- The UI's own nginx name is no longer built in. Set `YTM_ALLOWED_HOSTS` to it on the web
-  service before deploying, or every request through nginx gets 400.
+- No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
+  to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/commits/main
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0
