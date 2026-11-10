@@ -131,8 +131,9 @@ class Playlist(Base):
 
 
 # A channel or playlist watched for new uploads. worker.check_subscriptions rescans every enabled
-# row on a schedule and queues whatever it has not recorded before; channel_id/playlist_id stay
-# empty until the first scan resolves the URL to a Channel or Playlist row.
+# row on a schedule and queues whatever it has not recorded before, and a first scan with
+# backfill_existing set also the skipped rows it lists; channel_id/playlist_id stay empty until the
+# first scan resolves the URL to a Channel or Playlist row.
 class Subscription(Base):
 
     __tablename__ = 'subscriptions'
@@ -146,8 +147,9 @@ class Subscription(Base):
     channel_id = Column(Integer, ForeignKey('channels.id'))
     playlist_id = Column(Integer, ForeignKey('playlists.id'))
     enabled = Column(Boolean, nullable=False, default=True)
-    # When False, the first scan after subscribing records the existing lineup without queuing
-    # it (see worker.check_subscriptions), so only videos seen in a later scan get downloaded.
+    # When False, a first scan (last_checked NULL) records the listing as skipped without queuing
+    # it, so only videos seen in a later scan get downloaded; when True it queues the listing, the
+    # skipped rows it lists included (see worker.check_subscriptions).
     backfill_existing = Column(Boolean, nullable=False, default=True)
     last_checked = Column(DateTime)
     created_at = Column(DateTime, default=utcnow)

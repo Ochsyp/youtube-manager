@@ -7,6 +7,46 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- Download existing now takes effect at the next subscription check, which runs every 30 minutes
+  between downloads, instead of at once. That check scans the channel or playlist in full and
+  queues every skipped video it still lists, and any it has not recorded yet, in the order it lists
+  them: a playlist in playlist order, a channel kind by kind (Shorts, then live streams, then
+  videos), each oldest first, videos recorded before 1.0.1 included. A video recorded twice is
+  queued once. The button also sets the subscription to "All existing", and a disabled
+  subscription has to be enabled first. (phase 7)
+- Once a channel subscription has its baseline, each check reads only the channel's 50 newest
+  uploads of each kind (videos, live streams, Shorts). When 50 or more of them are new, the check
+  reads the whole channel, so a burst of uploads is not missed; if that scan fails, the check keeps
+  the newest uploads and logs WARN. A first scan and every playlist scan still read the whole
+  listing. A video of the channel downloaded on its own moves into the channel's folder at a check
+  only while it is among those newest uploads. (phase 7)
+
+### Fixed
+
+- A subscription's baseline comes only from a scan that succeeded. A failed scan no longer counts
+  as a check, so an "Only new" subscription whose first scan failed no longer queues its whole
+  back catalogue at the next one, and Last Checked shows the last scan that succeeded. (phase 7)
+- A subscription check no longer holds the database's write lock while yt-dlp scans: resolving a
+  new subscription is committed before its scan, and a failed resolve is rolled back, so changes
+  in the web UI no longer fail with "database is locked" meanwhile. (phase 7)
+- A subscription deleted while a check runs no longer stops the check of the subscriptions after
+  it. (phase 7)
+- A scan keeps only the lines that are video ids, each once. A subscription or channel download no
+  longer records a playlist's or channel's id as a video, or one video twice, and a scan whose
+  every line is dropped fails instead of recording an empty baseline. (phase 7)
+- At start, the worker retires the rows such scans left: a skipped, queued or failed row a scan
+  recorded under an id that is not a video id is marked deleted, and a channel or playlist download
+  it belongs to is settled again, unless only skipped videos are left beside it. A subscription of
+  that channel or playlist is set to "Only new" and records its current listing as skipped at its
+  next check, without queuing it; the worker log names it, and Download existing now fetches its
+  back catalogue. (phase 7)
+- The background repairs of missing parent titles and playlist episode numbers first run one
+  check interval after the worker starts, not ahead of the queue on its first pass, and a failed
+  title lookup or scan during them no longer marks a finished playlist or channel failed: each logs
+  WARN instead. (phase 7)
+
 ## [1.0.1] - 2026-11-10
 
 ### Changed

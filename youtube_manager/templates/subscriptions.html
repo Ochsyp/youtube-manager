@@ -39,8 +39,8 @@
 </section>
 
 {# The table of existing subscriptions is a single row per subscription, with a button to toggle
-   enabled/disabled, a button to toggle the backfill preference, a button to queue any skipped
-   videos, and a button to delete the subscription. #}
+   enabled/disabled, a button to toggle the backfill preference, a button that has the next check
+   queue skipped videos, and a button to delete the subscription. #}
 <section>
     <h2>Current subscriptions</h2>
     <table>
@@ -70,7 +70,7 @@
                     </td>
                     <td>
                         <div class="row-actions">
-                            {# This preference only ever governs a subscription's very first scan
+                            {# This preference only governs a first scan, one with no Last Checked
                                (see worker.check_subscriptions); toggling it after that scan has
                                already happened has no effect on its own, so "Download existing
                                now" below is what actually queues anything already skipped. #}
@@ -79,17 +79,18 @@
                                     {{ 'All existing' if sub.backfill_existing else 'Only new' }}
                                 </button>
                             </form>
-                            {# Always available, not just while the preference above reads "Only
-                               new": toggling that preference doesn't retroactively touch videos
-                               already sitting skipped from before the toggle, so this is the only
-                               thing that actually queues them. A no-op if nothing is skipped. #}
+                            {# The only thing that queues skipped videos. It sets the preference to
+                               "All existing" and clears Last Checked; the next check then rescans
+                               in full and queues them in scan order (see
+                               worker.check_subscriptions). A disabled subscription is refused. #}
                             <form action="/subscriptions/{{ sub.id }}/backfill-now" method="post" style="margin:0;"
-                                  onsubmit="return confirm('Queue every video this subscription previously skipped?');">
+                                  onsubmit="return confirm('At the next check, queue every video this subscription skipped and set it to All existing?');">
                                 <button type="submit" class="button-secondary">Download existing now</button>
                             </form>
                         </div>
                     </td>
-                    {# Empty until the worker's first periodic scan of this subscription. #}
+                    {# Empty until a scan of this subscription succeeds, and again after "Download
+                       existing now" or a re-baseline at worker start, until the next one does. #}
                     <td>{{ sub.last_checked or '-' }}</td>
                     <td>
                         <form action="/subscriptions/delete/{{ sub.id }}" method="post" style="margin:0;">

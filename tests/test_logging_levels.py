@@ -76,7 +76,7 @@ def subscription_id(db) -> int:
 # Make successive scan_video_ids calls return `results` in order, one (ids, error) pair per call.
 def script_scans(monkeypatch: pytest.MonkeyPatch, *results: tuple[list[str], str | None]) -> None:
     pending = list(results)
-    monkeypatch.setattr(worker, 'scan_video_ids', lambda url: pending.pop(0))
+    monkeypatch.setattr(worker, 'scan_video_ids', lambda url, playlist_items=None: pending.pop(0))
 
 
 # One failed scan is a transient blip: WARN naming the subscription and yt-dlp's reason, no ERROR.
