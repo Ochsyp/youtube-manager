@@ -7,6 +7,8 @@ describes.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-10
+
 ### Changed
 
 - CONTRIBUTING's release steps name the release signing key, its `maintainer` principal and the
@@ -151,5 +153,6 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0
