@@ -40,7 +40,6 @@ from youtube_manager.jobstate import (
     PARENT_REQUEST_TYPES,
     QUEUE_STATUSES,
     QUEUED_OR_EXPANDING,
-    SKIPPED_STATUS,
     TERMINAL_STATUS_SET,
     adopt_existing_download,
     apply_status_update_to_hierarchy,
@@ -993,7 +992,7 @@ def toggle_subscription_enabled(subscription_id: int):
 
 # The "download all existing" preference only governs a subscription's first scan
 # (see worker.check_subscriptions), so flipping it later does nothing on its own --
-# pair it with "Download existing now" below to queue what was skipped.
+# "Download existing now" below, which sets it too, is what queues what was skipped.
 @app.post('/subscriptions/{subscription_id}/toggle-backfill')
 def toggle_subscription_backfill(subscription_id: int):
     with Session() as db:
@@ -1006,15 +1005,22 @@ def toggle_subscription_backfill(subscription_id: int):
     return redirect_with_flash('/subscriptions', message)
 
 
-# Queues every video this subscription recorded as skipped. It does not change the
-# stored backfill_existing preference, and re-running is a no-op once nothing
-# skipped is left.
+# Asks for this subscription's skipped videos: sets backfill_existing and clears last_checked, so
+# the worker's next check is a full first scan that queues them in scan order (see
+# worker.check_subscriptions). Queues nothing itself, and changes nothing for a disabled
+# subscription, which is never checked.
 @app.post('/subscriptions/{subscription_id}/backfill-now')
 def backfill_subscription_now(subscription_id: int):
     with Session() as db:
         sub = db.get(Subscription, subscription_id)
         if not sub:
             return redirect_with_flash('/subscriptions', 'Subscription not found.')
+
+        if not sub.enabled:
+            return redirect_with_flash(
+                '/subscriptions',
+                'Enable the subscription first -- a disabled subscription is never checked.',
+            )
 
         # Both stay empty until the worker's periodic check resolves them (see
         # worker.resolve_subscription_target), which a new subscription may not have
@@ -1025,23 +1031,21 @@ def backfill_subscription_now(subscription_id: int):
                 'Subscription has not finished its first scan yet -- try again in a minute.',
             )
 
-        # The worker marks skipped videos with SKIPPED_STATUS, so this route only queues those.
-        query = db.query(Download).filter(Download.status == SKIPPED_STATUS)
-        if sub.channel_id is not None:
-            query = query.filter(Download.channel_id == sub.channel_id)
-        if sub.playlist_id is not None:
-            query = query.filter(Download.playlist_id == sub.playlist_id)
-
-        # Requeued in place: the scan that skipped these rows already recorded each video's URL and
-        # ids, so moving the status is all it takes for the worker to pick them up.
-        rows = query.all()
-        for row in rows:
-            row.status = 'queued'
-        count = len(rows)
+        # A fresh scan rather than requeuing the skipped rows here: the scan queues them in its own
+        # order, which the order the rows were recorded in need not follow. Both columns are
+        # written whatever they held: during a first scan last_checked reads empty already, and an
+        # UPDATE without it would leave the stamp that scan may commit before this one.
+        db.query(Subscription).filter(Subscription.id == sub.id).update(
+            {Subscription.backfill_existing: True, Subscription.last_checked: None},
+            synchronize_session=False,
+        )
         db.commit()
 
-    message = f'Queued {count} previously-skipped video(s).' if count else 'Nothing to backfill -- no skipped videos found.'
-    return redirect_with_flash('/subscriptions', message)
+    return redirect_with_flash(
+        '/subscriptions',
+        'Skipped videos are queued at the next subscription check, which runs every 30 minutes '
+        'between downloads.',
+    )
 
 
 # =======================================================

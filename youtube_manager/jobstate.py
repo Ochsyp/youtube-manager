@@ -27,9 +27,10 @@ ACTIVE_STATUSES = ('queued', 'metadata', 'redownload', 'expanding', 'downloading
 # the user removed the downloaded file; the row is marked rather than dropped, but is inert.
 TERMINAL_STATUSES = ('completed', 'failed', 'cancelled', 'deleted')
 
-# Recorded by a subscription's initial scan when backfill_existing is off: marks a video as
-# already known so a later scan cannot mistake it for new, without ever queuing it. Never set
-# on a parent, and never touched by the queue/worker machinery below.
+# Recorded by a subscription's first scan when backfill_existing is off: marks a video as already
+# known so a later scan cannot mistake it for new, without queuing it. Only a first scan with
+# backfill_existing on ("Download existing now") queues it. Never set on a parent, and never
+# touched by the queue/worker machinery below.
 SKIPPED_STATUS = 'skipped'
 
 # Statuses the worker will pick up from the queue and act on.

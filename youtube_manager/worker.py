@@ -7,6 +7,7 @@
 # -------------------------------------------------------
 
 import importlib.metadata
+import itertools
 import json
 import logging
 import os
@@ -19,9 +20,10 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import or_
 
@@ -53,6 +55,7 @@ from youtube_manager.media import (
     DOWNLOAD_PATH,
     MEDIA_PATH,
     STAGING_TEMP,
+    YOUTUBE_ID_PATTERN,
     extract_youtube_id,
     find_existing_media,
     is_media_file,
@@ -427,8 +430,9 @@ def get_or_create_playlist(db, youtube_id: str, title: Optional[str], channel: O
 
 # Resolve a subscription's own channel/playlist row and store its id. It takes a yt-dlp call the
 # web process never makes, so every subscription starts with channel_id/playlist_id NULL.
-# Writes into the caller's session and flushes without committing; False when nothing was resolved.
-# Each False is also counted as a failed check through record_subscription_failure().
+# Flushes into the caller's session without committing: the caller commits before any further
+# network call, or the SQLite write lock is held across it, and rolls back on False (nothing
+# resolved). Each False is also counted as a failed check through record_subscription_failure().
 def resolve_subscription_target(db, subscription: Subscription) -> bool:
     command = [
         'yt-dlp', '--dump-single-json', '--skip-download',
@@ -476,7 +480,7 @@ def resolve_subscription_target(db, subscription: Subscription) -> bool:
         record_subscription_failure(subscription.id, 'channel metadata had no id')
         return False
 
-    # Flushed, not committed: check_subscriptions owns the transaction and commits once.
+    # Flushed, not committed: check_subscriptions commits it before the scan.
     db.flush()
     log(f'Subscription {subscription.id}: resolved channel_id={subscription.channel_id} playlist_id={subscription.playlist_id}')
     return True
@@ -768,7 +772,9 @@ def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[
 
 # Discover metadata for a job using yt-dlp. fail_on_error marks the job 'failed' on a discovery
 # error, which parents want; a video job passes False so a download is still attempted.
-def discover_metadata(job: Download, fail_on_error: bool = True) -> Optional[dict]:
+def discover_metadata(
+    job: Download, fail_on_error: bool = True, store_error: bool = True,
+) -> Optional[dict]:
     command = [
         'yt-dlp',
         '--dump-single-json',
@@ -785,13 +791,14 @@ def discover_metadata(job: Download, fail_on_error: bool = True) -> Optional[dic
     command.append(job.url)
 
     # The reason is stored whatever fail_on_error says: that flag decides who owns the job's
-    # status, not whether yt-dlp's message is worth keeping.
+    # status, not whether yt-dlp's message is worth keeping. Only store_error=False, for a caller
+    # that owns neither, leaves the job untouched.
     def record_failure(message: str) -> None:
         # Logged as well as stored, since the stored error only ever surfaces in the web UI.
         warn(f'Job {job.id}: metadata discovery failed: {" ".join(message.split())[:500]}')
         if fail_on_error:
             update_job(job.id, status='failed', error=message)
-        else:
+        elif store_error:
             update_job(job.id, error=message)
 
     try:
@@ -1205,10 +1212,12 @@ def populate_missing_parent_metadata() -> None:
             log(f'populate_missing_parent_metadata: discovering metadata for parent {parent.id} ({parent.url})')
 
             # Guarded per parent so one unreachable URL doesn't abandon the rest of the batch;
-            # a parent that fails simply keeps its missing title and is retried next cycle.
+            # a parent that fails simply keeps its missing title and is retried next cycle. Its
+            # status and error are not this repair's to change: a settled parent stays settled,
+            # and a failed lookup only logs WARN.
             metadata = None
             try:
-                metadata = discover_metadata(parent)
+                metadata = discover_metadata(parent, fail_on_error=False, store_error=False)
             except Exception as exc:
                 log_error(f'populate_missing_parent_metadata: parent {parent.id} failed', exc)
 
@@ -1302,10 +1311,15 @@ def compute_and_persist_parent_progress(parent_id: int) -> None:
 #            PLAYLIST AND CHANNEL EXPANSION
 # =======================================================
 
-# Scan a playlist or channel URL for the video IDs it contains, without downloading anything.
-# Returns (ids, error_message); exactly one of the two is meaningful.
-def scan_video_ids(url: str) -> tuple[list[str], Optional[str]]:
-    log(f'Scanning: {url}')
+# Scan a playlist or channel URL for the video IDs it contains, without downloading anything;
+# `playlist_items` is passed to yt-dlp's --playlist-items when given. Returns (ids, error_message),
+# at most one of them meaningful: the ids are video ids only, once each, in listing order. Output
+# with lines but no video id among them is an error; no output at all is an empty listing.
+# Dropped lines are logged in one WARN.
+def scan_video_ids(
+    url: str, playlist_items: Optional[str] = None,
+) -> tuple[list[str], Optional[str]]:
+    log(f'Scanning: {url}' + (f' (items {playlist_items})' if playlist_items else ''))
 
     command = [
         'yt-dlp',
@@ -1313,8 +1327,11 @@ def scan_video_ids(url: str) -> tuple[list[str], Optional[str]]:
         '--flat-playlist',
         '--print',
         '%(id)s',
-        url,
     ]
+    # See PERIODIC_CHANNEL_SCAN_LIMIT.
+    if playlist_items:
+        command += ['--playlist-items', playlist_items]
+    command.append(url)
 
     try:
         result = run_command(command)
@@ -1324,22 +1341,34 @@ def scan_video_ids(url: str) -> tuple[list[str], Optional[str]]:
     except subprocess.CalledProcessError as exc:
         return [], exc.stderr or str(exc)
 
-    # Normalized so they match stored youtube_id values.
-    ids = [normalize_youtube_id(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    # Normalized so they match stored youtube_id values. A listing can carry ids that are no
+    # video's, such as a playlist's or a channel's, and yt-dlp prints NA for an entry with no id;
+    # recorded as videos, each would become a row. A video listed twice is kept once, or it would
+    # get two rows.
+    ids = []
+    seen = set()
+    rejected = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        video_id = normalize_youtube_id(line)
+        if video_id and YOUTUBE_ID_PATTERN.match(video_id):
+            if video_id not in seen:
+                seen.add(video_id)
+                ids.append(video_id)
+        else:
+            rejected.append(line)
+
+    if rejected:
+        sample = ', '.join(repr(line[:40]) for line in rejected[:3])
+        warn(
+            f'Scan of {url}: dropped {len(rejected)} line(s) that are not video ids, e.g. {sample}'
+        )
+    # An error rather than an empty listing, so it cannot be recorded as a subscription's baseline.
+    if rejected and not ids:
+        return [], f'No video ids in the listing: all {len(rejected)} line(s) were dropped'
     return ids, None
-
-
-# Scan on behalf of a stored job, recording any failure against that job.
-def run_scan(job: Download) -> list[str]:
-    ids, error = scan_video_ids(job.url)
-
-    # A scan that could not run at all is a job failure; an empty playlist is handled by the caller.
-    if error:
-        update_job(job.id, status='failed', error=error)
-        return []
-
-    log(f'run_scan: found {len(ids)} ids for job {job.id}')
-    return ids
 
 
 # Re-derive a parent's status from its known children without touching YouTube, so a failed
@@ -1386,8 +1415,6 @@ def expand_playlist(job: Download) -> None:
 
     apply_metadata(job, metadata)
 
-    # Scanned directly, not via run_scan(), which fails the job on error before this function
-    # gets its chance to fall back to existing children.
     video_ids, scan_error = scan_video_ids(job.url)
 
     # A channel scan can run for minutes, so the cancel is re-read here rather than trusted from
@@ -1616,9 +1643,13 @@ class PlaylistNumbering:
 
 
 # Create download jobs for a subscription, skipping videos that already have a row. queue=False
-# still creates them, as SKIPPED_STATUS, so a later scan cannot mistake them for new. A playlist
+# still creates them, as SKIPPED_STATUS, so a later scan cannot mistake them for new, and
+# requeue_skipped queues the listed videos' unparented SKIPPED_STATUS rows again. A playlist
 # subscription numbers its rows by scan position, existing rows still without a number included.
-def create_download_jobs_for_subscription(db, subscription: Subscription, video_ids: Iterable[str], queue: bool = True) -> int:
+def create_download_jobs_for_subscription(
+    db, subscription: Subscription, video_ids: Iterable[str], queue: bool = True,
+    requeue_skipped: bool = False,
+) -> int:
     if not video_ids:
         return 0
 
@@ -1632,9 +1663,10 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
         if row.youtube_id:
             existing_by_id.setdefault(row.youtube_id, []).append(row)
 
-    # A channel scan lists newest first, so its rows are created oldest first: get_next_job()
-    # breaks a created_at tie by id, and the worker then downloads in upload order. A playlist
-    # keeps scan order, the playlist's own, and numbers each video by its scan position.
+    # A channel scan lists each kind newest first, videos, then live streams, then Shorts, so its
+    # rows are created oldest first within each kind, Shorts first, and the worker downloads them in
+    # that order. A playlist keeps scan order, the playlist's own, and numbers each video by its
+    # scan position.
     scan = list(enumerate(video_ids, start=1))
     if group_by_channel:
         scan.reverse()
@@ -1642,13 +1674,22 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
     if subscription.subscription_type == 'playlist' and subscription.playlist_id is not None:
         numbering = PlaylistNumbering(db, subscription.playlist_id)
 
+    # Every row this pass queues, new or requeued, is stamped created_at one microsecond after the
+    # last, in the order reached, so get_next_job() takes them in scan order. A requeued row would
+    # otherwise keep the created_at it was recorded with, which need not follow scan order.
+    queued_at = utcnow()
+    queue_stamps = (queued_at + timedelta(microseconds=step) for step in itertools.count())
+
     added = 0
     adopted = 0
     numbered = 0
+    requeued = 0
     for position, video_id in scan:
         existing_rows = existing_by_id.get(video_id)
         if existing_rows:
             any_unparented = False
+            # One requeued row per video, or duplicates an older scan recorded download it twice.
+            requeue_this_video = requeue_skipped
             for existing in existing_rows:
                 # A video already parented by another playlist/channel expansion stays put.
                 if existing.parent_id is not None:
@@ -1672,6 +1713,13 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
                     existing.playlist_index = numbering.assign(position, video_id)
                     if not needs_update:
                         numbered += 1
+                # Also ahead of that check: a skipped row is queued whether or not its associations
+                # change.
+                if requeue_this_video and existing.status == SKIPPED_STATUS:
+                    existing.status = 'queued'
+                    existing.created_at = next(queue_stamps)
+                    requeue_this_video = False
+                    requeued += 1
                 if not needs_update:
                     continue
                 if subscription.channel_id is not None:
@@ -1703,18 +1751,23 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
             playlist_index=numbering.assign(position, video_id) if numbering else None,
             status='queued' if queue else SKIPPED_STATUS,
         )
+        if queue:
+            download.created_at = next(queue_stamps)
         db.add(download)
         added += 1
 
     # Adopted videos may already carry an upload_date, as in create_child_jobs.
-    if group_by_channel and subscription.channel_id and (added or adopted):
+    if group_by_channel and subscription.channel_id and (added or adopted or requeued):
         resequence_channel_index(db, subscription.channel_id)
 
-    # Committing is left to check_subscriptions, which shares this session and commits once per
-    # subscription. A second Session() here would deadlock against it: SQLite takes one writer.
+    # Committing is left to check_subscriptions, which shares this session and commits these rows
+    # with the subscription's stamp. A second Session() here would deadlock against it: SQLite
+    # takes one writer.
     if added or adopted:
         verb = 'Queued' if queue else 'Recorded (not queued)'
         log(f'{verb} {added} new and adopted {adopted} existing download(s) for subscription {subscription.id}')
+    if requeued:
+        log(f'Requeued {requeued} skipped download(s) for subscription {subscription.id}')
     if numbered:
         log(f'Numbered {numbered} existing download(s) for subscription {subscription.id}')
 
@@ -1814,55 +1867,153 @@ def clear_subscription_failures(subscription_id: int) -> None:
     _subscription_failures.pop(subscription_id, None)
 
 
-# Scan every enabled subscription for new videos and stamp its last_checked. A failed resolve or
-# scan counts towards that subscription's run of failures; see record_subscription_failure().
+# How many of a channel's newest uploads a check reads once the subscription has its baseline,
+# through yt-dlp's --playlist-items, which applies it to each tab: up to this many videos, as many
+# Shorts and as many live streams. A first scan and every playlist scan read the whole listing.
+PERIODIC_CHANNEL_SCAN_LIMIT = 50
+
+
+# How many of `video_ids` have no row yet, under any request or subscription.
+def count_unrecorded(db, video_ids: list[str]) -> int:
+    if not video_ids:
+        return 0
+    listed = db.query(Download.youtube_id).filter(Download.youtube_id.in_(video_ids))
+    recorded = {youtube_id for (youtube_id,) in listed}
+    return sum(1 for video_id in video_ids if video_id not in recorded)
+
+
+# Scan every enabled subscription for new videos. Only a scan that succeeded stamps last_checked,
+# in the commit that records its rows, and only while the subscription still holds the
+# last_checked and backfill_existing the check read; a failed resolve or scan counts towards the
+# subscription's run of failures (see record_subscription_failure()). No yt-dlp call runs in a
+# write transaction.
 def check_subscriptions() -> None:
     log('Checking subscriptions')
 
     with Session() as db:
-        subscriptions = (
-            db.query(Subscription)
-            .filter(Subscription.enabled.is_(True))
-            .all()
-        )
+        # Ids only, each row read when its turn comes: the web app may change or delete one
+        # meanwhile, and a rollback would expire rows loaded up front.
+        subscription_ids = [
+            subscription_id
+            for (subscription_id,) in (
+                db.query(Subscription.id)
+                .filter(Subscription.enabled.is_(True))
+                .order_by(Subscription.id)
+            )
+        ]
 
-        for subscription in subscriptions:
+        for subscription_id in subscription_ids:
             # Each subscription costs at least one yt-dlp call, so a long list keeps the main loop
             # -- and its heartbeat -- waiting for minutes at a time.
             touch_heartbeat()
             try:
+                subscription = db.get(Subscription, subscription_id)
+                # Deleted or disabled since the run began.
+                if subscription is None or not subscription.enabled:
+                    continue
                 if not is_safe_url(subscription.url):
                     warn(f'Subscription {subscription.id}: refusing unsupported URL {subscription.url!r}')
                     continue
 
                 # An unresolved subscription has both ids unset, leaving every video it creates
-                # with no channel or playlist. Retried every scan until it succeeds once.
+                # with no channel or playlist. Retried every scan until it succeeds once, and
+                # committed at once: held open across the scan below, the write lock would fail
+                # the web app's writes with 'database is locked' for as long as yt-dlp runs.
                 if subscription.channel_id is None and subscription.playlist_id is None:
                     if not resolve_subscription_target(db, subscription):
+                        db.rollback()
                         continue
+                    db.commit()
 
-                # Not run_scan(): there is no Download row to record a failure against.
-                video_ids, error = scan_video_ids(subscription.url)
+                # What this check is planned on; the stamp below holds the row to it.
+                last_checked = subscription.last_checked
+                backfill_existing = subscription.backfill_existing
+                is_first_scan = last_checked is None
+                # After its baseline a channel reads only its newest uploads; a first scan (the
+                # baseline or a backfill) and a playlist read the whole listing.
+                limited = subscription.subscription_type == 'channel' and not is_first_scan
+                playlist_items = f'1:{PERIODIC_CHANNEL_SCAN_LIMIT}' if limited else None
+                video_ids, error = scan_video_ids(subscription.url, playlist_items)
+                # A tab whose window is all new may hold only the newest of more uploads than fit
+                # it. The output does not say which tab a line came from, so as many new ids as one
+                # window holds, of any kinds, trigger it. The baseline holds everything older, so
+                # the whole listing is read instead and whatever it has unrecorded is new too.
+                if (
+                    limited and not error
+                    and count_unrecorded(db, video_ids) >= PERIODIC_CHANNEL_SCAN_LIMIT
+                ):
+                    log(
+                        f'Subscription {subscription.id}: {PERIODIC_CHANNEL_SCAN_LIMIT} or more '
+                        'of the newest uploads are new, scanning the whole channel'
+                    )
+                    full_ids, full_error = scan_video_ids(subscription.url)
+                    # The newest uploads are still recorded, the rest risked with a WARN: failing
+                    # the check would fail every later one too for a channel too big to list in
+                    # time, its window never recorded.
+                    if full_error:
+                        detail = ' '.join(full_error.split())[:500]
+                        warn(
+                            f'Subscription {subscription.id}: the whole-channel scan failed, so '
+                            f'uploads older than the newest {PERIODIC_CHANNEL_SCAN_LIMIT} may be '
+                            f'missed: {detail}'
+                        )
+                    else:
+                        video_ids = full_ids
+
+                # A failed scan is no check: last_checked stays as it was, so a first scan that
+                # fails leaves the baseline to the next check instead of recording none.
                 if error:
                     record_subscription_failure(subscription.id, f'scan failed: {error}')
-                else:
-                    clear_subscription_failures(subscription.id)
+                    continue
+                clear_subscription_failures(subscription.id)
 
                 if video_ids:
                     # "Only new videos from now on" happens on the first scan: the current
                     # lineup is recorded as a baseline, never queued.
-                    is_first_scan = subscription.last_checked is None
-                    queue_now = subscription.backfill_existing or not is_first_scan
-                    create_download_jobs_for_subscription(db, subscription, video_ids, queue=queue_now)
-                subscription.last_checked = utcnow()
-                db.add(subscription)
+                    queue_now = backfill_existing or not is_first_scan
+                    # A first scan with backfill_existing set (a new "All existing" subscription,
+                    # or "Download existing now") also queues what a baseline skipped, in scan
+                    # order. The trade-off: a channel's back catalogue then takes its next free
+                    # numbers after the episodes already filed, in the order it is downloaded:
+                    # kind by kind (see create_download_jobs_for_subscription), each oldest first.
+                    create_download_jobs_for_subscription(
+                        db, subscription, video_ids, queue=queue_now,
+                        requeue_skipped=is_first_scan and backfill_existing,
+                    )
+
+                # Stamped in the same commit as the rows, and only if the row still holds what this
+                # check read: "Download existing now" committed by the web app during the scan
+                # wins, and the next check runs with it. The rows go with the stamp. Only the web
+                # app writes meanwhile, and it only ever empties last_checked, so whether it is
+                # set is all there is to compare.
+                unchanged_last_checked = (
+                    Subscription.last_checked.is_(None) if is_first_scan
+                    else Subscription.last_checked.isnot(None)
+                )
+                stamped = (
+                    db.query(Subscription)
+                    .filter(
+                        Subscription.id == subscription.id,
+                        unchanged_last_checked,
+                        Subscription.backfill_existing == backfill_existing,
+                    )
+                    .update({Subscription.last_checked: utcnow()}, synchronize_session=False)
+                )
+                if not stamped:
+                    db.rollback()
+                    # The captured id: the rollback expired the row, which may be gone.
+                    log(
+                        f'Subscription {subscription_id} changed during its check; '
+                        'the next check repeats it'
+                    )
+                    continue
                 # Each subscription commits as its own unit rather than one giant commit.
                 db.commit()
             except Exception as exc:
                 # Without the rollback, one failure breaks the session for every subscription
                 # still to come in this run.
                 db.rollback()
-                log_error(f'Subscription {subscription.id} check failed', exc)
+                log_error(f'Subscription {subscription_id} check failed', exc)
 
 
 # =======================================================
@@ -1997,6 +2148,7 @@ def resequence_channel_index(db, channel_id: int) -> None:
 
 # Backfill playlist_index for playlist parents whose children lack one. Each parent costs a
 # network round trip. Playlists only: channel children keep it NULL, so they would match forever.
+# A failed scan logs WARN and leaves the parent alone: a background repair never fails a parent.
 def backfill_all_playlist_indexes() -> None:
     with Session() as db:
         parents = (
@@ -2020,7 +2172,12 @@ def backfill_all_playlist_indexes() -> None:
     for parent in parents:
         log(f'backfill_all_playlist_indexes: scanning parent {parent.id} ({parent.url})')
         try:
-            video_ids = run_scan(parent)
+            video_ids, error = scan_video_ids(parent.url)
+            if error:
+                # A parent that settled long ago is still settled; the next pass scans it again.
+                detail = ' '.join(error.split())[:500]
+                warn(f'backfill_all_playlist_indexes: scan of parent {parent.id} failed: {detail}')
+                continue
             if video_ids:
                 backfill_playlist_indexes(parent.id, video_ids)
         except Exception as exc:
@@ -2065,6 +2222,106 @@ def backfill_missing_youtube_ids() -> None:
         if updated:
             db.commit()
             log(f'Backfilled youtube_id for {updated} video job(s)')
+
+
+# Statuses retire_invalid_scan_rows takes a row out of: recorded or queued by a scan, or failed
+# trying to download what is no video. A row in any other status keeps it.
+RETIRABLE_STATUSES = frozenset({SKIPPED_STATUS, 'queued', 'failed'})
+
+# The error a retired row carries.
+NOT_A_VIDEO_ID_ERROR = 'Not a video id (channel tab listing)'
+
+
+# True when `url` is a watch URL whose v parameter is `youtube_id`, the URL a scan gives a row.
+def is_watch_url_of(url: Optional[str], youtube_id: str) -> bool:
+    try:
+        return parse_qs(urlsplit(url or '').query).get('v') == [youtube_id]
+    except ValueError:
+        return False
+
+
+# True when `row` sits where `subscription`'s scans file rows: grouped under a channel
+# subscription's channel, or in a playlist subscription's playlist. Download records no
+# subscription_id. A parented row counts too: a download of the same channel or playlist adopts the
+# rows a subscription recorded, and treating its own rows as the subscription's errs on the side of
+# a record-only re-baseline.
+def subscription_owns_row(subscription: Subscription, row: Download) -> bool:
+    if subscription.subscription_type == 'channel':
+        return (
+            subscription.channel_id is not None
+            and row.group_by_channel
+            and row.channel_id == subscription.channel_id
+        )
+    return subscription.playlist_id is not None and row.playlist_id == subscription.playlist_id
+
+
+# Retire the video rows a scan built from a line that is no video id, such as a playlist's or a
+# channel's: each in RETIRABLE_STATUSES becomes 'deleted', and the parent of one is re-synced. A
+# subscription that owned one is re-baselined record-only: its next scan records the current
+# listing as skipped. Local database work only, for startup; at most one commit.
+def retire_invalid_scan_rows() -> None:
+    with Session() as db:
+        # Columns alone first: the pattern runs in Python, and nearly every row passes it.
+        candidates = (
+            db.query(Download.id, Download.youtube_id, Download.url)
+            .filter(
+                Download.request_type == 'video',
+                Download.youtube_id.isnot(None),
+                Download.status.in_(RETIRABLE_STATUSES),
+            )
+            .all()
+        )
+        # Only rows whose URL is a watch URL of the id, as a scan builds it: a user's own request,
+        # such as a clip whose id yt-dlp reports at 26 characters, is no scan's line.
+        invalid_ids = [
+            row_id for row_id, youtube_id, url in candidates
+            if youtube_id and not YOUTUBE_ID_PATTERN.match(youtube_id)
+            and is_watch_url_of(url, youtube_id)
+        ]
+        rows = db.query(Download).filter(Download.id.in_(invalid_ids)).all() if invalid_ids else []
+
+        subscriptions = db.query(Subscription).all() if rows else []
+        owners: dict[int, Subscription] = {}
+        parent_ids = set()
+        for row in rows:
+            row.status = 'deleted'
+            row.error = NOT_A_VIDEO_ID_ERROR
+            if row.parent_id is not None:
+                parent_ids.add(row.parent_id)
+            for subscription in subscriptions:
+                if subscription_owns_row(subscription, row):
+                    owners[subscription.id] = subscription
+
+        # A parent whose other children are all SKIPPED_STATUS keeps its status: they give no
+        # verdict, so its retired rows alone would make it deleted, gone from every view though
+        # its videos were never downloaded.
+        for parent_id in parent_ids:
+            parent = db.get(Download, parent_id)
+            if parent is None:
+                continue
+            leaves_live_children = any(child.status != 'deleted' for child in parent.children)
+            if resolve_parent_status(parent) == 'deleted' and leaves_live_children:
+                continue
+            sync_parent_status(parent)
+
+        # Record-only, whatever backfill_existing said: a whole back catalogue queued long after
+        # the subscription began would arrive unannounced, and "Download existing now" fetches it
+        # on request.
+        for subscription in owners.values():
+            subscription.last_checked = None
+            subscription.backfill_existing = False
+
+        if rows:
+            db.commit()
+
+    for subscription_id, subscription in sorted(owners.items()):
+        warn(
+            f'Subscription {subscription_id} ({subscription.url}): rows of its channel or playlist '
+            'that are not videos were retired, so it is set to "Only new" and its next check '
+            'records the current listing as skipped without queuing it; "Download existing now" '
+            'fetches the back catalogue.'
+        )
+    log(f'Retired {len(rows)} row(s) whose youtube_id is not a video id')
 
 
 # =======================================================
@@ -2462,6 +2719,12 @@ def worker() -> None:
     except Exception as exc:
         log_error('backfill_missing_youtube_ids failed', exc)
 
+    # Before the resequence, so it numbers each channel with the retired rows already inert.
+    try:
+        retire_invalid_scan_rows()
+    except Exception as exc:
+        log_error('retire_invalid_scan_rows failed', exc)
+
     # Cheap and network-free, unlike the playlist backfill in the loop below.
     log('Resequencing channel indexes...')
     try:
@@ -2475,9 +2738,9 @@ def worker() -> None:
     last_organize = time.monotonic()
     last_subscription_check = time.monotonic()
     last_retry = time.monotonic()
-    # Backdated so the backfills run on the loop's first pass rather than ahead of it: each makes
-    # a network call per affected parent, holding up every newly queued job.
-    last_parent_backfill = time.monotonic() - SUBSCRIPTION_CHECK_INTERVAL_SECONDS
+    # The backfills first run one interval after start, like the subscription check, not on the
+    # first pass: each makes a network call per affected parent, holding up every queued job.
+    last_parent_backfill = time.monotonic()
 
     last_job_id = None
     repeat_count = 0
