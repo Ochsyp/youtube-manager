@@ -7,6 +7,30 @@ describes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Channel episodes already filed keep their number. A newly filed video takes the next free number
+  instead of renumbering the filed ones, so a backfill no longer files every video under the same
+  number. A video that arrives after newer ones were filed takes the next number, a download that
+  failed keeps its number until it is retried, and numbers already duplicated on disk stay.
+  (phase 6)
+- Videos from a playlist subscription get an episode number from their position in the playlist,
+  or the next free number when another video holds that position, so they are filed. Rows
+  recorded before this release get theirs at the next scan that still lists them. A playlist
+  download numbers its videos the same way. (phase 6)
+- A video with several rows is one episode: a further row of a video that already has a number in
+  the playlist or channel shares it, the number it is filed under first. (phase 6)
+- A channel or playlist download keeps the number of every episode it adopts that is already filed
+  in its show, and leaves it filed there. (phase 6)
+- Retry all no longer downloads a video again when its file is already in the library. The worker
+  refreshes it in place, as a single retry does, so it is not filed a second time. A video whose
+  library file is gone is downloaded again under its old number, but not while LIBRARY_SENTINEL
+  reports the library missing: the job fails, and a later retry finds the file. (phase 6)
+- The worker takes jobs created together in the order they were created, and a channel
+  subscription records new videos oldest first, so a new subscription's backfill downloads in
+  upload order. Videos a subscription recorded before this release still download newest first
+  with Download existing now, and are numbered in that order. (phase 6)
+
 ## [1.0.0] - 2026-11-03
 
 The first release: the web UI, the download worker and the organizer, imported with phases 1 to 4
