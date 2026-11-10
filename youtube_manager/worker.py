@@ -58,6 +58,7 @@ from youtube_manager.media import (
     is_media_file,
     normalize_youtube_id,
 )
+from youtube_manager.organizer import library_ready as organizer_library_ready
 from youtube_manager.organizer import organize_single_job as organizer_organize_single_job
 from youtube_manager.organizer import remove_staging_leftovers as organizer_remove_staging_leftovers
 from youtube_manager.organizer import scan_and_process as organizer_scan_and_process
@@ -252,6 +253,15 @@ def append_log(job_id: int, *lines: str) -> None:
 #                     JOB DISPATCH
 # =======================================================
 
+# True when a video job's recorded file is in the library rather than in staging. Such a file is
+# only ever refreshed in place (see redownload_or_rename), never downloaded again. The path is not
+# checked on disk.
+def has_library_file(job: Download) -> bool:
+    if job.request_type != 'video' or not job.filename:
+        return False
+    return Path(job.filename).is_relative_to(MEDIA_PATH)
+
+
 # Run one picked-up job to its next resting state, blocking for as long as that takes: refuse a
 # cancelled or unsupported job, refresh a video or parent that already has files on disk, expand a
 # parent that has none, and otherwise download the video. Every branch has to leave the row in a
@@ -270,8 +280,10 @@ def process_job(job: Download) -> None:
         update_job(job.id, status='failed', error=f'Unsupported URL: {job.url}')
         return
 
-    # A video whose file is already on disk is refreshed in place rather than downloaded again.
-    if job.status in {'metadata', 'redownload'}:
+    # A video whose file is already on disk is refreshed in place rather than downloaded again, and
+    # so is a queued video whose recorded file is in the library: "Retry all" requeues a failed
+    # redownload that way, and downloading it into staging again would file a second copy.
+    if job.status in {'metadata', 'redownload'} or has_library_file(job):
         if job.request_type == 'video' and job.filename:
             log(f'Job {job.id}: performing worker-side redownload/rename')
             append_log(job.id, 'Worker performing redownload/rename...')
@@ -312,7 +324,8 @@ def process_job(job: Download) -> None:
     download_video(job)
 
 
-# Oldest job in any status the worker can act on, or None.
+# Oldest job in any status the worker can act on, or None. A created_at tie goes to the lower id,
+# so rows created in one flush run in the order they were added.
 def get_next_job() -> Optional[Download]:
     with Session() as db:
         # A parent with children has nothing actionable of its own, and predates them, so
@@ -329,7 +342,7 @@ def get_next_job() -> Optional[Download]:
                     Download.status == 'redownload',
                 ),
             )
-            .order_by(Download.created_at)
+            .order_by(Download.created_at, Download.id)
             .first()
         )
 
@@ -927,8 +940,8 @@ def apply_metadata(job: Download, metadata: dict) -> None:
                 if playlist_index:
                     db_job.playlist_index = playlist_index
 
-            # A channel-grouped video has no curated position, so its index comes from
-            # upload_date. The whole channel resequences, since it may belong anywhere in it.
+            # A channel-grouped video has no curated position, so it takes the channel's next free
+            # number once dated; resequence_channel_index never renumbers a filed one.
             elif db_job.group_by_channel and db_job.channel_id and fields['upload_date']:
                 db.flush()
                 resequence_channel_index(db, db_job.channel_id)
@@ -1109,6 +1122,14 @@ def redownload_or_rename(job: Download) -> bool:
                 metadata_file=str(expected_info) if expected_info.exists() else None,
             )
             return True
+
+    # Not while the library is unavailable: a file recorded there is only out of reach, and a new
+    # copy would be filed beside it once the disk is back. The job fails for now, and a later retry
+    # finds the file again.
+    if has_library_file(job) and not organizer_library_ready():
+        append_log(job.id, 'Library unavailable; not downloading its recorded file again')
+        update_job(job.id, error='Library unavailable: the recorded file is out of reach')
+        return False
 
     # No existing file was found or it could not be renamed; download it normally.
     append_log(job.id, 'No existing file found; queuing for full redownload')
@@ -1436,21 +1457,48 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
         adopted = 0
 
         # Only a playlist's scan order is a curated sequence worth keeping as playlist_index;
-        # channel children get theirs from resequence_channel_index, in upload_date order.
+        # channel children get theirs from resequence_channel_index: the channel's next free
+        # numbers, in upload_date order.
         index_children = parent.request_type == 'playlist'
         # Channel children share one per-channel library folder; playlist children become
         # episodes of a show via playlist_id instead.
         group_by_channel = parent.request_type == 'channel'
+        # Numbered through PlaylistNumbering, so a number another video holds in the playlist (a
+        # subscription's row, say) is never handed out a second time.
+        numbering = None
+        if index_children and parent.playlist_id is not None:
+            numbering = PlaylistNumbering(db, parent.playlist_id)
+
+        # The episode number of a playlist child at scan `position`; a channel child gets None.
+        def child_number(position: int, video_id: str) -> Optional[int]:
+            if not index_children:
+                return None
+            return numbering.assign(position, video_id) if numbering else position
+
+        # True when an adopted `row` is already numbered in the show this parent files into: a
+        # playlist row holding a number in this playlist, or a channel row of this channel.
+        def numbered_in_this_show(row: Download) -> bool:
+            if row.playlist_index is None:
+                return False
+            if index_children:
+                return numbering is not None and row.playlist_id == parent.playlist_id
+            return (
+                group_by_channel
+                and parent.channel_id is not None
+                and row.group_by_channel
+                and row.channel_id == parent.channel_id
+                and row.playlist_id is None
+            )
 
         # One commit at the end: committing per video turns a 500-video playlist into 500
         # transactions and 500 extra parent lookups.
-        for playlist_index, video_id in enumerate(video_ids, start=1):
+        for position, video_id in enumerate(video_ids, start=1):
             if video_id in existing_ids_parent:
                 existing_child = next(
                     (d for d in matches if d.youtube_id == video_id and d.parent_id == parent.id), None
                 )
                 if existing_child and existing_child.playlist_index is None and index_children:
-                    existing_child.playlist_index = playlist_index
+                    existing_child.playlist_index = child_number(position, video_id)
                 continue
 
             # Every unparented row for this video is adopted, not just the first: rows may share
@@ -1459,15 +1507,19 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
             existing_unparented_rows = [d for d in matches if d.youtube_id == video_id and d.parent_id is None]
             if existing_unparented_rows:
                 for existing_unparented in existing_unparented_rows:
+                    # A row already numbered in this show keeps its number and, filed there
+                    # already, its organized_at. Any other number belonged to another show.
+                    keeps_number = numbered_in_this_show(existing_unparented)
                     existing_unparented.parent_id = parent.id
                     existing_unparented.playlist_id = parent.playlist_id
                     existing_unparented.channel_id = parent.channel_id
                     existing_unparented.group_by_channel = group_by_channel
-                    existing_unparented.playlist_index = playlist_index if index_children else None
-                    # An adopted video may already sit in the library as its own movie; clearing
-                    # organized_at refiles it under the playlist's show or the channel's folder.
-                    if existing_unparented.organized_at is not None:
-                        existing_unparented.organized_at = None
+                    if not keeps_number:
+                        existing_unparented.playlist_index = child_number(position, video_id)
+                        # An adopted video may already sit in the library as its own movie; clearing
+                        # organized_at refiles it under the playlist's show or the channel's folder.
+                        if existing_unparented.organized_at is not None:
+                            existing_unparented.organized_at = None
                     adopted += 1
                     log(f'Adopted existing download {existing_unparented.id} into parent {parent.id}')
                 continue
@@ -1481,7 +1533,7 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
                 playlist_id=parent.playlist_id,
                 channel_id=parent.channel_id,
                 group_by_channel=group_by_channel,
-                playlist_index=playlist_index if index_children else None,
+                playlist_index=child_number(position, video_id),
                 status='queued',
             ))
             added += 1
@@ -1522,8 +1574,50 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
     return added
 
 
+# Hands out episode numbers in one pass over a playlist's scan. A video that already holds a number
+# in the playlist gets it again, its firmest (see number_rank), so one video is one episode. Any
+# other video takes its scan position, or, when another video's row holds that position, the
+# number after the highest held. Every number handed out counts as held from then on, so two
+# videos numbered in one pass never share one.
+class PlaylistNumbering:
+    # Reads which videos hold which numbers in playlist `playlist_id`, rows of any parent
+    # included, in one query.
+    def __init__(self, db, playlist_id: int):
+        self.holders: dict[int, set[Optional[str]]] = {}
+        # Each video's firmest number, as (number_rank, number).
+        self.best: dict[Optional[str], tuple[int, int]] = {}
+        rows = (
+            db.query(Download)
+            .filter(Download.playlist_id == playlist_id, Download.playlist_index.isnot(None))
+            .all()
+        )
+        for row in rows:
+            self.hold(row.playlist_index, row.youtube_id, number_rank(row))
+        self.highest = max(self.holders, default=0)
+
+    # Record that `video_id` holds number `index`, as firmly as `rank` (see number_rank).
+    def hold(self, index: int, video_id: Optional[str], rank: int) -> None:
+        self.holders.setdefault(index, set()).add(video_id)
+        if video_id not in self.best or (rank, index) < self.best[video_id]:
+            self.best[video_id] = (rank, index)
+
+    # The number for `video_id` at scan `position`, recorded as held by that video.
+    def assign(self, position: int, video_id: str) -> int:
+        if video_id in self.best:
+            index = self.best[video_id][1]
+        elif self.holders.get(position, set()) - {video_id}:
+            index = self.highest + 1
+        else:
+            index = position
+        # A number handed out now belongs to a live row.
+        self.hold(index, video_id, 1)
+        self.highest = max(self.highest, index)
+        return index
+
+
 # Create download jobs for a subscription, skipping videos that already have a row. queue=False
-# still creates them, as SKIPPED_STATUS, so a later scan cannot mistake them for new.
+# still creates them, as SKIPPED_STATUS, so a later scan cannot mistake them for new. A playlist
+# subscription numbers its rows by scan position, existing rows still without a number included.
 def create_download_jobs_for_subscription(db, subscription: Subscription, video_ids: Iterable[str], queue: bool = True) -> int:
     if not video_ids:
         return 0
@@ -1538,9 +1632,20 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
         if row.youtube_id:
             existing_by_id.setdefault(row.youtube_id, []).append(row)
 
+    # A channel scan lists newest first, so its rows are created oldest first: get_next_job()
+    # breaks a created_at tie by id, and the worker then downloads in upload order. A playlist
+    # keeps scan order, the playlist's own, and numbers each video by its scan position.
+    scan = list(enumerate(video_ids, start=1))
+    if group_by_channel:
+        scan.reverse()
+    numbering = None
+    if subscription.subscription_type == 'playlist' and subscription.playlist_id is not None:
+        numbering = PlaylistNumbering(db, subscription.playlist_id)
+
     added = 0
     adopted = 0
-    for video_id in video_ids:
+    numbered = 0
+    for position, video_id in scan:
         existing_rows = existing_by_id.get(video_id)
         if existing_rows:
             any_unparented = False
@@ -1551,11 +1656,22 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
                 any_unparented = True
                 # Only associations this subscription has an opinion about: a channel one's
                 # playlist_id is always None, and that None must not overwrite a real value.
+                joins_playlist = (
+                    subscription.playlist_id is not None
+                    and existing.playlist_id != subscription.playlist_id
+                )
                 needs_update = (
                     (subscription.channel_id is not None and existing.channel_id != subscription.channel_id)
-                    or (subscription.playlist_id is not None and existing.playlist_id != subscription.playlist_id)
+                    or joins_playlist
                     or existing.group_by_channel != group_by_channel
                 )
+                # Ahead of the check below, so every scan numbers the rows still without one, even
+                # where nothing else changes. A row joining the playlist gets a new number, its old
+                # one being another show's; a number it already holds in this playlist stays.
+                if numbering and (joins_playlist or existing.playlist_index is None):
+                    existing.playlist_index = numbering.assign(position, video_id)
+                    if not needs_update:
+                        numbered += 1
                 if not needs_update:
                     continue
                 if subscription.channel_id is not None:
@@ -1563,6 +1679,11 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
                 if subscription.playlist_id is not None:
                     existing.playlist_id = subscription.playlist_id
                 existing.group_by_channel = group_by_channel
+                # A row with no playlist leaves its number behind with the show it came from, and
+                # resequence_channel_index numbers it for this channel. A row with a playlist keeps
+                # its index: it is still filed as that playlist's episode.
+                if group_by_channel and existing.playlist_id is None:
+                    existing.playlist_index = None
                 # Clearing organized_at refiles it into the shared folder, as in create_child_jobs.
                 if existing.organized_at is not None:
                     existing.organized_at = None
@@ -1578,6 +1699,8 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
             channel_id=subscription.channel_id,
             playlist_id=subscription.playlist_id,
             group_by_channel=group_by_channel,
+            # SKIPPED_STATUS rows too, so a baseline video is filed once it is queued later.
+            playlist_index=numbering.assign(position, video_id) if numbering else None,
             status='queued' if queue else SKIPPED_STATUS,
         )
         db.add(download)
@@ -1592,6 +1715,8 @@ def create_download_jobs_for_subscription(db, subscription: Subscription, video_
     if added or adopted:
         verb = 'Queued' if queue else 'Recorded (not queued)'
         log(f'{verb} {added} new and adopted {adopted} existing download(s) for subscription {subscription.id}')
+    if numbered:
+        log(f'Numbered {numbered} existing download(s) for subscription {subscription.id}')
 
     return added
 
@@ -1749,8 +1874,8 @@ def backfill_playlist_indexes(parent_id: int, video_ids: Iterable[str]) -> None:
     if not video_ids:
         return
 
-    # Scan position is the episode number, so the mapping is built from the order yt-dlp
-    # returned rather than from anything stored.
+    # Scan position is the episode number unless another video holds it (see PlaylistNumbering),
+    # so the mapping is built from the order yt-dlp returned rather than from anything stored.
     mapping = {video_id: idx for idx, video_id in enumerate(list(video_ids), start=1)}
 
     with Session() as db:
@@ -1759,34 +1884,113 @@ def backfill_playlist_indexes(parent_id: int, video_ids: Iterable[str]) -> None:
             return
 
         # Only children with no index yet: overwriting would renumber episodes already filed
-        # under their old number in the library.
-        updated = False
-        for child in parent.children:
-            if child.playlist_index is None and child.youtube_id in mapping:
-                child.playlist_index = mapping[child.youtube_id]
-                updated = True
+        # under their old number in the library. Taken in scan order, as the playlist lists them.
+        pending = sorted(
+            (
+                child for child in parent.children
+                if child.playlist_index is None and child.youtube_id in mapping
+            ),
+            key=lambda child: (mapping[child.youtube_id], child.id),
+        )
+        numbering = None
+        if parent.playlist_id is not None:
+            numbering = PlaylistNumbering(db, parent.playlist_id)
+        for child in pending:
+            position = mapping[child.youtube_id]
+            child.playlist_index = (
+                numbering.assign(position, child.youtube_id) if numbering else position
+            )
 
         # Committed only when something changed, so a re-scan of a settled playlist takes no
         # write lock at all.
-        if updated:
+        if pending:
             db.commit()
 
 
-# Recompute playlist_index for a channel's videos in upload_date order, since a channel listing
-# is no curated sequence. Rewritten in full, as a newly found older video shifts every later
-# one. Takes an open session and does not commit, so it composes with the caller.
+# Statuses whose rows resequence_channel_index leaves alone: nothing is filed for a deleted file, a
+# cancelled download or a subscription's skipped baseline. A failed download keeps its number until
+# it is retried, rather than pushing every newer episode filed meanwhile one number further.
+INERT_STATUSES = frozenset({'deleted', 'cancelled', 'failed', SKIPPED_STATUS})
+
+
+# True when `filename` is a library file filed as channel episode `index`: plan_channel_video
+# writes "<show>/Season 01/<show> - S01E0005 - <title>", four digits where plan_episode writes two,
+# and a transcode keeps that name under another extension. A movie or another show's episode does
+# not match. The path is not checked on disk.
+def filed_under_number(filename: Optional[str], index: Optional[int]) -> bool:
+    if not filename or index is None:
+        return False
+    path = Path(filename)
+    if not path.is_relative_to(MEDIA_PATH) or path.parent.name != 'Season 01':
+        return False
+    return f' - S01E{index:04d} - ' in path.name
+
+
+# How firmly a row's number belongs to its video, lower first: 0 when the video is filed under it,
+# 1 for a live row, 2 for an inert one. Where a video's rows disagree, the firmest number wins, so
+# a deleted row's stale number never beats the one the video is filed under.
+def number_rank(video: Download) -> int:
+    if video.organized_at is not None or filed_under_number(video.filename, video.playlist_index):
+        return 0
+    return 2 if video.status in INERT_STATUSES else 1
+
+
+# True when resequence_channel_index must leave a channel row's number alone: the video is filed,
+# its library file carries that number while it awaits a refile (a parent's redownload clears
+# organized_at and leaves the file), the row is inert, or it has no upload_date to order it by. A
+# library file without the number, such as a movie this channel just adopted, keeps nothing.
+def keeps_channel_index(video: Download) -> bool:
+    if video.organized_at is not None:
+        return True
+    if filed_under_number(video.filename, video.playlist_index):
+        return True
+    return video.status in INERT_STATUSES or video.upload_date is None
+
+
+# Number a channel's grouped videos without changing one a filed video carries: rows that keep
+# their number (see keeps_channel_index) stay, and the rest follow in (upload_date, id) order from
+# one past the highest kept. A further row of a video that already has a number shares its firmest
+# one (see number_rank), so one video is one episode. The trade-off: a video older than filed ones
+# takes the next free number, numbers already duplicated on disk stay, and gaps can appear. A
+# number is handed out once, except the highest after its episode moves to a playlist's show,
+# which the next new video takes. Takes an open session and does not commit, so it composes with
+# the caller.
 def resequence_channel_index(db, channel_id: int) -> None:
+    # A row with a playlist is an episode of that playlist, and its index is its position there.
     videos = (
         db.query(Download)
         .filter(
             Download.channel_id == channel_id,
             Download.group_by_channel.is_(True),
-            Download.upload_date.isnot(None),
+            Download.playlist_id.is_(None),
         )
         .order_by(Download.upload_date, Download.id)
         .all()
     )
-    for index, video in enumerate(videos, start=1):
+
+    kept = []
+    renumbered = []
+    for video in videos:
+        if keeps_channel_index(video):
+            kept.append(video)
+        else:
+            renumbered.append(video)
+
+    highest = max((video.playlist_index for video in kept if video.playlist_index), default=0)
+    # The number each video already has: the firmest a kept row carries, lowest id first on a tie.
+    numbers: dict[str, int] = {}
+    for video in sorted(kept, key=lambda video: (number_rank(video), video.id)):
+        if video.youtube_id and video.playlist_index:
+            numbers.setdefault(video.youtube_id, video.playlist_index)
+
+    # Only values that change are written, so a settled channel leaves nothing to flush.
+    for video in renumbered:
+        index = numbers.get(video.youtube_id) if video.youtube_id else None
+        if index is None:
+            highest += 1
+            index = highest
+            if video.youtube_id:
+                numbers[video.youtube_id] = index
         if video.playlist_index != index:
             video.playlist_index = index
 
@@ -1824,7 +2028,8 @@ def backfill_all_playlist_indexes() -> None:
 
 
 # Resequence every channel with at least one group_by_channel video, catching up any never
-# resequenced. Pure database work, so it is cheap enough to run for every channel on startup.
+# resequenced; a filed video keeps its number (see resequence_channel_index). Pure database work,
+# so it is cheap enough to run for every channel on startup.
 def resequence_all_channel_indexes() -> None:
     with Session() as db:
         channel_ids = [
@@ -2024,6 +2229,11 @@ def record_completed_download(job: Download, media_path: Path) -> None:
     info_path = media_path.with_name(media_path.stem + '.info.json')
     log(f'Job {job.id}: download completed, recorded filename {media_path}')
 
+    # Before the row points at the new file: a video downloaded again because its library file was
+    # missing still carries that file's name here, so the channel resequence apply_metadata runs
+    # keeps its episode number for this copy.
+    apply_metadata_from_info_file(job, info_path)
+
     update_job(
         job.id,
         status='completed',
@@ -2032,8 +2242,6 @@ def record_completed_download(job: Download, media_path: Path) -> None:
         filename=str(media_path),
         metadata_file=str(info_path) if info_path.exists() else None,
     )
-
-    apply_metadata_from_info_file(job, info_path)
 
 
 # Shared tail for a stopped video job: settle its parent, then file whatever is ready.

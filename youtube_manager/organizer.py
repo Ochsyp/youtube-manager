@@ -894,8 +894,9 @@ def plan_channel_video(db, job: Download, info: dict, video_path: Path) -> Optio
         log(f'Job {job.id}: marked group_by_channel but has no channel relationship, skipping')
         return None
 
-    # Numbering comes from the upload-date index worker.resequence_channel_index computes; wait
-    # for it rather than guess, as plan_episode() does for a playlist's index.
+    # Numbering comes from worker.resequence_channel_index: the channel's next free number in
+    # upload-date order, never changed once filed. Wait for it rather than guess, as plan_episode()
+    # does for a playlist's index.
     if job.playlist_index is None:
         log(f'Job {job.id}: missing channel playlist_index, skipping until resequenced')
         return None

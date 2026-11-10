@@ -182,9 +182,11 @@ class Download(Base):
     thumbnail = Column(String)
     description = Column(Text)
     upload_date = Column(String)
-    # Episode number within the parent: a playlist's scan order, or a channel's upload-date order
-    # (see worker.resequence_channel_index). None until a scan assigns one, and the organizer
-    # waits for it rather than guessing, so a video without an index stays unfiled.
+    # Episode number within the show. In a playlist: the number the video already holds there,
+    # else its scan position, else the next past the highest held (see worker.PlaylistNumbering).
+    # In a channel: the next free number in upload-date order, never changed once filed (see
+    # worker.resequence_channel_index). None until one is assigned, and the organizer waits for it
+    # rather than guessing, so a video without an index stays unfiled.
     playlist_index = Column(Integer)
     # Descriptive metadata captured from yt-dlp so the organizer can write a complete NFO
     # even after the .info.json sidecar has been cleaned up.
