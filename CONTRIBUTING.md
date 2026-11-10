@@ -69,16 +69,20 @@ To release X.Y.Z:
 
    vP.Q.R is the previous release. The first release links to its tag instead, as in
    `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`.
-2. After the merge, sign a tag on the commit the merge created on `main`, which the `gh pr view`
-   line below prints, so that nothing merged after it ships under this version. `git tag -s`
-   needs a signing key set up in Git (`gpg.format` and `user.signingkey`), and the key added to
-   GitHub as a signing key, so that the tag shows as verified. Then push the tag:
+2. After the merge, sign an annotated tag on the commit the merge created on `main`, which the
+   `gh pr view` line below prints, so that nothing merged after it ships under this version. The
+   tag message is `youtube-manager vX.Y.Z`. Tags are signed with the release signing key: one
+   ed25519 SSH key, added to GitHub as a signing key titled `release signing` so that the tag shows
+   as verified, and listed as `maintainer namespaces="git" <public key>` in the allowed signers
+   file `git tag -v` reads (`gpg.ssh.allowedSignersFile`). Git signs with it once `gpg.format` is
+   `ssh` and `user.signingkey` names the key. Then check the signature and push the tag:
 
    ```text
    git switch main
    git pull --ff-only
    gh pr view <number> --json mergeCommit --jq .mergeCommit.oid
-   git tag -s vX.Y.Z -m vX.Y.Z <merge commit>
+   git tag -s vX.Y.Z -m "youtube-manager vX.Y.Z" <merge commit>
+   git tag -v vX.Y.Z
    git push origin vX.Y.Z
    ```
 
@@ -104,7 +108,8 @@ To release X.Y.Z:
    is vX.Y.Z on a commit of `main` and that CHANGELOG.md has its dated heading, builds and
    smoke-tests the image for amd64 and arm64, pushes `ghcr.io/ochsyp/youtube-manager:X.Y.Z` and
    `latest` with provenance and SBOM attestations, and appends the image's digest to the release
-   notes.
+   notes. Keep that `## Container image` section in every release's notes: deployments that
+   follow releases read the image digest from it.
 
 A release marked as a prerelease is pushed without `latest`, and promoting it to a full release
 later does not run the workflow again.

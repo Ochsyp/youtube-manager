@@ -7,6 +7,12 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- CONTRIBUTING's release steps name the release signing key, its `maintainer` principal and the
+  tag message `youtube-manager vX.Y.Z`, check the tag's signature before pushing it, and keep the
+  image digest section in every release's notes.
+
 ### Fixed
 
 - Channel episodes already filed keep their number. A newly filed video takes the next free number
