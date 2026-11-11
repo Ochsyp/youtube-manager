@@ -7,6 +7,16 @@ describes.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-11
+
+Phase 7, subscription scan correctness, and the switch of channel subscriptions to the uploads
+playlist. Before a host moves to this release, follow the deploy notes of
+[#10](https://github.com/Ochsyp/youtube-manager/pull/10): copy the database with SQLite's backup
+API and run its two read-only queries. At its first start the worker retires the rows whose id is
+not a video id and re-baselines their subscriptions record-only; its log names how many rows it
+retired and each subscription it re-baselined. yt-dlp and the bgutil plugin are unchanged, so the
+PO-token provider stays at 2.0.2.
+
 ### Changed
 
 - A subscription to a channel's own URL is scanned through the channel's uploads playlist, one
@@ -199,6 +209,7 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0
