@@ -177,6 +177,24 @@ def _search_roots(roots: Iterable[Path], fragment: str) -> Optional[Path]:
     return None
 
 
+# The job's recorded file where the row says it is, if that is finished media inside one of
+# search_paths (staging and the library by default), else None. One stat per root and no tree
+# walk, so a file that has since moved is not found; find_existing_media() looks for that one.
+def find_recorded_media(job, search_paths: Optional[Iterable[Path]] = None) -> Optional[Path]:
+    if not job.filename:
+        return None
+    roots = list(search_paths) if search_paths is not None else list(SEARCH_PATHS)
+
+    # The recorded filename is the strongest signal, but only inside the requested roots: a
+    # relative name resolved against staging, or an absolute one left by an older
+    # DOWNLOAD_PATH, otherwise escapes the scope the caller asked for.
+    for base in roots:
+        recorded = resolve_stored_path(job.filename, base)
+        if _is_within_roots(recorded, roots) and is_media_file(recorded):
+            return recorded
+    return None
+
+
 # Locate a job's media file: by recorded filename, then by its '[<id>]' tag; None when neither
 # matches, however close a title is. search_paths scopes the search -- the worker passes staging
 # only, so an already-organized file doesn't count as "already downloaded"; the app's retry/sweep
@@ -184,15 +202,11 @@ def _search_roots(roots: Iterable[Path], fragment: str) -> Optional[Path]:
 def find_existing_media(job, search_paths: Optional[Iterable[Path]] = None) -> Optional[Path]:
     roots = list(search_paths) if search_paths is not None else list(SEARCH_PATHS)
 
-    if job.filename:
-        # The recorded filename is the strongest signal, but only inside the requested roots: a
-        # relative name resolved against staging, or an absolute one left by an older
-        # DOWNLOAD_PATH, otherwise escapes the scope the caller asked for.
-        for base in roots:
-            recorded = resolve_stored_path(job.filename, base)
-            if _is_within_roots(recorded, roots) and is_media_file(recorded):
-                return recorded
+    recorded = find_recorded_media(job, roots)
+    if recorded:
+        return recorded
 
+    if job.filename:
         # The file may have been moved (e.g. by the organizer); look for it by name under each root.
         found = _search_roots(roots, Path(job.filename).name)
         if found:

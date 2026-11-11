@@ -79,7 +79,12 @@ engine = _create_engine(DATABASE_URL)
 # =======================================================
 #                      ORM MODELS
 # =======================================================
-# The four tables and the relationships between them; a Download is the only row the worker writes.
+# The four tables and the relationships between them. Both processes write a Download. The worker
+# owns a video's in-flight states. The app sets request flags (cancel_requested), resets a row that
+# has stopped (Retry, Fetch Metadata, Add), cancels a queued or expanding row outright, and
+# settles or re-queues a playlist or channel row from its children (jobstate.settle_parent).
+# Neither the worker's status writes (worker.update_job) nor a settle overwrite a 'deleted' row;
+# only an explicit request queues one again.
 
 Base = declarative_base()
 
@@ -207,8 +212,10 @@ class Download(Base):
     organized_at = Column(DateTime)
     log = Column(Text)
     status = Column(String, nullable=False, default='queued')
-    # The app's cancel flag. Only the worker moves a row to 'cancelled', so this stays set until
-    # it acts; meanwhile the UI shows 'cancelling' (see jobstate.compute_effective_status).
+    # The app's request to cancel, set only on a row in progress. The app cancels a queued or
+    # expanding row outright; a row in flight keeps it until the worker acts on it, the UI
+    # meanwhile showing 'cancelling' (see jobstate.compute_effective_status), and a parent in
+    # flight with it set settles as 'cancelled' once no child is (jobstate.settle_parent).
     cancel_requested = Column(Boolean, nullable=False, default=False)
     error = Column(Text)
     created_at = Column(DateTime, default=utcnow)

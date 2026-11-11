@@ -29,7 +29,7 @@ import requests
 from sqlalchemy.orm import object_session
 
 from youtube_manager.database import Channel, Download, Playlist, Session, Subscription, utcnow
-from youtube_manager.jobstate import ACTIVE_STATUS_SET
+from youtube_manager.jobstate import ACTIVE_STATUS_SET, is_in_progress
 from youtube_manager.media import (
     DOWNLOAD_PATH,
     MEDIA_PATH,
@@ -1563,10 +1563,11 @@ def scan_and_process(dry_run: bool = False) -> int:
                 continue
 
             # Hold child videos back until the parent is settled, so a playlist is filed as a unit
-            # -- settled, not successful, or one failed video would strand all the others.
+            # -- settled, not successful, or one failed video would strand all the others. Read
+            # from its effective status, which its children decide: the stored one can lag them.
             if job.parent_id:
                 parent = job.parent
-                if not parent or parent.status in ACTIVE_STATUS_SET:
+                if not parent or is_in_progress(parent):
                     log(f'Job {job.id}: parent {job.parent_id} still in progress, skipping')
                     continue
 

@@ -20,7 +20,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, urlsplit
@@ -34,6 +34,7 @@ from youtube_manager.database import (
     Playlist,
     Session,
     Subscription,
+    utcnow,
     wait_for_schema,
 )
 from youtube_manager.jobstate import (
@@ -42,14 +43,15 @@ from youtube_manager.jobstate import (
     RESET_PROGRESS_ON_STATUSES,
     RESTART_RECOVERY_STATUSES,
     SKIPPED_STATUS,
-    STORABLE_STATUSES,
     TERMINAL_STATUS_SET,
     WORKER_PICKUP_STATUSES,
     apply_status_update_to_hierarchy,
     compute_parent_progress,
     compute_parent_speed,
+    is_in_progress,
     reset_job_for_retry,
     resolve_parent_status,
+    settle_parent,
 )
 from youtube_manager.media import (
     DOWNLOAD_PATH,
@@ -163,11 +165,6 @@ HEARTBEAT_PATH = Path(os.getenv('WORKER_HEARTBEAT_PATH', '/tmp/worker-heartbeat'
 #              LOGGING AND JOB-ROW UPDATES
 # =======================================================
 
-# Returns the current UTC time, which is what the database uses for its timestamps.
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 # Refresh the liveness marker. Called from every loop that can run for a long time, so a download
 # in progress keeps the container healthy rather than looking wedged. Failure is swallowed: an
 # unwritable marker means the healthcheck assumes the worst, which is never a reason to abandon
@@ -198,33 +195,55 @@ def log_error(msg: str, exc: BaseException | None = None) -> None:
     logging.error(msg, exc_info=exc)
 
 
-# Set columns on one job row in its own session and commit, then re-aggregate the parent's progress
-# outside that transaction. A row that has since been deleted is a no-op, not an error.
-# organized_at is deliberately left alone here: a progress tick is no reason to send the
-# organizer back over a video it already filed. Only retry and redownload clear it.
+# Ids of the jobs update_job() refused a write to in this worker run, so each is warned about once:
+# a download whose row was deleted keeps reporting progress until it stops.
+_refused_write_job_ids: set[int] = set()
+
+
+# Set columns on one job row in its own session and commit. One conditional UPDATE refuses a row
+# marked 'deleted' (WARN once per job per run); a row gone from the table is a no-op. Outside that
+# transaction, a terminal status settles a child's parent and a status or progress write
+# re-aggregates it. organized_at is deliberately left alone here: a progress tick is no reason to
+# send the organizer back over a video it already filed. Only retry and redownload clear it.
 def update_job(job_id: int, **values) -> None:
+    if values.get('status') in RESET_PROGRESS_ON_STATUSES:
+        values.setdefault('progress', None)
+        values.setdefault('speed', None)
+
     with Session() as db:
-        job = db.get(Download, job_id)
-        if not job:
+        row = db.query(Download.parent_id).filter(Download.id == job_id).first()
+        if row is None:
             return
 
-        if values.get('status') in RESET_PROGRESS_ON_STATUSES:
-            values.setdefault('progress', None)
-            values.setdefault('speed', None)
-
-        for key, value in values.items():
-            setattr(job, key, value)
-
+        # Conditional rather than read-then-set, so a delete the app commits meanwhile is never
+        # overwritten. updated_at still moves, through its onupdate.
+        written = (
+            db.query(Download)
+            .filter(Download.id == job_id, Download.status != 'deleted')
+            .update(values, synchronize_session=False)
+        )
+        if not written:
+            if job_id not in _refused_write_job_ids:
+                _refused_write_job_ids.add(job_id)
+                fields = ', '.join(sorted(values))
+                warn(f'Job {job_id}: the row is deleted, so the worker writes nothing more to it '
+                     f'({fields} refused)')
+            return
         db.commit()
-        parent_id = job.parent_id
+    parent_id = row.parent_id
 
-    # Aggregated after the session closes: SQLite takes one writer, so the parent's own commit
-    # has no business nesting inside this transaction.
-    if parent_id and any(key in values for key in ('progress', 'speed', 'status')):
-        try:
+    # Settled and aggregated after the session closes: SQLite takes one writer, so the parent's
+    # own commit has no business nesting inside this transaction.
+    if not parent_id:
+        return
+    try:
+        # A parent that settles has its aggregate persisted by finalize_parent_if_done() already.
+        if values.get('status') in TERMINAL_STATUS_SET and finalize_parent_if_done(job_id):
+            return
+        if any(key in values for key in ('progress', 'speed', 'status')):
             compute_and_persist_parent_progress(parent_id)
-        except Exception as exc:
-            log_error(f'Failed to aggregate progress for parent {parent_id}', exc)
+    except Exception as exc:
+        log_error(f'Failed to settle or aggregate parent {parent_id}', exc)
 
 
 # Append lines to a job's stored log, which is the only place download output is kept. Opens its own
@@ -284,8 +303,9 @@ def process_job(job: Download) -> None:
         return
 
     # A video whose file is already on disk is refreshed in place rather than downloaded again, and
-    # so is a queued video whose recorded file is in the library: "Retry all" requeues a failed
-    # redownload that way, and downloading it into staging again would file a second copy.
+    # so is a queued video whose recorded file is in the library: "Retry all" queues one whose file
+    # is not where the row says, and downloading it into staging again would file a second copy.
+    # Either way the terminal status update_job() writes settles the parent.
     if job.status in {'metadata', 'redownload'} or has_library_file(job):
         if job.request_type == 'video' and job.filename:
             log(f'Job {job.id}: performing worker-side redownload/rename')
@@ -295,10 +315,6 @@ def process_job(job: Download) -> None:
                 # No error= here: discover_metadata has already stored yt-dlp's own reason, and
                 # a generic message would overwrite it.
                 update_job(job.id, status='failed')
-            # Settled on both paths: this branch returns before the download_video() exits that
-            # would otherwise do it, and a parent left active blocks the organizer.
-            if job.parent_id:
-                finalize_parent_if_done(job.id)
             return
         if job.request_type in PARENT_REQUEST_TYPES:
             log(f'Job {job.id}: performing worker-side parent metadata refresh')
@@ -317,7 +333,7 @@ def process_job(job: Download) -> None:
             db_job = db.get(Download, job.id)
             already_has_children = bool(db_job.children) if db_job else False
             if already_has_children:
-                sync_parent_status(db_job)
+                settle_parent(db_job)
                 db.commit()
         if already_has_children:
             return
@@ -1023,15 +1039,26 @@ def redownload_or_rename(job: Download) -> bool:
                     return False
                 return True
 
+            # A Cancel or Delete the user sent while the metadata was fetched stands: the rows are
+            # left as the app wrote them, and the parent settles from them -- a cancel still
+            # pending as 'cancelled' once nothing runs. Rewriting them would undo the request.
+            if db_parent.status != 'redownload' or db_parent.cancel_requested:
+                append_log(job.id, 'Stopped by the user during the refresh; children left as is')
+                settle_parent(db_parent)
+                db.commit()
+                return True
+
             # A child with a file on disk gets a rename-first refresh; the rest are queued.
             for child in db_parent.children:
+                # The redownload request cleared every child's flag, so one set now is a Cancel of
+                # that video sent during the refresh, and the app's write stands.
+                if child.cancel_requested:
+                    append_log(job.id, f'Child {child.id} cancelled during the refresh; left as is')
+                    continue
                 child.organized_at = None
                 child.error = None
                 child.progress = None
                 child.speed = None
-                # Cancelling a parent flags every child, finished ones included, so a child that
-                # kept the flag would be cancelled again the moment this redownload picked it up.
-                child.cancel_requested = False
                 if child.filename:
                     child.status = 'redownload'
                     append_log(job.id, f'Marked child {child.id} for redownload')
@@ -1039,8 +1066,8 @@ def redownload_or_rename(job: Download) -> bool:
                     child.status = 'queued'
                     append_log(job.id, f'Marked child {child.id} queued for redownload')
 
-            # The parent shows queued while its children work; sync_parent_status settles it
-            # again once they finish. One commit covers the whole hierarchy.
+            # The parent shows queued while its children work; settle_parent settles it again
+            # once they finish. One commit covers the whole hierarchy.
             db_parent.cancel_requested = False
             db_parent.status = 'queued'
             db_parent.error = None
@@ -1158,7 +1185,8 @@ def is_cancelled(job_id: int) -> bool:
         return bool(job and job.cancel_requested)
 
 
-# Re-home jobs left in RESTART_RECOVERY_STATUSES by an unclean restart.
+# Re-home jobs left in RESTART_RECOVERY_STATUSES by an unclean restart. A job with a cancel
+# pending is cancelled instead, and its parent settled in the same commit.
 def recover_stuck_jobs() -> None:
     with Session() as db:
         stuck_jobs = db.query(Download).filter(Download.status.in_(RESTART_RECOVERY_STATUSES)).all()
@@ -1167,6 +1195,7 @@ def recover_stuck_jobs() -> None:
             log('No stuck jobs to recover')
             return
 
+        cancelled_parent_ids = set()
         for job in stuck_jobs:
             log(f'Recovering stuck job {job.id} ({job.request_type}) status={job.status}')
 
@@ -1177,6 +1206,8 @@ def recover_stuck_jobs() -> None:
             if job.cancel_requested:
                 job.status = 'cancelled'
                 job.error = 'Cancelled during restart'
+                if job.parent_id is not None:
+                    cancelled_parent_ids.add(job.parent_id)
             else:
                 job.error = None
                 # Interrupted mid-expansion; 'expanding' keeps the UI showing discovery pending.
@@ -1184,6 +1215,13 @@ def recover_stuck_jobs() -> None:
                     job.status = 'expanding'
                 else:
                     job.status = 'queued'
+
+        # A child cancelled here stopped without update_job(), which would otherwise settle its
+        # parent; left alone, a parent with its cancel pending shows 'cancel requested' for good.
+        for parent_id in cancelled_parent_ids:
+            parent = db.get(Download, parent_id)
+            if parent is not None:
+                settle_parent(parent)
 
         db.commit()
         log(f'Recovered {len(stuck_jobs)} stuck job(s)')
@@ -1233,32 +1271,10 @@ def populate_missing_parent_metadata() -> None:
 #               PARENT STATUS AGGREGATION
 # =======================================================
 
-# Bring a parent's stored status in line with its children, using the shared rule from jobstate
-# so the row and the UI cannot disagree. True once the parent has settled into a terminal state.
-# Mutates the row in the caller's session and leaves the commit to them.
-def sync_parent_status(parent: Download) -> bool:
-    resolved = resolve_parent_status(parent)
-
-    # Nothing to derive from (no children yet), or the parent carries a display-only state.
-    if not resolved or resolved not in STORABLE_STATUSES:
-        return False
-
-    parent.status = resolved
-
-    # Record when the parent settled, and clear it again if a redownload reopened the job.
-    if resolved in TERMINAL_STATUS_SET:
-        parent.completed_at = parent.completed_at or utcnow()
-        # A settled parent has nothing left to cancel, and a stale flag would make
-        # compute_effective_status() report 'cancel requested' over the real outcome forever.
-        parent.cancel_requested = False
-        return True
-
-    parent.completed_at = None
-    return False
-
-
-# Settle a child's parent now that the child has stopped, marking the parent finished once none
-# of its children have work left. Returns True when the parent has just reached a terminal state.
+# Settle a child's parent now that the child has stopped (jobstate.settle_parent), in its own
+# session, marking the parent finished once none of its children have work left. update_job()
+# calls it for every terminal status. Returns True once the parent has settled into a terminal
+# state with nothing in flight.
 def finalize_parent_if_done(child_job_id: int) -> bool:
     with Session() as db:
         child = db.get(Download, child_job_id)
@@ -1272,7 +1288,7 @@ def finalize_parent_if_done(child_job_id: int) -> bool:
             return False
 
         # Any child still active -- 'redownload' and 'expanding' too -- keeps the parent going.
-        finished = sync_parent_status(parent)
+        finished = settle_parent(parent)
         db.commit()
 
     if finished:
@@ -1378,7 +1394,7 @@ def resume_from_existing_children(job_id: int, reason: str) -> None:
     with Session() as db:
         parent = db.get(Download, job_id)
         if parent:
-            sync_parent_status(parent)
+            settle_parent(parent)
             db.commit()
 
 
@@ -1452,7 +1468,15 @@ def expand_playlist(job: Download) -> None:
     log(f'Created {created} child jobs for parent job {job.id}')
 
 
-# Create one child Download per video, without duplicating videos that already have a row.
+# Statuses of an unparented row that an explicit playlist or channel request queues again when it
+# adopts the row: recorded by a subscription without downloading, or deleted or cancelled earlier.
+# A failed row is left to auto-retry.
+REQUEUE_ON_ADOPTION_STATUSES = frozenset({SKIPPED_STATUS, 'deleted', 'cancelled'})
+
+
+# Create one child Download per video, without duplicating videos that already have a row: an
+# unparented row is adopted instead, and one per video queued again when every row adopted for it
+# is in REQUEUE_ON_ADOPTION_STATUSES.
 def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
     # Materialized so the IDs can be iterated more than once below.
     video_ids = list(video_ids)
@@ -1474,14 +1498,21 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
 
         # Every row for these videos in one query, split into two sets: already a child of this
         # parent (skip it), and present anywhere else (adopt rather than download a second copy).
-        # One query, because a per-video lookup makes a 500-video playlist 500 round trips.
-        matches = db.query(Download).filter(Download.youtube_id.in_(video_ids)).all()
+        # One query, because a per-video lookup makes a 500-video playlist 500 round trips. Oldest
+        # first, so "the first" row of a video below is a defined one.
+        matches = (
+            db.query(Download)
+            .filter(Download.youtube_id.in_(video_ids))
+            .order_by(Download.id)
+            .all()
+        )
         existing_ids_all = {d.youtube_id for d in matches if d.youtube_id}
         existing_ids_parent = {d.youtube_id for d in matches if d.youtube_id and d.parent_id == parent.id}
         log(f'create_child_jobs: parent={parent.id} video_ids={len(video_ids)} existing_all={len(existing_ids_all)} existing_parent={len(existing_ids_parent)}')
 
         added = 0
         adopted = 0
+        requeued = 0
 
         # Only a playlist's scan order is a curated sequence worth keeping as playlist_index;
         # channel children get theirs from resequence_channel_index: the channel's next free
@@ -1533,6 +1564,12 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
             # The associations mirror the fresh child below, or it organizes as a movie.
             existing_unparented_rows = [d for d in matches if d.youtube_id == video_id and d.parent_id is None]
             if existing_unparented_rows:
+                # The request asked for this video, so when every row adopted for it is one nothing
+                # would ever run again, the oldest is queued; one only, as twins would download it
+                # twice, and none beside a row that holds the video or will fetch it anyway.
+                requeue_row = None
+                if all(d.status in REQUEUE_ON_ADOPTION_STATUSES for d in existing_unparented_rows):
+                    requeue_row = existing_unparented_rows[0]
                 for existing_unparented in existing_unparented_rows:
                     # A row already numbered in this show keeps its number and, filed there
                     # already, its organized_at. Any other number belonged to another show.
@@ -1547,6 +1584,15 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
                         # organized_at refiles it under the playlist's show or the channel's folder.
                         if existing_unparented.organized_at is not None:
                             existing_unparented.organized_at = None
+                    # Queued with its numbering above kept; left as it was, it is never downloaded.
+                    if existing_unparented is requeue_row:
+                        existing_unparented.status = 'queued'
+                        existing_unparented.error = None
+                        existing_unparented.cancel_requested = False
+                        existing_unparented.progress = None
+                        existing_unparented.speed = None
+                        existing_unparented.completed_at = None
+                        requeued += 1
                     adopted += 1
                     log(f'Adopted existing download {existing_unparented.id} into parent {parent.id}')
                 continue
@@ -1589,14 +1635,17 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
         # The shared rule covers freshly queued children, adopted children already finished, and
         # a playlist that was fully downloaded before.
         if parent.children:
-            sync_parent_status(parent)
+            settle_parent(parent)
         else:
             # Nothing attached at all: queued, so the worker revisits rather than sitting in
             # 'expanding' forever.
             parent.status = 'queued'
 
         db.commit()
-        log(f'create_child_jobs: parent={parent.id} added={added} adopted={adopted} status={parent.status}')
+        log(
+            f'create_child_jobs: parent={parent.id} added={added} adopted={adopted} '
+            f'requeued={requeued} status={parent.status}'
+        )
 
     return added
 
@@ -1784,18 +1833,24 @@ _retry_backoff: dict[int, tuple[int, float]] = {}
 
 
 # Automatically retry every failed top-level job. Genuine failures only, never an explicit user
-# cancel, unlike the manual Retry button. Each retry of the same job waits twice as long as the
-# last, or a permanently dead video costs a YouTube request every five minutes forever.
+# cancel, unlike the manual Retry button: a hierarchy whose top row is cancelled or has a cancel
+# pending is skipped whole, and so is a child with a cancel pending. Each retry of the same job
+# waits twice as long as the last, or a permanently dead video costs a YouTube request every five
+# minutes forever.
 def retry_failed_jobs() -> None:
     now = time.monotonic()
 
     with Session() as db:
         # A parent qualifies on its own stored 'failed' status or on any child's, since the
-        # parent's stored status may not have caught up yet -- see resolve_parent_status.
+        # parent's stored status may not have caught up yet -- see resolve_parent_status. A
+        # cancelled one does not: its children's failures are no reason to restart what the user
+        # stopped.
         candidates = (
             db.query(Download)
             .filter(
                 Download.parent_id.is_(None),
+                Download.status != 'cancelled',
+                Download.cancel_requested.is_(False),
                 or_(
                     Download.status == 'failed',
                     Download.id.in_(
@@ -1825,9 +1880,18 @@ def retry_failed_jobs() -> None:
                 continue
 
             # Only 'failed' is passed, never 'cancelled': an explicit cancel must not be undone
-            # by an automatic retry. A parent shows queued while its children rerun.
-            if apply_status_update_to_hierarchy(job, lambda target: reset_job_for_retry(target, frozenset({'failed'}))):
-                if job.children:
+            # by an automatic retry, nor one still pending on a video that failed before the
+            # worker acted on it. A parent shows queued while its children rerun.
+            if apply_status_update_to_hierarchy(
+                job,
+                lambda target: (
+                    not target.cancel_requested
+                    and reset_job_for_retry(target, frozenset({'failed'}))
+                ),
+            ):
+                # A deleted parent stays deleted around a video fetched again under it, as
+                # jobstate.settle_parent keeps it.
+                if job.children and job.status != 'deleted':
                     job.status = 'queued'
                 retried += 1
 
@@ -2380,7 +2444,7 @@ def retire_invalid_scan_rows() -> None:
             leaves_live_children = any(child.status != 'deleted' for child in parent.children)
             if resolve_parent_status(parent) == 'deleted' and leaves_live_children:
                 continue
-            sync_parent_status(parent)
+            settle_parent(parent)
 
         # Record-only, whatever backfill_existing said: a whole back catalogue queued long after
         # the subscription began would arrive unannounced, and "Download existing now" fetches it
@@ -2579,13 +2643,16 @@ def record_completed_download(job: Download, media_path: Path) -> None:
     )
 
 
-# Shared tail for a stopped video job: settle its parent, then file whatever is ready.
+# Shared tail for a stopped video job: file whatever is ready. The status update_job() wrote has
+# settled the parent already, so this only reads it.
 def finalize_after_download(job: Download) -> None:
-    parent_completed = finalize_parent_if_done(job.id)
-
-    # Child videos are only organized once their whole parent is done.
-    if job.parent_id and not parent_completed:
-        return
+    # Child videos are only organized once their whole parent is done, the organizer's own gate.
+    if job.parent_id:
+        with Session() as db:
+            parent = db.get(Download, job.parent_id)
+            parent_done = parent is not None and not is_in_progress(parent)
+        if not parent_done:
+            return
 
     try:
         append_log(job.id, 'Organizer: running scan after completion')
@@ -2641,7 +2708,6 @@ def download_video(job: Download) -> None:
     if is_cancelled(job.id):
         update_job(job.id, status='cancelled', error='Cancelled by user')
         remove_cancelled_leftovers(job)
-        finalize_parent_if_done(job.id)
         return
 
     update_job(job.id, status='downloading')
@@ -2672,7 +2738,6 @@ def download_video(job: Download) -> None:
     except Exception as error:
         log_error(f'Job {job.id}: download failed', error)
         update_job(job.id, status='failed', error=str(error))
-        finalize_parent_if_done(job.id)
         return
     finally:
         # stream_process_output leaves nothing running, but a raise on the way there would
@@ -2687,7 +2752,6 @@ def download_video(job: Download) -> None:
     if outcome == 'cancelled':
         update_job(job.id, status='cancelled', error='Cancelled by user')
         remove_cancelled_leftovers(job)
-        finalize_parent_if_done(job.id)
         return
 
     # A shutdown is nobody's failure: the job goes back on the queue for the next start.
@@ -2717,7 +2781,8 @@ def download_video(job: Download) -> None:
         warn(f'Job {job.id}: download failed: {error}')
         update_job(job.id, status='failed', error=error)
 
-    # However it ended, the job has stopped: settle the parent and organize whatever is ready.
+    # However it ended, the job has stopped and its status has settled the parent: organize
+    # whatever is ready.
     finalize_after_download(job)
 
 

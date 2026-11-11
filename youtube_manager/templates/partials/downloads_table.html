@@ -1,7 +1,8 @@
 {# One row per download job, shared by the dashboard and history views so both render a job
    identically. Requires `jobs`, always top-level rows -- a child appears only on its parent's
    page. `show_progress`, `show_redownload` and `return_to` are optional; the two defaults below
-   are the dashboard's, since it includes this partial without setting either. #}
+   are the dashboard's, since it includes this partial without setting either. A row in progress
+   offers no Fetch Metadata, on its own or through the bulk button. #}
 
 {% import "partials/status_label.html" as status %}
 {% import "partials/job_actions.html" as actions %}
@@ -47,10 +48,11 @@
 
     <tbody>
         {% for job in jobs %}
-            {# compute_effective_status, is_retriable, format_children_summary and the two
-               compute_parent_* helpers are Jinja globals app.py registers from jobstate, as are
-               the CANCELABLE_/FAILED_/PARENT_ status lists; none of them is defined in a template.
-               Going through jobstate is what keeps the UI and the worker describing a job alike. #}
+            {# compute_effective_status, is_in_progress, is_retriable, format_children_summary and
+               the two compute_parent_* helpers are Jinja globals app.py registers from jobstate,
+               as are the CANCELABLE_/FAILED_/PARENT_ status lists; none of them is defined in a
+               template. Going through jobstate is what keeps the UI and the worker describing a
+               job alike. #}
             {% set effective_status = compute_effective_status(job) %}
             {# Mirror job_actions.html's per-row conditions exactly, so a bulk button is only ever
                enabled when a checked row would actually be affected by it -- see toggleAllRows()/
@@ -61,7 +63,7 @@
                resolve_parent_status), but retrying it still queues its failed children. See
                jobstate.is_retriable -- same reasoning as job_actions.html's Retry button. #}
             {% set can_retry = is_retriable(job) %}
-            {% set can_redownload = not job.parent_id %}
+            {% set can_redownload = not job.parent_id and not is_in_progress(job) %}
             {% set can_delete = not job.parent_id and effective_status not in CANCELABLE_EFFECTIVE_STATUSES and (job.filename or job.children) %}
             <tr>
                 <td>

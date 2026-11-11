@@ -1,7 +1,8 @@
 {# The one place that decides which actions a job offers, so a row in the table and the job's own
    page can never disagree about what is available. Imported as `actions`; the macro takes the job
-   plus a flag per action only some callers want, and reads no page context of its own. The status
-   helpers and status sets it uses are app.py globals -- see partials/downloads_table.html. #}
+   plus a flag per action only some callers want, and reads no page context of its own; a flag
+   asking for Fetch Metadata still shows nothing while the job is in progress. The status helpers
+   and status sets it uses are app.py globals -- see partials/downloads_table.html. #}
 
 {% macro job_actions(job, show_view_log=True, show_view_parent=True, show_redownload=False, show_delete=False) %}
     {% set effective_status = compute_effective_status(job) %}
@@ -15,9 +16,10 @@
             </form>
         {% endif %}
 
-        {# Retry is shown if the job itself failed/was cancelled, or -- for a playlist/channel
-           parent -- if any of its children did, even when the parent's own effective_status
-           reads 'completed' because at least one other child succeeded. See jobstate.is_retriable. #}
+        {# Retry is shown when it would reset something: a job that failed or was cancelled, or --
+           for a playlist/channel parent with children -- any child that did, even when the
+           parent's own effective_status reads 'completed' because another child succeeded, and
+           never on a parent none of whose children did. See jobstate.is_retriable. #}
         {% if is_retriable(job) %}
             <form action="/retry/{{ job.id }}" method="post" style="margin:0;">
                 <button class="button-secondary">Retry</button>
@@ -39,8 +41,9 @@
         {# Re-runs yt-dlp for this job's URL and rewrites its NFO, keeping the video file
            already on disk (see worker.redownload_or_rename). Offered on child videos too, so
            one video's metadata can be refreshed without redoing its whole parent; the label
-           says which of the two a click will do. #}
-        {% if show_redownload %}
+           says which of the two a click will do. Hidden while the job is in progress, which is
+           when app.request_job_redownload refuses it, by the same jobstate.is_in_progress. #}
+        {% if show_redownload and not is_in_progress(job) %}
             <form action="/job/{{ job.id }}/redownload" method="post" style="margin:0;">
                 <button class="button-secondary">{{ 'Fetch Metadata for All Children' if job.children else 'Fetch Metadata' }}</button>
             </form>
