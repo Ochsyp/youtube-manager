@@ -7,6 +7,59 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- Fetch Metadata is refused while a job is in progress: queued, downloading or being cancelled, or
+  a playlist or channel with a video still in flight. The job page and the bulk button no longer
+  offer it on such a job, a request that reaches the server anyway is answered with a flash saying
+  the job is still in progress, and a job the worker takes up while the request runs is left as
+  the worker set it. (phase 8)
+- Retry All reuses a file already on disk: a failed or cancelled video whose file is still where
+  its row says, in staging or in the library, has its metadata refreshed instead of being
+  downloaded again. Retry All still searches no folder, so the request stays quick on a large
+  library; a file moved since is found when the worker reaches the video. (phase 8)
+- Cancel acts only on jobs in progress. A bulk Cancel or Cancel All whose selection includes
+  finished jobs leaves those as they are, so a failed one is still retried automatically, and the
+  flash counts only the jobs actually cancelled. (phase 8)
+- Retry is offered on a playlist or channel that has videos only when one of them failed or was
+  cancelled, since that is all a retry resets. (phase 8)
+
+### Fixed
+
+- A playlist or channel download now downloads the videos it adopts that a subscription recorded
+  as skipped, and queues again those deleted or cancelled earlier, instead of adopting them
+  unchanged, never downloading them and staying in "expanding". It queues one row per video, and
+  none beside a row that already holds the video. Pasting the URL of a video a subscription
+  skipped into the add form downloads it instead of reporting it as already there. (phase 8)
+- A playlist or channel is settled by one rule in the web app and the worker whenever one of its
+  videos stops, on every path, including a video refused before it ran, a download that failed to
+  start, a video cancelled at a restart, and cancelling or deleting a single video in the web UI.
+  A playlist still showing queued once every video has finished is no longer held back from the
+  library, and one whose video was queued again is no longer filed before that video finishes.
+  (phase 8)
+- A cancelled playlist or channel stays cancelled when a video finishes after the cancel or is
+  fetched again, however many run at once, also when it was cancelled while one of its videos ran
+  again on its own. Auto-retry no longer restarts its failed videos, nor a video whose own cancel
+  was still pending when it failed. A deleted one likewise stays deleted, also when auto-retry
+  reruns a video fetched again under it. A cancel flag left on a playlist that had already
+  finished no longer turns it cancelled later. (phase 8)
+- Cancelling a playlist, or one of its videos, while the worker refreshes the playlist's
+  metadata for Fetch Metadata for All Children is no longer undone by that refresh. (phase 8)
+- A playlist or channel left with nothing but videos a subscription skipped no longer stays in
+  progress for good once it settles: it fails with an error saying that Fetch Metadata for All
+  Children downloads them. (phase 8)
+- The worker no longer writes over a download deleted in the web UI while the worker still held
+  it, so a deleted video no longer comes back as completed or failed; it logs one WARN instead.
+  (phase 8)
+- The admin sweep settles each playlist it reaches by the same rule, so a playlist with a failed
+  video is no longer marked completed, and it leaves a video still in progress to the worker.
+  (phase 8)
+- A youtu.be share link, or a Shorts, embed, live or /v link, that carries the playlist it was
+  shared from is classified as a video. A video request downloads that video, and a playlist
+  request, now accepted for it as for a watch link opened inside a playlist, downloads the
+  playlist instead of the single video. YouTube's playlist embed link still counts as a playlist.
+  (phase 8)
+
 ## [1.0.2] - 2026-11-11
 
 Phase 7, subscription scan correctness, and the switch of channel subscriptions to the uploads

@@ -1,12 +1,14 @@
 {# Everything on the job details page below the nav: the metadata table, the child list, and the
    tail of the log. Rendered inline by job.html and served on its own by GET /api/job/<id>/section,
    which that page swaps into #job-content on a timer. Requires `job`; `job_log` is optional and
-   its section is dropped when it is absent. #}
+   its section is dropped when it is absent. Fetch Metadata, for the job or one child, is offered
+   only while that job is not in progress. #}
 
 {% import "partials/status_label.html" as status %}
 {% import "partials/job_actions.html" as actions %}
 
-{# The compute_* and format_* helpers used here are app.py globals -- see downloads_table.html. #}
+{# The compute_*, format_* and is_in_progress helpers used here are app.py globals -- see
+   downloads_table.html. #}
 {% set effective_status = compute_effective_status(job) %}
 
 <div class="section-header">
@@ -146,11 +148,14 @@
                         <td>{{ child.playlist_index or '-' }}</td>
                         <td>{{ child.created_at }}</td>
                         {# Refresh just this one video's metadata/NFO without having to redownload
-                           the whole parent playlist/channel. #}
+                           the whole parent playlist/channel; not while the child is in progress,
+                           which the route refuses. #}
                         <td>
-                            <form action="/job/{{ child.id }}/redownload" method="post" style="margin:0;">
-                                <button class="button-secondary">Fetch Metadata</button>
-                            </form>
+                            {% if not is_in_progress(child) %}
+                                <form action="/job/{{ child.id }}/redownload" method="post" style="margin:0;">
+                                    <button class="button-secondary">Fetch Metadata</button>
+                                </form>
+                            {% endif %}
                         </td>
                     </tr>
                 {% endfor %}

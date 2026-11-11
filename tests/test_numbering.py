@@ -490,8 +490,9 @@ def test_rows_of_one_video_share_channel_number(db, make_job, channel_id):
     assert stored_indexes(db, filed, repeat, *new) == [1, 1, 2, 2]
 
 
-# A queued video whose recorded file is in the library, as "Retry all" leaves a failed redownload,
-# is refreshed in place and never downloaded again; one whose file is in staging is downloaded.
+# A queued video whose recorded file is in the library, as "Retry all" leaves one whose recorded
+# file has moved, is refreshed in place and never downloaded again; one whose file is in staging is
+# downloaded.
 def test_queued_video_with_library_file_is_refreshed_in_place(monkeypatch, make_job, channel_id):
     calls = []
 

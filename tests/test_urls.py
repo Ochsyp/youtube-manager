@@ -2,12 +2,18 @@
 # URL helper tests
 #
 # Characterization tests for app.py's URL helpers: which hosts count as YouTube, how a pasted URL
-# is classified, and the single canonical form it is stored and deduplicated under.
+# is classified and checked against the type requested, and the single canonical form it is
+# stored and deduplicated under.
 # -------------------------------------------------------
 
 import pytest
 
-from youtube_manager.app import detect_youtube_type, normalize_url, youtube_domain
+from youtube_manager.app import (
+    detect_youtube_type,
+    normalize_url,
+    validate_url_type,
+    youtube_domain,
+)
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 LIST_ID = 'PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
@@ -84,6 +90,58 @@ def test_normalize_url_idempotent(url, kind):
 )
 def test_detect_youtube_type_cases(url, expected):
     assert detect_youtube_type(url) == expected
+
+
+# A youtu.be share link, or a /shorts, /embed, /live or /v link, that carries the playlist it was
+# shared from names one video: it is classified as a video before list= is read, so a video
+# request for it is accepted, a channel request refused, and it normalises to the watch URL.
+@pytest.mark.parametrize(
+    'url',
+    [
+        f'https://youtu.be/{VIDEO_ID}?list={LIST_ID}',
+        f'https://youtu.be/{VIDEO_ID}?si=abc123&list={LIST_ID}',
+        f'https://www.youtube.com/shorts/{VIDEO_ID}?list={LIST_ID}',
+        f'https://www.youtube.com/embed/{VIDEO_ID}?list={LIST_ID}',
+        f'https://www.youtube.com/live/{VIDEO_ID}?list={LIST_ID}',
+        f'https://www.youtube.com/v/{VIDEO_ID}?list={LIST_ID}',
+    ],
+)
+def test_youtu_be_with_list_is_video(url):
+    assert detect_youtube_type(url) == 'video'
+    assert validate_url_type(url, 'video') is None
+    assert validate_url_type(url, 'channel') == 'video'
+    assert normalize_url(url, 'video') == WATCH
+
+
+# Such a link, like a watch URL opened inside a playlist, is accepted for a playlist request too,
+# and then normalises to the playlist alone, whichever video it was shared from.
+@pytest.mark.parametrize(
+    'url',
+    [
+        f'https://youtu.be/{VIDEO_ID}?list={LIST_ID}',
+        f'https://youtu.be/{VIDEO_ID}?list={LIST_ID}&si=abc123',
+        f'https://www.youtube.com/watch?v={VIDEO_ID}&list={LIST_ID}&index=3',
+    ],
+)
+def test_youtu_be_with_list_as_playlist_normalises_to_list(url):
+    assert validate_url_type(url, 'playlist') is None
+    assert normalize_url(url, 'playlist') == PLAYLIST
+
+
+# The playlist embed, and a share link with no video id, name no video: list= decides, so each is
+# a playlist, refused for a video request, and normalises to the playlist.
+@pytest.mark.parametrize(
+    'url',
+    [
+        f'https://www.youtube.com/embed/videoseries?list={LIST_ID}',
+        f'https://www.youtube-nocookie.com/embed/videoseries?list={LIST_ID}',
+        f'https://youtu.be/?list={LIST_ID}',
+    ],
+)
+def test_list_without_video_is_playlist(url):
+    assert detect_youtube_type(url) == 'playlist'
+    assert validate_url_type(url, 'video') == 'playlist'
+    assert normalize_url(url) == normalize_url(url, 'playlist') == PLAYLIST
 
 
 # Only the YouTube hosts themselves and their subdomains match. Lookalike hosts, userinfo

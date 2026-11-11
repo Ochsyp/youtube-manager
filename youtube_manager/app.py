@@ -27,7 +27,7 @@ from sqlalchemy.orm import aliased, joinedload, selectinload
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from youtube_manager.database import Download, Session, Subscription, initialize_database, utcnow
+from youtube_manager.database import Download, Session, Subscription, initialize_database
 
 # Job-state vocabulary and progress/speed aggregation, shared with the worker so
 # both processes describe a job the same way.
@@ -40,6 +40,7 @@ from youtube_manager.jobstate import (
     PARENT_REQUEST_TYPES,
     QUEUE_STATUSES,
     QUEUED_OR_EXPANDING,
+    SKIPPED_STATUS,
     TERMINAL_STATUS_SET,
     adopt_existing_download,
     apply_status_update_to_hierarchy,
@@ -47,8 +48,10 @@ from youtube_manager.jobstate import (
     compute_parent_progress,
     compute_parent_speed,
     format_children_summary,
+    is_in_progress,
     is_retriable,
     reset_job_for_retry,
+    settle_parent,
 )
 from youtube_manager.media import extract_youtube_id
 from youtube_manager.organizer import remove_downloaded_files
@@ -319,6 +322,9 @@ YOUTUBE_DOMAINS = ('youtube.com', 'youtu.be', 'youtube-nocookie.com')
 # Path prefixes that address one video; the same set media.extract_youtube_id reads ids from.
 VIDEO_PATH_PREFIXES = ('/shorts/', '/embed/', '/live/', '/v/')
 
+# The id segment of YouTube's playlist embed, /embed/videoseries?list=<id>, which names no video.
+PLAYLIST_EMBED_SEGMENT = 'videoseries'
+
 
 # Canonicalises a URL so it carries a scheme, which urlparse() needs to parse the hostname.
 def with_scheme(url: str) -> str:
@@ -336,23 +342,48 @@ def youtube_domain(url: str) -> Optional[str]:
     return None
 
 
+# The video id a URL names in its path: a youtu.be link's first path segment, or the segment after
+# one of VIDEO_PATH_PREFIXES on another YouTube domain (`domain` is youtube_domain()'s answer).
+# None for any other path, an empty id, and the playlist embed, so a `list=` beside them counts.
+def path_video_id(domain: Optional[str], path: str) -> Optional[str]:
+    # strip, not lstrip: a trailing slash left on the id makes the same video normalise two
+    # different ways, and the duplicate check in queue_download() compares these strings.
+    if domain == 'youtu.be':
+        segment = path.strip('/').split('/')[0]
+    elif domain:
+        path = path.rstrip('/')
+        prefix = next((p for p in VIDEO_PATH_PREFIXES if path.startswith(p)), None)
+        if prefix is None:
+            return None
+        segment = path[len(prefix):].split('/')[0]
+    else:
+        return None
+    if not segment or segment == PLAYLIST_EMBED_SEGMENT:
+        return None
+    return segment
+
+
 # Canonicalise a URL so the same target pasted in different forms compares equal
-# against stored rows. `kind` is what detect_youtube_type read from the original
-# URL: a watch+list URL carries both ids, and without it `list=` wins and a
-# single video normalises to the playlist it was opened from.
+# against stored rows. `kind` is the type the URL was validated as (see
+# validate_url_type): a URL carrying both a video id and `list=` is the video for
+# 'video' and the playlist for 'playlist', a youtu.be share link included. Without
+# a kind, a watch+list URL normalises to the playlist it was opened from.
 def normalize_url(url: str, kind: Optional[str] = None) -> str:
     url = with_scheme(url)
     parsed = urlparse(url)
     domain = youtube_domain(url)
+    qs = parse_qs(parsed.query)
+    video_id = path_video_id(domain, parsed.path)
+
+    # A playlist keeps only its list id, whichever video it was opened at or shared from.
+    if domain and kind == 'playlist' and 'list' in qs:
+        return 'https://www.youtube.com/playlist?list=' + qs['list'][0]
 
     # A short link carries the id as its entire path, so it rewrites without consulting the query.
-    # strip, not lstrip: a trailing slash left on the id makes the same video normalise two
-    # different ways, and the duplicate check in queue_download() compares these strings.
-    if domain == 'youtu.be':
-        return 'https://www.youtube.com/watch?v=' + parsed.path.strip('/').split('/')[0]
+    if domain == 'youtu.be' and video_id:
+        return 'https://www.youtube.com/watch?v=' + video_id
 
     if domain:
-        qs = parse_qs(parsed.query)
         path = parsed.path.rstrip('/')
 
         # Only the id survives: playlist position, timestamps and tracking parameters are all
@@ -360,17 +391,17 @@ def normalize_url(url: str, kind: Optional[str] = None) -> str:
         if 'v' in qs and kind == 'video':
             return 'https://www.youtube.com/watch?v=' + qs['v'][0]
 
+        # Shorts, embeds and live URLs each address one video, so they collapse to the same watch
+        # form, ahead of any `list=` they carry, as in detect_youtube_type; a channel URL falls
+        # through with its path intact.
+        if video_id:
+            return 'https://www.youtube.com/watch?v=' + video_id
+
         if 'list' in qs:
             return 'https://www.youtube.com/playlist?list=' + qs['list'][0]
 
         if 'v' in qs:
             return 'https://www.youtube.com/watch?v=' + qs['v'][0]
-
-        # Shorts, embeds and live URLs each address one video, so they collapse to the same watch
-        # form; a channel URL falls through with its path intact.
-        for prefix in VIDEO_PATH_PREFIXES:
-            if path.startswith(prefix):
-                return 'https://www.youtube.com/watch?v=' + path[len(prefix):].split('/')[0]
 
         return 'https://www.youtube.com' + path
 
@@ -389,17 +420,18 @@ def detect_youtube_type(url: str) -> Optional[str]:
     path = parsed.path.rstrip('/')
     qs = parse_qs(parsed.query)
 
-    # `v=` is checked before `list=`: YouTube appends a channel's auto-generated
-    # Uploads playlist id to any video opened from its Videos tab, and classifying
-    # that as a playlist records the single video as a playlist of its own.
-    if path == '/watch' and 'v' in qs:
+    # Every shape that names one video is checked before `list=`: YouTube appends a
+    # channel's auto-generated Uploads playlist id to any video opened from its
+    # Videos tab, a share link carries the playlist it was shared from, and reading
+    # either as a playlist records the single video as a playlist of its own.
+    # validate_url_type still accepts such a URL for a playlist request. The
+    # playlist embed names no video, so its `list=` decides.
+    names_video = path == '/watch' and 'v' in qs
+    if names_video or path_video_id(domain, parsed.path):
         return 'video'
 
     if 'list' in qs or path == '/playlist':
         return 'playlist'
-
-    if domain == 'youtu.be' or path.startswith(VIDEO_PATH_PREFIXES):
-        return 'video'
 
     # /c/ and /user/ are YouTube's pre-handle channel URLs, still in circulation.
     if path.startswith(('/@', '/channel/', '/c/', '/user/')):
@@ -417,12 +449,17 @@ def validate_request_type(request_type: str) -> bool:
 
 
 # Returns the detected type only when it contradicts `expected_type`; an
-# unrecognisable URL is not treated as a mismatch.
+# unrecognisable URL is not treated as a mismatch, and a URL carrying both a video
+# id and `list=` is accepted as either a video or a playlist.
 def validate_url_type(url: str, expected_type: str) -> Optional[str]:
     detected = detect_youtube_type(url)
-    if detected and detected != expected_type:
-        return detected
-    return None
+    if not detected or detected == expected_type:
+        return None
+    # detect_youtube_type reads such a URL as its video; normalize_url keeps the list instead.
+    carries_list = 'list' in parse_qs(urlparse(with_scheme(url)).query)
+    if detected == 'video' and expected_type == 'playlist' and carries_list:
+        return None
+    return detected
 
 
 # Register the shared job-state helpers and vocabulary as Jinja globals, so templates render
@@ -432,6 +469,7 @@ templates.env.globals['compute_effective_status'] = compute_effective_status
 templates.env.globals['compute_parent_progress'] = compute_parent_progress
 templates.env.globals['compute_parent_speed'] = compute_parent_speed
 templates.env.globals['format_children_summary'] = format_children_summary
+templates.env.globals['is_in_progress'] = is_in_progress
 templates.env.globals['is_retriable'] = is_retriable
 templates.env.globals['CANCELABLE_EFFECTIVE_STATUSES'] = CANCELABLE_EFFECTIVE_STATUSES
 templates.env.globals['FAILED_OR_CANCELLED'] = FAILED_OR_CANCELLED
@@ -475,20 +513,24 @@ def load_jobs(db, job_ids: list[int]) -> list[Download]:
 
 # Statuses /add is willing to requeue rather than reject as a duplicate. 'deleted' is
 # included because pasting the URL again after removing the file is a request to fetch
-# it again, and nothing else on that row offers to.
-REQUEUEABLE_STATUSES = FAILED_OR_CANCELLED | {'deleted'}
+# it again, and nothing else on that row offers to; SKIPPED_STATUS because a video a
+# subscription only recorded has never been fetched at all.
+REQUEUEABLE_STATUSES = FAILED_OR_CANCELLED | {'deleted', SKIPPED_STATUS}
 
 
 # Requeues a job's failed/cancelled work in the caller's transaction, and reports whether
 # anything changed. Shares reset_job_for_retry with the worker's auto-retry (jobstate.py) so
-# both reset the same fields and both reuse a file already on disk.
-def requeue_job(job: Download, statuses=FAILED_OR_CANCELLED) -> bool:
+# both reset the same fields and both reuse a file already on disk; search_library=False
+# finds that file by a stat of its recorded name alone, walking no tree.
+def requeue_job(job: Download, statuses=FAILED_OR_CANCELLED, search_library: bool = True) -> bool:
     changed = apply_status_update_to_hierarchy(
-        job, lambda target: reset_job_for_retry(target, statuses)
+        job, lambda target: reset_job_for_retry(target, statuses, search_library)
     )
     if changed and job.parent_id is None and job.children:
-        # Parent shows queued too, so the UI reflects the retry.
+        # Parent shows queued too, so the UI reflects the retry. A cancel still pending on it
+        # would settle the rerun hierarchy as cancelled (jobstate.settle_parent), so it goes.
         job.status = 'queued'
+        job.cancel_requested = False
     return changed
 
 
@@ -513,10 +555,12 @@ def queue_download(url: str, request_type: str) -> str:
         if existing:
             if existing.status not in REQUEUEABLE_STATUSES:
                 return 'Download already exists.'
+            # A row a subscription only recorded was never fetched, so queuing it is no retry.
+            first_fetch = existing.status == SKIPPED_STATUS
             if not requeue_job(existing, REQUEUEABLE_STATUSES):
                 return 'No failed downloads to retry.'
             db.commit()
-            return 'Retry queued.'
+            return f'{request_type.capitalize()} queued.' if first_fetch else 'Retry queued.'
 
         # Capture the video id up front -- the organizer tags every filename with it,
         # and a row that reaches it without one produces "... [None]" filenames.
@@ -549,8 +593,11 @@ def retry_job(job_id: int) -> str:
 
 
 # The flag is for the worker to notice mid-download; a job that has not started yet
-# can be cancelled outright here.
+# can be cancelled outright here. A row that has stopped is left unflagged: it has nothing to
+# cancel, and the flag would steer a later settle or auto-retry against what the UI shows.
 def apply_cancel(target: Download) -> bool:
+    if target.status not in ACTIVE_STATUS_SET:
+        return False
     target.cancel_requested = True
     if target.status in QUEUED_OR_EXPANDING:
         target.status = 'cancelled'
@@ -562,24 +609,44 @@ def apply_cancel(target: Download) -> bool:
     return False
 
 
-# Cancels a job in the caller's transaction. Not apply_status_update_to_hierarchy: that only
-# touches the parent when a child changed, so a parent whose children are all terminal would
-# never get its own flag set and Cancel would silently do nothing.
-def request_job_cancel(job: Download) -> None:
+# Settle `parent` in the caller's transaction through jobstate.settle_parent once none of its
+# children is in flight, as after the app cancels or deletes the last child that kept it active.
+# While one is, the parent is left alone: the worker owns in-flight states and settles the parent
+# when that child stops. None is a no-op.
+def settle_idle_parent(parent: Optional[Download]) -> None:
+    if parent is None or any(child.status in ACTIVE_STATUS_SET for child in parent.children):
+        return
+    settle_parent(parent)
+
+
+# Cancels a job in progress (jobstate.is_in_progress) in the caller's transaction and reports
+# whether it was one; a job that has stopped is left alone. Not apply_status_update_to_hierarchy:
+# that only touches the parent when a child changed, so a parent whose children are all
+# mid-download would never get its own flag set. A parent with nothing left in flight is settled
+# here, as is a cancelled child's parent, in the same transaction.
+def request_job_cancel(job: Download) -> bool:
+    if not is_in_progress(job):
+        return False
+
     if job.parent_id is None and job.children:
+        # A parent stored as settled while a video of it runs again on its own lags its children:
+        # settled from them first, it is stored in flight, where the flag set below settles it
+        # as 'cancelled' however many videos are still running (jobstate.settle_parent).
+        in_flight = any(child.status in ACTIVE_STATUS_SET for child in job.children)
+        if in_flight and job.status not in ACTIVE_STATUS_SET:
+            settle_parent(job)
         for child in job.children:
             apply_cancel(child)
 
         job.cancel_requested = True
-        # Nothing left in progress, so resolve the parent here -- no other code path
-        # would move it out of an active status.
-        if not any(c.status in ACTIVE_STATUS_SET for c in job.children) and job.status not in TERMINAL_STATUS_SET:
-            job.status = 'cancelled'
-            job.completed_at = utcnow()
-            job.progress = None
-            job.speed = None
+        # Nothing left in progress, so the parent settles here -- no other code path would move
+        # it out of an active status.
+        settle_idle_parent(job)
     else:
         apply_cancel(job)
+        if job.parent_id is not None:
+            settle_idle_parent(job.parent)
+    return True
 
 
 # Requests cancellation of one job in its own session. A missing id is a silent no-op -- the
@@ -637,7 +704,8 @@ def describe_deletion(deleted: int, skipped_active: int) -> str:
 
 
 # Deletes one job's files in its own session and returns the flash wording. The row survives,
-# marked 'deleted'; a missing id is reported, not raised.
+# marked 'deleted', and a child's parent is settled in the same commit; a missing id is reported,
+# not raised.
 def delete_job(job_id: int) -> str:
     with Session() as db:
         job = db.get(Download, job_id)
@@ -645,6 +713,9 @@ def delete_job(job_id: int) -> str:
             return 'Job not found.'
 
         deleted, skipped_active = delete_job_files(job)
+        # After the files are gone: loading the parent may autoflush and take the write lock.
+        if job.parent_id is not None:
+            settle_idle_parent(job.parent)
         db.commit()
 
     return describe_deletion(deleted, skipped_active)
@@ -772,18 +843,19 @@ def retry(job_id: int):
     return redirect_with_flash('/', message)
 
 
-# POST /cancel/{job_id}: flags the job for cancellation and returns to the dashboard with no
-# message, whether or not the id matched a row.
+# POST /cancel/{job_id}: requests cancellation of the job if it is still in progress, and returns
+# to the dashboard with no message, whether or not the id matched a row.
 @app.post('/cancel/{job_id}')
 def cancel(job_id: int):
     cancel_job(job_id)
     return redirect_with_flash('/')
 
 
-# Flags every active top-level job, and each of its children, for cancellation in one session,
-# and reports how many hierarchies were reached. Selection mirrors query_downloads(): a parent
-# whose own status lags behind an active child still shows as active on the dashboard, so
-# matching only the stored parent status would skip a hierarchy the user can see running.
+# Cancels every top-level job in progress, and each of its children still in flight, in one
+# session, and reports how many hierarchies were cancelled. Selection mirrors query_downloads():
+# a parent whose own status lags behind an active child still shows as active on the dashboard,
+# so matching only the stored parent status would skip a hierarchy the user can see running. A
+# parent stored as active whose children have all stopped is not in progress, and is left alone.
 def cancel_all_jobs() -> int:
     with Session() as db:
         child = aliased(Download)
@@ -793,8 +865,9 @@ def cancel_all_jobs() -> int:
             .exists()
         )
 
-        # Children come along eagerly because request_job_cancel() flags each one: lazy-loading
-        # them would fire a query per parent from inside the write transaction below.
+        # Children come along eagerly because request_job_cancel() reads each one, flagging those
+        # in flight: lazy-loading them would fire a query per parent from inside the write
+        # transaction below.
         jobs = (
             db.query(Download)
             .options(selectinload(Download.children))
@@ -808,37 +881,19 @@ def cancel_all_jobs() -> int:
         # request_job_cancel, not apply_status_update_to_hierarchy: the latter updates a parent
         # only when a child's status actually changed, so a playlist whose children are all
         # mid-download would have its children flagged and its own flag left unset.
-        for job in jobs:
-            request_job_cancel(job)
-
-        count = len(jobs)
+        count = sum(1 for job in jobs if request_job_cancel(job))
         db.commit()
     return count
 
 
-# Resets every failed/cancelled item, child rows included, back to queued. Deliberately not
-# requeue_job(): reset_job_for_retry() searches the library for each row's file, and this acts
-# on the whole table rather than on one selected job.
+# Requeues every failed/cancelled item, child rows included, and reports how many hierarchies it
+# reached. Routed as one Retry is, through requeue_job(), so a row whose recorded file is on disk
+# goes to 'redownload' -- but with search_library=False: this acts on the whole table, and a
+# tree walk of staging and the library per row is too much for one request.
 def retry_all_jobs() -> int:
-    # Resets one failed/cancelled row to queued in place, reporting whether it changed; a row in
-    # any other status is left alone.
-    def apply_retry(target: Download) -> bool:
-        if target.status not in FAILED_OR_CANCELLED:
-            return False
-        # Fields are cleared here rather than by reset_job_for_retry(), which searches the library
-        # for each row's file -- one stat-heavy walk per row is too much for a whole-table pass.
-        target.status = 'queued'
-        target.cancel_requested = False
-        target.error = None
-        target.organized_at = None
-        target.progress = None
-        target.speed = None
-        target.completed_at = None
-        return True
-
     with Session() as db:
         # Every top-level row, not just the failed ones: a parent can read completed while a child
-        # underneath it failed, and apply_retry() below is what filters row by row.
+        # underneath it failed, and reset_job_for_retry() is what filters row by row.
         parents = (
             db.query(Download)
             .options(selectinload(Download.children))
@@ -848,9 +903,7 @@ def retry_all_jobs() -> int:
 
         count = 0
         for job in parents:
-            if apply_status_update_to_hierarchy(job, apply_retry):
-                # Parent shows queued too when any child was reset.
-                job.status = 'queued'
+            if requeue_job(job, search_library=False):
                 count += 1
         db.commit()
     return count
@@ -1093,43 +1146,70 @@ def job_details(request: Request, job_id: int):
     )
 
 
-# Clears a job's transient state and puts it back into one the worker acts on.
-def reset_for_redownload(target: Download) -> None:
-    target.error = None
-    target.organized_at = None
-    target.progress = None
-    target.speed = None
-    target.cancel_requested = False
+# Clears a job's transient state and puts it back into one the worker acts on (`status` when
+# given), through one conditional UPDATE that applies only while the row still holds the status
+# this request read, so a row the worker took up meanwhile is left alone. Returns whether the row
+# was reset; its updated_at moves with it, so polling and list views reflect the change.
+def reset_for_redownload(db, target: Download, status: Optional[str] = None) -> bool:
     # An existing file means 'redownload', which runs the worker's rename/refresh
     # path; otherwise this is just a fresh download.
-    target.status = 'redownload' if target.filename else 'queued'
+    new_status = status or ('redownload' if target.filename else 'queued')
+    reset = (
+        db.query(Download)
+        .filter(Download.id == target.id, Download.status == target.status)
+        .update(
+            {
+                'error': None,
+                'organized_at': None,
+                'progress': None,
+                'speed': None,
+                'cancel_requested': False,
+                'status': new_status,
+            },
+            synchronize_session=False,
+        )
+    )
+    return bool(reset)
 
 
-# Queue a redownload for one job, cascading to its children when it is a playlist/channel parent.
-def request_job_redownload(job: Download) -> None:
-    if job.children:
-        # Reset every child, or the worker only redoes the parent's bookkeeping and
-        # no video is actually fetched again.
-        for child in job.children:
-            reset_for_redownload(child)
-        # The parent is reset by hand rather than through reset_for_redownload(): it owns no file,
-        # so that helper would read its empty filename and send it to 'queued' instead.
-        job.error = None
-        job.organized_at = None
-        job.progress = None
-        job.speed = None
-        job.cancel_requested = False
-        job.status = 'redownload'
-    else:
-        reset_for_redownload(job)
+# Queue a redownload for one job in the caller's transaction, cascading to its children when it is
+# a playlist/channel parent. Refused, changing nothing and returning False, while the job is in
+# progress (jobstate.is_in_progress) or once the worker has changed it since this request read it.
+def request_job_redownload(db, job: Download) -> bool:
+    if is_in_progress(job):
+        return False
+
+    # The parent goes first and decides for the whole hierarchy. It owns no file, so it is sent to
+    # 'redownload' outright; its empty filename would send it to 'queued' instead.
+    if not reset_for_redownload(db, job, 'redownload' if job.children else None):
+        return False
+
+    # Reset every child, or the worker only redoes the parent's bookkeeping and
+    # no video is actually fetched again.
+    for child in job.children:
+        reset_for_redownload(db, child)
 
     job.log = (job.log or '') + 'Redownload requested by user\n'
-    # Touch updated_at so polling and list views immediately reflect the change.
-    job.updated_at = utcnow()
+    return True
+
+
+# The flash for a redownload refused while the job is in progress.
+REDOWNLOAD_REFUSED_MESSAGE = 'Still in progress; Fetch Metadata is available once it has stopped.'
+
+
+# Flash wording for a redownload of several jobs; the "left alone" clause appears only when some
+# were refused as still in progress.
+def describe_redownload(requested: int, in_progress: int) -> str:
+    if in_progress:
+        return (
+            f'Metadata fetch requested for {requested} item(s); '
+            f'{in_progress} still in progress were left alone.'
+        )
+    return f'Metadata fetch requested for {requested} item(s).'
 
 
 # POST /job/{job_id}/redownload: queues a fresh fetch for the job and its children, then back to
-# the job page.
+# the job page; refused with a flash while the job is in progress.
 @app.post('/job/{job_id}/redownload')
 def request_redownload(job_id: int):
     with Session() as db:
@@ -1137,9 +1217,11 @@ def request_redownload(job_id: int):
         if not job:
             return redirect_with_flash('/', 'Job not found.')
 
-        request_job_redownload(job)
+        requested = request_job_redownload(db, job)
         db.commit()
 
+    if not requested:
+        return redirect_with_flash(f'/job/{job_id}', REDOWNLOAD_REFUSED_MESSAGE)
     return redirect_with_flash(f'/job/{job_id}', 'Metadata fetch requested.')
 
 
@@ -1170,7 +1252,7 @@ def safe_return_path(path: str) -> str:
 
 
 # POST /history/redownload-all: queues a fresh fetch for every entry the history view lists, in
-# one session and one commit.
+# one session and one commit, leaving alone any that went back into progress meanwhile.
 @app.post('/history/redownload-all')
 def redownload_all():
     # Reuse the history query so the button acts on every entry that view lists, which is
@@ -1181,15 +1263,21 @@ def redownload_all():
         jobs = load_jobs(db, job_ids)
 
         # Same path the per-job button uses.
+        requested = 0
         for job in jobs:
-            request_job_redownload(job)
+            if request_job_redownload(db, job):
+                requested += 1
 
         db.commit()
         count = len(jobs)
 
     if not count:
         return redirect_with_flash('/history', 'No history entries to refresh.')
-    return redirect_with_flash('/history', f'Metadata fetch requested for {count} history entr{"y" if count == 1 else "ies"}.')
+    entries = 'entry' if requested == 1 else 'entries'
+    message = f'Metadata fetch requested for {requested} history {entries}.'
+    if requested < count:
+        message += f' {count - requested} still in progress were left alone.'
+    return redirect_with_flash('/history', message)
 
 
 # GET /job/{job_id}/log: the whole log for one job on its own page. A missing job still renders
@@ -1212,16 +1300,17 @@ def view_job_log(request: Request, job_id: int):
 
 
 # Marks failed/cancelled jobs completed when their file is already on disk, e.g. after a crash
-# lost the row update the download had earned. Walks the library per job, so it is a manual
-# button rather than something the page does on its own.
+# lost the row update the download had earned, then settles each parent it reached through the
+# shared rule (jobstate.settle_parent). Walks the library per job, so it is a manual button
+# rather than something the page does on its own.
 @app.post('/admin/sweep_existing')
 def sweep_existing():
     updated = 0
 
     # The worker's adopt_existing_download() is the same lookup the retry flow uses, so it
     # refuses parent rows, which own no file of their own. The sweep checks every failed/cancelled
-    # row, and only calls adopt_existing_download() on the children of a parent, so the same rows
-    # are checked as in the retry flow.
+    # row, and of a parent only its failed/cancelled children, so the same rows are checked as in
+    # the retry flow and a child in flight is left to the worker.
     with Session() as db:
         items = (
             db.query(Download)
@@ -1232,24 +1321,27 @@ def sweep_existing():
 
         logging.info('Admin sweep: checking %d failed/cancelled items', len(items))
 
+        parents: dict[int, Download] = {}
         for item in items:
-            targets = item.children if (item.parent_id is None and item.children) else [item]
+            is_parent = item.parent_id is None and bool(item.children)
+            targets = item.children if is_parent else [item]
 
             # The same lookup the worker and the retry flow use; it refuses parent rows, which
-            # own no file of their own.
-            for target in targets:
+            # own no file of their own. A child reached both as an item and through its parent
+            # is completed by the first pass, so the second skips it.
+            for target in (t for t in targets if t.status in FAILED_OR_CANCELLED):
                 if adopt_existing_download(target):
                     updated += 1
                     logging.info('Marked job %s completed -> %s', target.id, target.filename)
 
-            # A parent whose children have all settled with at least one success is completed.
-            if item.parent_id is None and item.children:
-                all_terminal = all(c.status in TERMINAL_STATUS_SET for c in item.children)
-                any_completed = any(c.status == 'completed' for c in item.children)
+            parent = item if is_parent else item.parent
+            if parent is not None:
+                parents[parent.id] = parent
 
-                if all_terminal and any_completed:
-                    item.status = 'completed'
-                    item.completed_at = utcnow()
+        # Each parent the sweep reached settles by the shared rule once its children are done,
+        # so a failed child still outranks completed ones.
+        for parent in parents.values():
+            settle_idle_parent(parent)
 
         db.commit()
 
@@ -1276,29 +1368,30 @@ def bulk_retry(job_ids: list[int] = Form(default=[]), return_to: str = Form('/')
     return redirect_with_flash(safe_return_path(return_to), message)
 
 
-# POST /bulk/cancel: requests cancellation of every selected job.
+# POST /bulk/cancel: requests cancellation of every selected job still in progress; the rest of
+# a selection has stopped already and is left alone.
 @app.post('/bulk/cancel')
 def bulk_cancel(job_ids: list[int] = Form(default=[]), return_to: str = Form('/')):
     with Session() as db:
         jobs = load_jobs(db, job_ids)
-        for job in jobs:
-            request_job_cancel(job)
+        cancelled = sum(1 for job in jobs if request_job_cancel(job))
         db.commit()
-        count = len(jobs)
-    message = f'Cancel requested for {count} item(s).' if count else 'No items selected.'
+    message = f'Cancel requested for {cancelled} item(s).' if jobs else 'No items selected.'
     return redirect_with_flash(safe_return_path(return_to), message)
 
 
-# POST /bulk/redownload: queues a fresh fetch for every selected job.
+# POST /bulk/redownload: queues a fresh fetch for every selected job not still in progress.
 @app.post('/bulk/redownload')
 def bulk_redownload(job_ids: list[int] = Form(default=[]), return_to: str = Form('/')):
     with Session() as db:
         jobs = load_jobs(db, job_ids)
+        requested = 0
         for job in jobs:
-            request_job_redownload(job)
+            if request_job_redownload(db, job):
+                requested += 1
         db.commit()
         count = len(jobs)
-    message = f'Metadata fetch requested for {count} item(s).' if count else 'No items selected.'
+    message = describe_redownload(requested, count - requested) if count else 'No items selected.'
     return redirect_with_flash(safe_return_path(return_to), message)
 
 
@@ -1316,6 +1409,11 @@ def bulk_delete(job_ids: list[int] = Form(default=[]), return_to: str = Form('/h
             job_deleted, job_skipped = delete_job_files(job)
             deleted += job_deleted
             skipped_active += job_skipped
+        # A deleted child may leave its parent settled; settled only once every file is gone, as
+        # loading a parent may autoflush and take the write lock.
+        for job in jobs:
+            if job.parent_id is not None:
+                settle_idle_parent(job.parent)
         db.commit()
 
     message = describe_deletion(deleted, skipped_active) if jobs else 'No items selected.'
