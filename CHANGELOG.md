@@ -9,19 +9,25 @@ describes.
 
 ### Changed
 
+- A subscription to a channel's own URL is scanned through the channel's uploads playlist, one
+  newest-first listing of every upload: videos, live streams and Shorts alike. The channel's URL
+  lists each kind in turn, so a back catalogue is now queued and numbered in upload order instead
+  of kind by kind. A subscription to one tab, such as a channel's Videos tab, still reads that tab.
+  When the uploads playlist cannot be read, the check reads the channel's URL instead, and logs WARN
+  the first time if that URL lists uploads.
 - Download existing now takes effect at the next subscription check, which runs every 30 minutes
   between downloads, instead of at once. That check scans the channel or playlist in full and
   queues every skipped video it still lists, and any it has not recorded yet, in the order it lists
-  them: a playlist in playlist order, a channel kind by kind (Shorts, then live streams, then
-  videos), each oldest first, videos recorded before 1.0.1 included. A video recorded twice is
+  them: a channel's oldest first (kind by kind when its uploads playlist cannot be read), a
+  playlist in playlist order, videos recorded before 1.0.1 included. A video recorded twice is
   queued once. The button also sets the subscription to "All existing", and a disabled
   subscription has to be enabled first. (phase 7)
 - Once a channel subscription has its baseline, each check reads only the channel's 50 newest
-  uploads of each kind (videos, live streams, Shorts). When 50 or more of them are new, the check
-  reads the whole channel, so a burst of uploads is not missed; if that scan fails, the check keeps
-  the newest uploads and logs WARN. A first scan and every playlist scan still read the whole
-  listing. A video of the channel downloaded on its own moves into the channel's folder at a check
-  only while it is among those newest uploads. (phase 7)
+  uploads. When 50 or more of them are new, the check reads the whole channel, so a burst of
+  uploads is not missed; if that scan fails, the check keeps the newest uploads and logs WARN. A
+  first scan and every playlist scan still read the whole listing. A video of the channel
+  downloaded on its own moves into the channel's folder at a check only while it is among those
+  newest uploads. (phase 7)
 
 ### Fixed
 

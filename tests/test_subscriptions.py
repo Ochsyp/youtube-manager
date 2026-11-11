@@ -23,8 +23,13 @@ from youtube_manager import worker
 from youtube_manager.database import Channel, Download, Playlist, Subscription
 from youtube_manager.jobstate import SKIPPED_STATUS
 
+# Shorter than a real channel id, so their channels have no uploads playlist and a check reads
+# the subscription's own URL.
 CHANNEL_YOUTUBE_ID = 'UCsubscriptionstest'
 OTHER_CHANNEL_YOUTUBE_ID = 'UCsubscriptionsother'
+# A channel id of a real one's shape, and the uploads playlist a check reads for its channel.
+UPLOADS_CHANNEL_ID = 'UCuploadsuploadsuploads1'
+UPLOADS_URL = 'https://www.youtube.com/playlist?list=UUuploadsuploadsuploads1'
 CHANNEL_URL = 'https://www.youtube.com/@example'
 OTHER_CHANNEL_URL = 'https://www.youtube.com/@other'
 PLAYLIST_YOUTUBE_ID = 'PLsubscriptionstest'
@@ -55,10 +60,12 @@ CHANNEL_METADATA = {
 }
 
 
-# Every test starts with no failed subscription checks on record, so no count leaks between tests.
+# Every test starts with no failed subscription checks or uploads-playlist fallbacks on record, so
+# none leaks between tests.
 @pytest.fixture(autouse=True)
 def fresh_failure_counter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worker, '_subscription_failures', {})
+    monkeypatch.setattr(worker, '_uploads_playlist_fallbacks', set())
 
 
 # Messages logged at exactly `level`, in the order they were logged.
@@ -537,11 +544,16 @@ def test_periodic_channel_scan_limited_after_baseline(monkeypatch, db):
     assert row_states(db) == [(V1, SKIPPED_STATUS), (V2, 'queued'), (V3, 'queued')]
 
 
-# When 50 or more of the uploads a periodic scan reads are new, more may have arrived than a tab's
-# window holds: the check reads the whole channel and queues each upload it has not recorded,
-# oldest first.
-def test_periodic_scan_reads_whole_channel_when_all_new(monkeypatch, db, make_job):
-    channel_id = make_channel(db)
+# When 50 or more of the uploads a periodic scan reads are new, more may have arrived than its
+# window holds: the check reads the whole listing again, through the uploads playlist or the
+# channel URL alike, and queues each upload it has not recorded, oldest first.
+@pytest.mark.parametrize('channel_youtube_id, url', [
+    (CHANNEL_YOUTUBE_ID, CHANNEL_URL), (UPLOADS_CHANNEL_ID, UPLOADS_URL),
+])
+def test_periodic_scan_reads_whole_channel_when_all_new(
+    monkeypatch, db, make_job, channel_youtube_id, url,
+):
+    channel_id = make_channel(db, channel_youtube_id)
     make_subscription(db, channel_id=channel_id, last_checked=CHECKED_AT)
     known = channel_row(make_job, channel_id, V1, status='completed')
     uploads = [f'b{number:010d}' for number in range(55, 0, -1)]
@@ -552,8 +564,8 @@ def test_periodic_scan_reads_whole_channel_when_all_new(monkeypatch, db, make_jo
     worker.check_subscriptions()
 
     [limited, full] = scan_commands(commands)
-    assert limited[-3:] == ['--playlist-items', '1:50', CHANNEL_URL]
-    assert '--playlist-items' not in full
+    assert limited[-3:] == ['--playlist-items', '1:50', url]
+    assert '--playlist-items' not in full and full[-1] == url
     queued = [row.youtube_id for row in all_rows(db) if row.status == 'queued']
     assert queued == uploads[::-1]
     assert stored(db, known.id).status == 'completed'
@@ -886,3 +898,119 @@ def test_only_first_backfill_scan_requeues_skipped(monkeypatch, db, make_job):
     assert stored(db, duplicate.id).status == SKIPPED_STATUS
     assert stored(db, unlisted.id).status == SKIPPED_STATUS
     assert stored(db, adopted.id).status == SKIPPED_STATUS
+
+
+# A resolved subscription to a channel's root URL is scanned through the channel's uploads
+# playlist, one listing of every kind: in full at its first scan, then its 50 newest uploads.
+# Resolving it reads its own URL. A subscription to one tab keeps reading that tab, and an id that
+# is no channel's has no uploads playlist.
+def test_channel_subscription_scans_uploads_playlist(monkeypatch, db):
+    assert worker.uploads_playlist_url(UPLOADS_CHANNEL_ID) == UPLOADS_URL
+    for no_channel in (None, '', CHANNEL_YOUTUBE_ID, 'PL' + UPLOADS_CHANNEL_ID[2:]):
+        assert worker.uploads_playlist_url(no_channel) is None
+    for root in (CHANNEL_URL, f'{CHANNEL_URL}/', 'https://m.youtube.com/@example',
+                 f'https://www.youtube.com/channel/{UPLOADS_CHANNEL_ID}',
+                 'https://www.youtube.com/c/example', 'https://www.youtube.com/user/example'):
+        assert worker.is_channel_root_url(root), root
+    for not_root in (f'{CHANNEL_URL}/videos', f'{CHANNEL_URL}/shorts', f'{CHANNEL_URL}/about',
+                     f'https://www.youtube.com/channel/{UPLOADS_CHANNEL_ID}/streams',
+                     PLAYLIST_URL, 'https://example.com/@example'):
+        assert not worker.is_channel_root_url(not_root), not_root
+    make_subscription(db, backfill_existing=False)
+    tab_url = f'{CHANNEL_URL}/videos'
+    # Its channel id has a real one's shape too, so only the tab keeps it off an uploads playlist.
+    make_subscription(db, url=tab_url, channel_id=make_channel(db, 'UC' + 'tab' * 7 + '1'),
+                      last_checked=CHECKED_AT)
+    metadata = {**CHANNEL_METADATA, 'id': UPLOADS_CHANNEL_ID, 'channel_id': UPLOADS_CHANNEL_ID}
+    commands = fake_run_command(monkeypatch, metadata=metadata, outputs={
+        UPLOADS_URL: [f'{V1}\n', f'{V2}\n{V1}\n'], tab_url: [f'{V3}\n', f'{V3}\n'],
+    })
+
+    worker.check_subscriptions()
+    worker.check_subscriptions()
+
+    assert commands[0][-1] == CHANNEL_URL and '--dump-single-json' in commands[0]
+    scans = scan_commands(commands)
+    [first, periodic] = [command for command in scans if command[-1] != tab_url]
+    assert first[-1] == UPLOADS_URL and '--playlist-items' not in first
+    assert periodic[-3:] == ['--playlist-items', '1:50', UPLOADS_URL]
+    assert [command[-1] for command in scans if command[-1] == tab_url] == [tab_url, tab_url]
+    assert row_states(db) == [(V1, SKIPPED_STATUS), (V2, 'queued'), (V3, 'queued')]
+
+
+# When the uploads playlist cannot be scanned, the check reads the subscription's own URL with the
+# same limit. A fallback whose listing has uploads logs WARN the first time and INFO later, until
+# the uploads playlist works again; an empty one, a channel with no upload, logs INFO only. When
+# both scans fail, the check is one failure, unstamped, logged once with both reasons.
+def test_uploads_playlist_failure_falls_back_to_channel_url(caplog, monkeypatch, db):
+    caplog.set_level(logging.INFO)
+    subscription_id = make_subscription(
+        db, channel_id=make_channel(db, UPLOADS_CHANNEL_ID), last_checked=CHECKED_AT,
+    )
+    no_uploads = ([], 'ERROR: [youtube:tab] The playlist does not exist.')
+    channel_down = ([], 'ERROR: [youtube:tab] HTTP Error 503: Service Unavailable')
+    calls = script_scans(
+        monkeypatch, no_uploads, ([], None), no_uploads, ([V1], None), no_uploads, ([V1], None),
+        ([V1], None), no_uploads, ([V1], None), no_uploads, channel_down,
+    )
+    fallback = f'Subscription {subscription_id}: scanning its uploads playlist failed'
+
+    # Count the fallback lines logged at `level`.
+    def fallbacks_at(level: int) -> int:
+        return len([m for m in messages_at(caplog, level) if m.startswith(fallback)])
+
+    worker.check_subscriptions()
+
+    assert (fallbacks_at(logging.WARNING), fallbacks_at(logging.INFO)) == (0, 1)
+
+    worker.check_subscriptions()
+    worker.check_subscriptions()
+
+    assert calls == [(UPLOADS_URL, '1:50'), (CHANNEL_URL, '1:50')] * 3
+    assert row_states(db) == [(V1, 'queued')]
+    assert (fallbacks_at(logging.WARNING), fallbacks_at(logging.INFO)) == (1, 2)
+
+    worker.check_subscriptions()
+    worker.check_subscriptions()
+
+    assert fallbacks_at(logging.WARNING) == 2
+    stamped = stored_subscription(db, subscription_id).last_checked
+    caplog.clear()
+
+    worker.check_subscriptions()
+
+    assert calls[-2:] == [(UPLOADS_URL, '1:50'), (CHANNEL_URL, '1:50')]
+    assert stored_subscription(db, subscription_id).last_checked == stamped
+    assert worker._subscription_failures == {subscription_id: 1}
+    [warning] = messages_at(caplog, logging.WARNING)
+    assert 'HTTP Error 503' in warning and 'uploads playlist: ERROR' in warning
+
+
+# Through the uploads playlist a channel's back catalogue is one newest-first listing of every
+# kind, so "Download existing now" queues it oldest first across videos, live streams and Shorts,
+# where the channel's own URL lists the kinds one after another.
+def test_backfill_through_uploads_playlist_is_oldest_first(client, monkeypatch, db, make_job):
+    channel_id = make_channel(db, UPLOADS_CHANNEL_ID)
+    subscription_id = make_subscription(db, channel_id=channel_id, backfill_existing=False,
+                                        last_checked=CHECKED_AT)
+    # Videos V4 and V2, then Shorts V3 and V1, each kind newest first, as the channel URL lists
+    # them and a scan of it recorded them.
+    by_kind = [V4, V2, V3, V1]
+    for offset, youtube_id in enumerate(by_kind):
+        channel_row(make_job, channel_id, youtube_id, status=SKIPPED_STATUS,
+                    created_at=CHECKED_AT + timedelta(seconds=offset))
+    listings = {UPLOADS_URL: [V4, V3, V2, V1], CHANNEL_URL: by_kind}
+    calls = []
+
+    # Answer each scan with the listing of the URL it reads.
+    def scan(url, playlist_items=None):
+        calls.append((url, playlist_items))
+        return list(listings[url]), None
+
+    monkeypatch.setattr(worker, 'scan_video_ids', scan)
+
+    client.post(f'/subscriptions/{subscription_id}/backfill-now')
+    worker.check_subscriptions()
+
+    assert taken_order(db) == [V1, V2, V3, V4]
+    assert calls == [(UPLOADS_URL, None)]

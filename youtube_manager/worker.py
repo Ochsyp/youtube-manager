@@ -1663,10 +1663,10 @@ def create_download_jobs_for_subscription(
         if row.youtube_id:
             existing_by_id.setdefault(row.youtube_id, []).append(row)
 
-    # A channel scan lists each kind newest first, videos, then live streams, then Shorts, so its
-    # rows are created oldest first within each kind, Shorts first, and the worker downloads them in
-    # that order. A playlist keeps scan order, the playlist's own, and numbers each video by its
-    # scan position.
+    # A channel scan lists newest first, so its rows are created oldest first, and the worker
+    # downloads them in that order: in upload order through the uploads playlist, or within each
+    # kind, Shorts first, when a channel's root URL was read instead (see scan_subscription). A
+    # playlist keeps scan order, the playlist's own, and numbers each video by its scan position.
     scan = list(enumerate(video_ids, start=1))
     if group_by_channel:
         scan.reverse()
@@ -1868,9 +1868,22 @@ def clear_subscription_failures(subscription_id: int) -> None:
 
 
 # How many of a channel's newest uploads a check reads once the subscription has its baseline,
-# through yt-dlp's --playlist-items, which applies it to each tab: up to this many videos, as many
-# Shorts and as many live streams. A first scan and every playlist scan read the whole listing.
+# through yt-dlp's --playlist-items: the newest this many of the uploads playlist, or, read through
+# the channel URL, up to this many of each kind. A first scan and every playlist scan read the
+# whole listing.
 PERIODIC_CHANNEL_SCAN_LIMIT = 50
+
+# A YouTube channel id; its uploads playlist id is the same with UU in place of UC.
+CHANNEL_ID_PATTERN = re.compile(r'^UC[A-Za-z0-9_-]{22}$')
+
+# The path of a channel URL that names no tab: /@handle, /channel/<id>, /c/<name> or /user/<name>,
+# with or without a trailing slash.
+CHANNEL_ROOT_PATH = re.compile(r'/(?:@[^/]+|(?:channel|c|user)/[^/]+)/?')
+
+# Subscriptions whose uploads playlist failed in this worker run, while their own URL listed
+# uploads, and has not worked since: only the first such fallback of each logs WARN, later ones
+# INFO.
+_uploads_playlist_fallbacks: set[int] = set()
 
 
 # How many of `video_ids` have no row yet, under any request or subscription.
@@ -1880,6 +1893,70 @@ def count_unrecorded(db, video_ids: list[str]) -> int:
     listed = db.query(Download.youtube_id).filter(Download.youtube_id.in_(video_ids))
     recorded = {youtube_id for (youtube_id,) in listed}
     return sum(1 for video_id in video_ids if video_id not in recorded)
+
+
+# The uploads playlist of the channel `channel_youtube_id`: every public upload of every kind
+# (videos, live streams, Shorts) in one listing, newest first. None for an id that is no channel's.
+def uploads_playlist_url(channel_youtube_id: Optional[str]) -> Optional[str]:
+    if not channel_youtube_id or not CHANNEL_ID_PATTERN.match(channel_youtube_id):
+        return None
+    return f'https://www.youtube.com/playlist?list=UU{channel_youtube_id[2:]}'
+
+
+# True when `url` is a youtube.com channel URL that names no tab. yt-dlp lists such a URL as all of
+# the channel's uploads, its Videos, Live and Shorts tabs one after another; a URL naming one tab
+# lists that tab alone.
+def is_channel_root_url(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or '').lower()
+    on_youtube = host == 'youtube.com' or host.endswith('.youtube.com')
+    return on_youtube and CHANNEL_ROOT_PATH.fullmatch(parts.path) is not None
+
+
+# Scan what `subscription` watches. A resolved subscription to a channel's root URL is read through
+# the channel's uploads playlist, the same uploads in one listing in upload order, and through its
+# own URL, kind by kind, when that scan fails. Anything else, a subscription to one tab included, is
+# read through its own URL. Returns (ids, error) as scan_video_ids does, and the URL read; when both
+# scans fail, the error names both reasons, so the check counts one failure.
+def scan_subscription(
+    db, subscription: Subscription, playlist_items: Optional[str] = None,
+) -> tuple[list[str], Optional[str], str]:
+    uploads_url = None
+    if (
+        subscription.subscription_type == 'channel'
+        and subscription.channel_id is not None
+        and is_channel_root_url(subscription.url)
+    ):
+        channel = db.get(Channel, subscription.channel_id)
+        uploads_url = uploads_playlist_url(channel.youtube_id if channel else None)
+    if uploads_url is None:
+        video_ids, error = scan_video_ids(subscription.url, playlist_items)
+        return video_ids, error, subscription.url
+
+    video_ids, error = scan_video_ids(uploads_url, playlist_items)
+    if not error:
+        _uploads_playlist_fallbacks.discard(subscription.id)
+        return video_ids, None, uploads_url
+
+    uploads_error = ' '.join(error.split())[:500]
+    video_ids, error = scan_video_ids(subscription.url, playlist_items)
+    if error:
+        return [], f'{error} (uploads playlist: {uploads_error})', subscription.url
+    message = (
+        f'Subscription {subscription.id}: scanning its uploads playlist failed, so its URL was '
+        f'scanned instead: {uploads_error}'
+    )
+    # An empty listing explains the failure, a channel with no upload having no uploads playlist,
+    # and needs no WARN; a channel with uploads warns once until its uploads playlist works again.
+    if video_ids and subscription.id not in _uploads_playlist_fallbacks:
+        _uploads_playlist_fallbacks.add(subscription.id)
+        warn(message)
+    else:
+        log(message)
+    return video_ids, None, subscription.url
 
 
 # Scan every enabled subscription for new videos. Only a scan that succeeded stamps last_checked,
@@ -1933,11 +2010,12 @@ def check_subscriptions() -> None:
                 # baseline or a backfill) and a playlist read the whole listing.
                 limited = subscription.subscription_type == 'channel' and not is_first_scan
                 playlist_items = f'1:{PERIODIC_CHANNEL_SCAN_LIMIT}' if limited else None
-                video_ids, error = scan_video_ids(subscription.url, playlist_items)
-                # A tab whose window is all new may hold only the newest of more uploads than fit
-                # it. The output does not say which tab a line came from, so as many new ids as one
-                # window holds, of any kinds, trigger it. The baseline holds everything older, so
-                # the whole listing is read instead and whatever it has unrecorded is new too.
+                video_ids, error, scan_url = scan_subscription(db, subscription, playlist_items)
+                # A window whose every upload is new may hold only the newest of more uploads than
+                # fit it, so as many new ids as one window holds trigger a read of the whole
+                # listing. Read through the channel URL, each kind has its own window, and the
+                # output does not say which kind a line is. The baseline holds everything older,
+                # so whatever the whole listing has unrecorded is new too.
                 if (
                     limited and not error
                     and count_unrecorded(db, video_ids) >= PERIODIC_CHANNEL_SCAN_LIMIT
@@ -1946,7 +2024,7 @@ def check_subscriptions() -> None:
                         f'Subscription {subscription.id}: {PERIODIC_CHANNEL_SCAN_LIMIT} or more '
                         'of the newest uploads are new, scanning the whole channel'
                     )
-                    full_ids, full_error = scan_video_ids(subscription.url)
+                    full_ids, full_error = scan_video_ids(scan_url)
                     # The newest uploads are still recorded, the rest risked with a WARN: failing
                     # the check would fail every later one too for a channel too big to list in
                     # time, its window never recorded.
@@ -1974,8 +2052,8 @@ def check_subscriptions() -> None:
                     # A first scan with backfill_existing set (a new "All existing" subscription,
                     # or "Download existing now") also queues what a baseline skipped, in scan
                     # order. The trade-off: a channel's back catalogue then takes its next free
-                    # numbers after the episodes already filed, in the order it is downloaded:
-                    # kind by kind (see create_download_jobs_for_subscription), each oldest first.
+                    # numbers after the episodes already filed, in the order it is downloaded,
+                    # oldest first (see create_download_jobs_for_subscription).
                     create_download_jobs_for_subscription(
                         db, subscription, video_ids, queue=queue_now,
                         requeue_skipped=is_first_scan and backfill_existing,
