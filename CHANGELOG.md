@@ -7,6 +7,26 @@ describes.
 
 ## [Unreleased]
 
+### Added
+
+- The web UI's starting line and the worker's `Components:` line name the version of the SQLite
+  library the process runs on. (phase 9)
+
+### Changed
+
+- Every database connection waits up to 15 seconds for another's write lock instead of 5, and
+  cuts the WAL file back to 8 MiB at the first write after a checkpoint has emptied it. Under WAL
+  it also uses `synchronous=NORMAL`, which saves an fsync per commit: a power cut or an OS crash
+  can roll back the last few commits but cannot corrupt the database, and a crash of the app or
+  its container loses none. A connection that cannot use WAL keeps SQLite's default and logs a
+  warning. (phase 9)
+- The sqlite3 driver's legacy transaction control is set explicitly, so a newer Python cannot
+  change when a transaction begins, and the connection pool no longer pings or recycles
+  connections, which a SQLite file never needs. (phase 9)
+- `YOUTUBE_DB_URI` must be a SQLite URL for Python's sqlite3 driver: the web UI and the worker
+  stop at start on a URL for any other database or driver, or one that does not parse, with an
+  error that never repeats more of the URL than its scheme. (phase 9)
+
 ## [1.0.3] - 2026-11-12
 
 Phase 8, the job state machine, and a dependency update. The web app and the worker now settle a

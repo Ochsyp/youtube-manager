@@ -9,6 +9,7 @@
 
 import logging
 import os
+import sqlite3
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -67,10 +68,11 @@ TEMPLATES_DIR = BASE_DIR / 'templates'
 
 # Only this process creates the schema; the worker blocks until it appears
 # (database.wait_for_schema), so it has to land before the first request.
-# The release is logged first, so every start names the build that served it.
+# The release and the SQLite library are logged first, so every start names
+# the build that served it and the SQLite it ran on.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    logging.info('YouTube Manager %s web UI starting', VERSION)
+    logging.info('YouTube Manager %s web UI starting, SQLite %s', VERSION, sqlite3.sqlite_version)
     initialize_database()
     yield
 

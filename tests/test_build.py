@@ -12,6 +12,7 @@ import importlib.metadata
 import json
 import re
 import shutil
+import sqlite3
 from pathlib import Path
 
 # packaging comes with pytest.
@@ -271,8 +272,9 @@ def test_download_command_fetches_no_remote_components(monkeypatch):
         assert [arg for arg in command if arg.startswith('--remote-components')] == []
 
 
-# component_versions() gives each package's installed version, then deno's path, and the startup
-# line lists them after the release, in the form the image smoke test looks for.
+# component_versions() gives each package's installed version, then deno's path, then the SQLite
+# library's version, and the startup line lists them after the release, in the form the image
+# smoke test looks for.
 def test_component_versions_reports_each_component(monkeypatch):
     installed = {
         'yt-dlp': '2000.01.01',
@@ -281,12 +283,13 @@ def test_component_versions_reports_each_component(monkeypatch):
     }
     monkeypatch.setattr(importlib.metadata, 'version', lambda package: installed[package])
     monkeypatch.setattr(shutil, 'which', lambda name: DENO_PATH if name == 'deno' else None)
+    monkeypatch.setattr(sqlite3, 'sqlite_version', '3.99.0')
     monkeypatch.setattr(worker, 'VERSION', '1.2.3')
 
-    assert worker.component_versions() == {**installed, 'deno': DENO_PATH}
+    assert worker.component_versions() == {**installed, 'deno': DENO_PATH, 'sqlite': '3.99.0'}
     assert worker.components_line() == (
         'Components: youtube-manager 1.2.3, yt-dlp 2000.01.01, yt-dlp-ejs 0.1.0, '
-        f'bgutil-ytdlp-pot-provider 1.0.0, deno {DENO_PATH}'
+        f'bgutil-ytdlp-pot-provider 1.0.0, deno {DENO_PATH}, sqlite 3.99.0'
     )
 
 
@@ -309,4 +312,5 @@ def test_component_versions_marks_missing_components(monkeypatch):
         'yt-dlp-ejs': 'not installed',
         'bgutil-ytdlp-pot-provider': 'unknown',
         'deno': 'not found',
+        'sqlite': sqlite3.sqlite_version,
     }
