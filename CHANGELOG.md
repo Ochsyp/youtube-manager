@@ -7,6 +7,16 @@ describes.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-12
+
+Phase 8, the job state machine, and a dependency update. The web app and the worker now settle a
+playlist or channel by one rule, and a cancel or delete holds against auto-retry and the worker.
+A playlist or channel download now fetches the videos a subscription only recorded. There is no
+schema change and no new setting, so a host needs no step before it upgrades. A playlist that an
+earlier version left in progress with nothing but skipped videos stays so: Cancel it, then use
+Fetch Metadata for All Children to fetch its videos. yt-dlp and the bgutil plugin are unchanged,
+so the PO-token provider stays at 2.0.2.
+
 ### Changed
 
 - Fetch Metadata is refused while a job is in progress: queued, downloading or being cancelled, or
@@ -23,6 +33,8 @@ describes.
   flash counts only the jobs actually cancelled. (phase 8)
 - Retry is offered on a playlist or channel that has videos only when one of them failed or was
   cancelled, since that is all a retry resets. (phase 8)
+- The image ships SQLAlchemy 2.1.8 instead of 2.1.6, and typing-inspection 0.4.5 instead of
+  0.4.4. ([#14](https://github.com/Ochsyp/youtube-manager/pull/14))
 
 ### Fixed
 
@@ -262,7 +274,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0
