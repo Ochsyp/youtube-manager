@@ -15,6 +15,7 @@ import queue
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2816,9 +2817,10 @@ def _request_shutdown(signum, _frame) -> None:
 COMPONENT_PACKAGES = ('yt-dlp', 'yt-dlp-ejs', 'bgutil-ytdlp-pot-provider')
 
 
-# The installed version of each COMPONENT_PACKAGES entry, then deno's path, keyed by name in that
-# order. Never raises: a package that is not installed reads 'not installed', one whose metadata
-# cannot be read 'unknown', and a deno missing from PATH 'not found'.
+# The installed version of each COMPONENT_PACKAGES entry, then deno's path, then the version of
+# the SQLite library the sqlite3 module runs on, keyed by name in that order. Never raises: a
+# package that is not installed reads 'not installed', one whose metadata cannot be read
+# 'unknown', and a deno missing from PATH 'not found'.
 def component_versions() -> dict[str, str]:
     versions = {}
     for package in COMPONENT_PACKAGES:
@@ -2829,6 +2831,7 @@ def component_versions() -> dict[str, str]:
         except Exception:
             versions[package] = 'unknown'
     versions['deno'] = shutil.which('deno') or 'not found'
+    versions['sqlite'] = sqlite3.sqlite_version
     return versions
 
 

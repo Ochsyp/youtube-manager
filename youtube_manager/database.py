@@ -6,6 +6,7 @@
 
 import logging
 import os
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,14 +23,16 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    make_url,
     text,
 )
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 # =======================================================
 #              ENGINE AND CONNECTION SETUP
 # =======================================================
-# Where the database lives, and the per-connection PRAGMAs that let two processes share it.
+# Where the database lives, and the per-connection settings that let two processes share it.
 
 # data/ at the repo root, beside this package; /app/data in the image.
 DATABASE_DIR = Path(__file__).resolve().parent.parent / 'data'
@@ -41,6 +44,15 @@ if not _configured_uri:
     DATABASE_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = _configured_uri or f"sqlite:///{DATABASE_DIR / 'youtube.db'}"
 
+# How long a connection waits for another connection's write lock before failing with "database
+# is locked". A channel expansion that inserts hundreds of rows can hold the lock for seconds on
+# an SD card.
+BUSY_TIMEOUT_SECONDS = 15
+
+# The size the WAL file is cut back to by the first commit after a checkpoint has emptied it, so
+# one burst of writes cannot leave a large file on disk for good.
+JOURNAL_SIZE_LIMIT_BYTES = 8 * 1024 * 1024
+
 
 # Timezone-aware UTC. SQLite's DATETIME storage drops the offset, so a value read back from a
 # query is naive while one still held in the session is aware -- normalize before comparing.
@@ -48,29 +60,76 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# WAL lets the app read while the worker writes; busy_timeout makes the loser of a write race
-# wait its turn instead of failing outright with "database is locked".
-def _enable_sqlite_wal(dbapi_connection, connection_record):
+# Raise ValueError unless `url` names a SQLite database through Python's sqlite3 driver, the only
+# one the settings and schema checks in this module are written for. The message repeats no more
+# of the URL than its scheme, so a password in a mistaken URL never reaches the log.
+def require_sqlite_url(url: str) -> None:
+    try:
+        parsed = make_url(url)
+    # ValueError too: a port that is not a number fails int() with that text quoted, and in a
+    # mistyped URL the text read as the port can be the password.
+    except (ArgumentError, ValueError):
+        # from None, so the traceback leaves out the parse error and the URL text it may quote.
+        raise ValueError(
+            'YOUTUBE_DB_URI is not a database URL; use sqlite:///<path to the database file>'
+        ) from None
+    # The backend is checked first, so a driver name is only ever resolved for a SQLite URL.
+    if parsed.get_backend_name() != 'sqlite' or parsed.get_driver_name() != 'pysqlite':
+        raise ValueError(
+            "YOUTUBE_DB_URI must be a sqlite:///<path to the database file> URL for Python's "
+            f'sqlite3 driver, not {parsed.drivername}'
+        )
+
+
+# Apply the per-connection settings to a connection as it opens. WAL lets the app read while the
+# worker writes. Under WAL, synchronous=NORMAL cannot corrupt the database and saves an fsync per
+# commit: a power cut or an OS crash can roll back only the last few commits, as if both processes
+# had stopped a moment earlier, and a crash of the app or its container loses none. A connection
+# left out of WAL keeps SQLite's default, FULL, as NORMAL is only safe under WAL. A failure is
+# logged at WARN and the connection is used as it is.
+def _configure_sqlite_connection(dbapi_connection, connection_record):
     try:
         cursor = dbapi_connection.cursor()
-        cursor.execute('PRAGMA journal_mode=WAL')
-        cursor.execute('PRAGMA busy_timeout=5000')
-        cursor.close()
+        try:
+            journal_mode = cursor.execute('PRAGMA journal_mode=WAL').fetchone()[0]
+            if journal_mode == 'wal':
+                cursor.execute('PRAGMA synchronous=NORMAL')
+            else:
+                logging.warning(
+                    'SQLite kept journal_mode=%s instead of WAL, so synchronous stays FULL',
+                    journal_mode,
+                )
+            cursor.execute(f'PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT_BYTES}')
+        finally:
+            cursor.close()
     except Exception as exc:
-        logging.warning('Failed to configure SQLite WAL or busy timeout: %s', exc)
+        logging.warning('Could not configure the SQLite connection: %s', exc)
 
 
-# Build an engine for `url` with _enable_sqlite_wal attached to every connection it opens.
-# Connects lazily, so nothing touches the database file until the first query.
+# Build an engine for `url` that runs _configure_sqlite_connection on every connection it opens;
+# `url` must pass require_sqlite_url. Connects lazily, so nothing touches the database file until
+# the first query. The pool keeps its defaults: a SQLite file has no server connection that could
+# go stale, so it needs no pre-ping or recycling.
 def _create_engine(url: str) -> Engine:
-    # Sessions are handed across threads, which SQLite only allows with check_same_thread=False.
+    require_sqlite_url(url)
     created = create_engine(
         url,
-        connect_args={'check_same_thread': False},
-        pool_pre_ping=True,
-        pool_recycle=300,
+        connect_args={
+            # Sessions are handed across threads, which SQLite only allows with this off.
+            'check_same_thread': False,
+            # The driver sets the busy timeout as it connects, so the timeout already covers the
+            # WAL switch in _configure_sqlite_connection.
+            'timeout': BUSY_TIMEOUT_SECONDS,
+            # The driver's legacy transaction control, stated rather than defaulted: it begins a
+            # transaction only before an INSERT, UPDATE, DELETE or REPLACE, and runs DDL on its
+            # own. A session that only reads holds no snapshot open, which would keep
+            # checkpoints from emptying the WAL, and each of its queries sees the other process's
+            # latest commit. Python plans to change the default; a Python without this constant
+            # fails here, at import, rather than changing how the app's transactions behave.
+            'autocommit': sqlite3.LEGACY_TRANSACTION_CONTROL,
+        },
     )
-    event.listen(created, 'connect', _enable_sqlite_wal)
+    event.listen(created, 'connect', _configure_sqlite_connection)
     return created
 
 
@@ -360,8 +419,9 @@ def relax_downloads_youtube_id_uniqueness() -> None:
 
 # Stand-in for migrations: add any ORM column the live table is missing.
 def ensure_table_columns() -> None:
-    # Open a transactional connection: ALTER TABLE statements issued on a plain connection are
-    # rolled back when it closes, which would silently discard every column added here.
+    # Each ALTER TABLE commits on its own: the driver's legacy transaction control (see
+    # _create_engine) opens no transaction for DDL. A column added before a failure is kept, and
+    # the next start adds the rest.
     with engine.begin() as conn:
         for table_name, table in Base.metadata.tables.items():
             existing_columns = {

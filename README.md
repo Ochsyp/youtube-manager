@@ -50,7 +50,7 @@ in WAL mode.
 | `DOWNLOAD_PATH` | `/downloads` | Staging directory yt-dlp writes into |
 | `MEDIA_PATH` | `/media` | Library root the organizer files into |
 | `LIBRARY_SENTINEL` | unset | Worker only: a file on the library disk, such as `/media/.library-mounted`, that must exist before anything is filed. While it is missing the organizer files nothing and logs ERROR at most once an hour. Create the file before setting the variable |
-| `YOUTUBE_DB_URI` | `sqlite:////app/data/youtube.db` | SQLAlchemy database URL; by default `data/youtube.db` at the repository root, which is `/app` in the image |
+| `YOUTUBE_DB_URI` | `sqlite:////app/data/youtube.db` | SQLite database URL for Python's sqlite3 driver; by default `data/youtube.db` at the repository root, which is `/app` in the image. The web UI and the worker refuse a URL for any other database or driver at start |
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
 | `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
@@ -135,9 +135,9 @@ docker compose -f compose.example.yaml up -d
   both containers together. Read the release's CHANGELOG section first: a major release
   lists what the host has to change. Going back to the previous release works the same
   way, unless that section has a `Migration (cannot be rolled back)` part.
-- **Startup log.** The web UI logs `YouTube Manager <version> web UI starting`. The
-  worker logs a `Components:` line with the release, the versions of yt-dlp, yt-dlp-ejs
-  and the bgutil plugin, and deno's path.
+- **Startup log.** The web UI logs `YouTube Manager <version> web UI starting, SQLite
+  <version>`. The worker logs a `Components:` line with the release, the versions of
+  yt-dlp, yt-dlp-ejs and the bgutil plugin, deno's path and the SQLite version.
 - **Building from a checkout.** `docker build -t youtube-manager .` builds the image for
   the local architecture, with `dev` as its version (`--build-arg YTM_VERSION=<version>`
   sets another). It needs BuildKit, Docker's default builder since version 23. To run
