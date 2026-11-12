@@ -54,6 +54,7 @@ in WAL mode.
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
 | `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
+| `YTM_DB_SNAPSHOT_TIME` | `00:30` | Worker only: the time of day, as HH:MM in UTC whatever `TZ` says, from which the worker writes the day's database snapshot (Backups and restore). Any other value is logged at ERROR and the default is used |
 | `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name the reverse proxy serves the UI under, such as `ytdl.home.arpa`; any other `Host` gets 400 |
 | `PUID`, `PGID` | `1000` | User and group the containers run as |
 | `TZ` | | Timezone of the log timestamps |
@@ -62,7 +63,7 @@ in WAL mode.
 Downloads also pass `HTTP_PROXY` to yt-dlp as `--proxy`, which ignores `NO_PROXY`, so
 the proxy itself must let the worker reach the bgutil provider.
 
-Volumes: `/app/data` (SQLite), `/downloads` (staging) and `/media` (library).
+Volumes: `/app/data` (SQLite and its backups), `/downloads` (staging) and `/media` (library).
 
 ## Security notes
 
@@ -116,9 +117,10 @@ docker compose -f compose.example.yaml up -d
   Both services use the SQLite database under `/app/data`, so run exactly one of each.
 - **Init.** tini is PID 1 in both containers: it passes `docker stop`'s SIGTERM on and
   reaps orphaned yt-dlp and ffmpeg processes, so neither container needs `init: true`.
-- **Volumes.** `/app/data` holds the database, so back it up. `/downloads` is the staging
-  area and `/media` the library. They may sit on different disks: filing copies to a
-  hidden temporary file, syncs it and renames it into place.
+- **Volumes.** `/app/data` holds the database and its backups (Backups and restore), so
+  back it up. `/downloads` is the staging area and `/media` the library. They may sit on
+  different disks: filing copies to a hidden temporary file, syncs it and renames it into
+  place.
 - **Reverse proxy.** Serve the UI through any reverse proxy and set `YTM_ALLOWED_HOSTS` to
   the name it serves the UI under. The proxy must pass on the `Host` header the browser
   sent, port included, or every POST gets 403. In nginx that is
@@ -142,6 +144,53 @@ docker compose -f compose.example.yaml up -d
   the local architecture, with `dev` as its version (`--build-arg YTM_VERSION=<version>`
   sets another). It needs BuildKit, Docker's default builder since version 23. To run
   such a build with the example, set both `image:` lines to `youtube-manager`.
+
+### Backups and restore
+
+Both services copy the database into `data/backups`, beside `youtube.db`, with SQLite's
+backup API. Each copy is one consistent snapshot, taken while both services run, and a
+single self-contained file. A plain copy of `youtube.db` can catch it mid-write, so
+restore from these copies.
+
+- **Daily snapshots.** Each day, from `YTM_DB_SNAPSHOT_TIME` (UTC), the worker writes
+  `youtube-daily-<UTC time>.db` and keeps the newest 7. It takes the snapshot between
+  jobs, so it can come after the download running at that time and the filing and
+  subscription check that follow it. If the host backs up `/app/data`, set
+  `YTM_DB_SNAPSHOT_TIME` far enough before that backup. A worker that starts with no
+  snapshot since the previous day's time writes one at once.
+- **Before a migration.** The schema version is the database's `PRAGMA user_version`.
+  When a release brings a newer schema, the web UI first copies the database to
+  `youtube-pre-v<new version>-from-v<old version>-<UTC time>.db`, a copy of the database
+  as it was before that migration. A start that keeps failing takes one each time, and
+  the newest 3 for each pair of versions are kept; copies from earlier upgrades stay
+  until you delete them. It then migrates the database one step at a time, each step in
+  one transaction, so a step that fails changes nothing. The log names the copy and
+  each table's row count before and after. Every start needs free space for that copy:
+  if it cannot be written, the web UI does not start and logs an ERROR, and the worker
+  gives up after waiting 300 seconds.
+- **Older releases.** From this release on, a release runs on a newer schema that only
+  adds to its own, and logs a warning. On a schema from a later major release, both
+  services log an ERROR and exit, and keep restarting that way: run that release, or
+  restore a copy from before it. Earlier releases ignore the schema version, so never
+  run one on a database a major release has migrated.
+- **Restoring.** Stop both containers. Move `youtube.db` and every `youtube.db-*` file
+  beside it (`-wal`, `-shm`, `-journal`) together into a new directory, so the current
+  state can still be recovered and no journal is left to meet the snapshot. Copy the
+  snapshot in as `youtube.db`, then start both containers. A snapshot from an older
+  schema is migrated again, after its own pre-migration copy.
+- **Rehearsing an upgrade.** Copy the newest snapshot into an empty directory on any
+  machine with Docker, as `youtube.db`, and from that directory let the new release
+  migrate it:
+
+  ```sh
+  docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/app/data" --entrypoint python \
+    ghcr.io/ochsyp/youtube-manager:<version> \
+    -c "from youtube_manager import applog, database; applog.configure(); database.initialize_database()"
+  ```
+
+  The log names the pre-migration copy, then each table's row count before and after
+  the migration: every table the database had keeps its count. No output means that
+  release has no schema change for this database.
 
 ## Running tests
 
@@ -174,8 +223,9 @@ youtube_manager/    the application package
   applog.py         shared log formatter
   templates/        Jinja2 templates
 tests/              pytest suite and its fixtures (conftest.py)
+  schemas/          each schema version as a release created it, for the migration tests
 scripts/            release check and image smoke test, run by the workflows
-data/               SQLite database (runtime, git-ignored)
+data/               SQLite database and its backups (runtime, git-ignored)
 Dockerfile          image build: base images pinned by digest, deno, the pinned packages
 entrypoint.sh       drops root to PUID/PGID and maps the web and worker commands
 compose.example.yaml  example deployment: web UI, worker and bgutil provider

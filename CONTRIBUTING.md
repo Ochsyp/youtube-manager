@@ -40,6 +40,32 @@ git config core.hooksPath .githooks
 Do not bypass them with `--no-verify`. After a pull request is merged, bring the local `main` up
 to date with `git switch main` and `git pull --ff-only`.
 
+## Schema changes
+
+The database's schema version is its `PRAGMA user_version`, and `SCHEMA_VERSION` in
+`youtube_manager/database.py` is the version a release creates and migrates to. A schema change
+adds a step to `MIGRATIONS` there, keyed by the version it brings the database to, and raises
+`SCHEMA_VERSION` to that key. At start the web UI copies the database into `data/backups`, then
+runs each pending step in one transaction with the version it reaches.
+
+- A step the previous release keeps working through takes the next version in its hundred, such
+  as 2 after 1, and the release can be a minor. Such a step may add a nullable column, a column
+  with a DDL default (`server_default`; an ORM `default=` alone never reaches the DDL, so a file
+  created fresh would refuse the previous release's inserts), a non-unique index or a table, and
+  fill in values the previous release reads the same way.
+- Any other step takes the next hundred, such as 101 after 1: a dropped, renamed or retyped
+  column, a NOT NULL column without a DDL default, a UNIQUE or CHECK constraint. Releases that
+  know schema versions refuse the migrated file and older ones would misread it, so the release
+  is a major, with the `### Migration (cannot be rolled back)` subsection described below.
+- A step runs against a live file and against today's ORM. It must therefore be a no-op on a
+  database it finds already done, including columns, tables and indexes that an earlier step
+  already created from the ORM.
+- Freeze the new version's schema as `tests/schemas/v<version>.sql`, from a file the release
+  creates fresh. The tests compare the newest frozen schema with a new file down to column
+  types, defaults and index uniqueness, and migrate a file at every frozen version to the ORM's
+  tables, columns and indexes, so a schema change without its step and its frozen file fails
+  them.
+
 ## Releasing
 
 Releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version covers the

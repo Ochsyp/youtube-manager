@@ -241,10 +241,11 @@ LOOP_TASKS = (
 
 
 # Run worker() for one pass of its loop per entry of `pass_times`, each pass's clock reading in
-# seconds after start, with no job to take, no signal handler installed and every LOOP_TASKS entry
-# recording (name, pass time) instead of running. Returns the records in call order.
+# seconds after start, with no job to take, no signal handler installed, and every LOOP_TASKS
+# entry and the daily snapshot check recording (name, pass time) instead of running. Returns the
+# records in call order; `snapshots`, if given, also gets the DailySnapshot of each check.
 def run_worker_passes(
-    monkeypatch: pytest.MonkeyPatch, pass_times: list[float],
+    monkeypatch: pytest.MonkeyPatch, pass_times: list[float], snapshots: list | None = None,
 ) -> list[tuple[str, float]]:
     start = 1000.0
     clock = [start]
@@ -262,7 +263,15 @@ def run_worker_passes(
     monkeypatch.setattr(worker, '_shutdown', stop)
     monkeypatch.setattr(worker.signal, 'signal', lambda signum, handler: None)
     monkeypatch.setattr(worker.time, 'monotonic', lambda: clock[0])
+
+    # The loop's daily snapshot check, recorded like a LOOP_TASKS entry.
+    def record_snapshot_check(snapshot):
+        calls.append(('take_daily_snapshot', clock[0] - start))
+        if snapshots is not None:
+            snapshots.append(snapshot)
+
     monkeypatch.setattr(worker, 'get_next_job', next_job)
+    monkeypatch.setattr(worker, 'take_daily_snapshot', record_snapshot_check)
     for name in LOOP_TASKS:
         monkeypatch.setattr(
             worker, name, lambda *args, name=name, **kwargs: calls.append((name, clock[0] - start)),
@@ -651,6 +660,26 @@ def test_backfill_timer_not_backdated(monkeypatch, db):
     assert backfills == [
         ('populate_missing_parent_metadata', interval), ('backfill_all_playlist_indexes', interval),
     ]
+
+
+# Every pass of the worker loop checks the daily database snapshot, after that pass's periodic
+# tasks, always with the one DailySnapshot that YTM_DB_SNAPSHOT_TIME times.
+def test_loop_checks_daily_snapshot_every_pass(monkeypatch, db):
+    monkeypatch.setenv('YTM_DB_SNAPSHOT_TIME', '06:15')
+    interval = worker.ORGANIZER_INTERVAL_SECONDS
+    snapshots = []
+
+    calls = run_worker_passes(monkeypatch, [0, 1, interval], snapshots)
+
+    assert [call for call in calls if call[0] == 'take_daily_snapshot'] == [
+        ('take_daily_snapshot', 0), ('take_daily_snapshot', 1), ('take_daily_snapshot', interval),
+    ]
+    assert calls[-3:] == [
+        ('organizer_scan_and_process', interval), ('retry_failed_jobs', interval),
+        ('take_daily_snapshot', interval),
+    ]
+    assert len({id(snapshot) for snapshot in snapshots}) == 1
+    assert snapshots[0].minute_of_day == 6 * 60 + 15
 
 
 # Startup retires the rows that are no video after the youtube_id backfill and before the channel

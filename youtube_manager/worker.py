@@ -21,7 +21,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, urlsplit
@@ -33,8 +33,11 @@ from youtube_manager.database import (
     Channel,
     Download,
     Playlist,
+    SchemaTooNewError,
     Session,
     Subscription,
+    backup_database,
+    backup_taken_within,
     utcnow,
     wait_for_schema,
 )
@@ -102,6 +105,21 @@ RETRY_INTERVAL_SECONDS = ORGANIZER_INTERVAL_SECONDS
 
 # Ceiling on the doubling delay between auto-retries of the same job.
 RETRY_BACKOFF_MAX_SECONDS = 6 * 3600
+
+# How long the worker waits at start for the web UI to create or migrate the schema: the backup
+# taken before a migration, then the migration itself, can take minutes on a slow disk.
+SCHEMA_WAIT_SECONDS = 300
+
+# The time of day, in UTC as HH:MM, from which the worker writes the day's database snapshot when
+# YTM_DB_SNAPSHOT_TIME is unset. A host that backs up the data volume sets the variable so that
+# the snapshot comes before its own backup.
+DEFAULT_SNAPSHOT_TIME = '00:30'
+
+# Daily snapshots kept in the database's backups/ directory.
+DAILY_SNAPSHOTS_KEPT = 7
+
+# Wait after a failed daily snapshot before the next attempt.
+SNAPSHOT_RETRY_SECONDS = 3600
 
 # Consecutive pickups of one job before it is failed outright; a job no branch can move out of
 # the queue otherwise spins the loop at full CPU.
@@ -2841,6 +2859,78 @@ def components_line() -> str:
     return 'Components: ' + ', '.join(f'{name} {value}' for name, value in parts.items())
 
 
+# YTM_DB_SNAPSHOT_TIME, or DEFAULT_SNAPSHOT_TIME when it is unset or empty, as minutes after
+# midnight UTC. A value that is not HH:MM between 00:00 and 23:59 is an ERROR, since a human has to
+# fix the setting, and DEFAULT_SNAPSHOT_TIME is used meanwhile.
+def snapshot_minute_of_day() -> int:
+    value = os.getenv('YTM_DB_SNAPSHOT_TIME', '').strip() or DEFAULT_SNAPSHOT_TIME
+    if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', value):
+        log_error(
+            f'YTM_DB_SNAPSHOT_TIME is {value!r}, not a time from 00:00 to 23:59; using '
+            f'{DEFAULT_SNAPSHOT_TIME}'
+        )
+        value = DEFAULT_SNAPSHOT_TIME
+    hours, minutes = value.split(':')
+    return int(hours) * 60 + int(minutes)
+
+
+# The worker's daily database snapshot, a backup_database copy tagged 'daily'. Each day's copy is
+# due from the snapshot time until the next day's, so a job still running at that time delays it
+# rather than skipping it. run_if_due() writes it on the first call in that span, unless backups/
+# already holds a copy from within it, which keeps it to one per span across restarts; a worker
+# starting before the time on its first day, with no copy since the day before, writes one at once.
+# A failed attempt is tried again an hour later; the first failure in a span is an ERROR, since a
+# human has to see why, and the retries after it are WARN.
+class DailySnapshot:
+
+    # `minute_of_day`: minutes after midnight UTC from which each day's snapshot is due.
+    def __init__(self, minute_of_day: int):
+        self.minute_of_day = minute_of_day
+        self.done_for: datetime | None = None
+        self.failed_for: datetime | None = None
+        self.retry_at: datetime | None = None
+
+    # The start of the span `now` falls in: the latest snapshot time at or before `now`.
+    def span_start(self, now: datetime) -> datetime:
+        start = now.replace(
+            hour=self.minute_of_day // 60, minute=self.minute_of_day % 60, second=0, microsecond=0,
+        )
+        return start if start <= now else start - timedelta(days=1)
+
+    # Write the snapshot if it is due at `now`, an aware UTC time. Returns its path, or None when
+    # nothing was written. Never raises.
+    def run_if_due(self, now: datetime) -> Path | None:
+        start = self.span_start(now)
+        if self.done_for == start:
+            return None
+        if self.retry_at is not None and now < self.retry_at:
+            return None
+        try:
+            # Only a copy from within the span counts: one dated later, by a clock that ran ahead,
+            # would otherwise end every span until that date.
+            if backup_taken_within('daily', start, start + timedelta(days=1)):
+                self.done_for = start
+                return None
+            path = backup_database('daily', keep=DAILY_SNAPSHOTS_KEPT, now=now)
+        except Exception as exc:
+            self.retry_at = now + timedelta(seconds=SNAPSHOT_RETRY_SECONDS)
+            if self.failed_for == start:
+                warn(f'The daily database snapshot failed again: {exc}')
+            else:
+                self.failed_for = start
+                log_error('The daily database snapshot failed; it is tried again hourly', exc)
+            return None
+        self.done_for = start
+        self.retry_at = None
+        log(f'Wrote the daily database snapshot {path.name}')
+        return path
+
+
+# One pass of the main loop's snapshot check: `snapshot`.run_if_due at the current UTC time.
+def take_daily_snapshot(snapshot: DailySnapshot) -> None:
+    snapshot.run_if_due(datetime.now(timezone.utc))
+
+
 # The worker process's entry point, and the only caller of the job loop. Runs startup housekeeping
 # once, then takes one job at a time until shutdown, interleaving the periodic tasks -- organize,
 # subscription check, auto-retry, parent backfill -- between jobs on their own timers. Returns
@@ -2878,6 +2968,8 @@ def worker() -> None:
     except Exception as exc:
         log_error('resequence_all_channel_indexes failed', exc)
     log('Startup housekeeping done, entering main loop')
+
+    snapshot = DailySnapshot(snapshot_minute_of_day())
 
     # Monotonic: an NTP correction on a host without a real-time clock would otherwise postpone
     # every periodic task by the size of the step.
@@ -2950,6 +3042,13 @@ def worker() -> None:
             except Exception as exc:
                 log_error('Periodic playlist index backfill failed', exc)
 
+        # Checked on every pass, since the time of day is what makes it due. run_if_due returns at
+        # once once the span's copy is written or found, and until an hour after a failed attempt.
+        try:
+            take_daily_snapshot(snapshot)
+        except Exception as exc:
+            log_error('Daily database snapshot check failed', exc)
+
     log('YouTube worker stopped')
 
 
@@ -2966,9 +3065,14 @@ if __name__ == '__main__':
     DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
     STAGING_TEMP.mkdir(parents=True, exist_ok=True)
 
-    # The web process owns schema creation, so the worker waits rather than racing it.
+    # The web process owns schema creation and migration, so the worker waits rather than racing it.
     log('Waiting for database schema to become available...')
-    if wait_for_schema(timeout_seconds=60):
+    try:
+        schema_ready = wait_for_schema(timeout_seconds=SCHEMA_WAIT_SECONDS)
+    except SchemaTooNewError:
+        # wait_for_schema has logged the ERROR; this release must not touch the file.
+        sys.exit(1)
+    if schema_ready:
         worker()
     else:
         logging.error('Timed out waiting for database schema')

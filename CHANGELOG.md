@@ -11,6 +11,20 @@ describes.
 
 - The web UI's starting line and the worker's `Components:` line name the version of the SQLite
   library the process runs on. (phase 9)
+- The database has a schema version, its `PRAGMA user_version`. At start the web UI copies an
+  older database to `data/backups/youtube-pre-v<new version>-from-v<old version>-<UTC time>.db`,
+  then migrates it one step at a time, each step and its version in one transaction, so a step
+  that fails changes nothing. The log names the copy and each table's row count before and after.
+  The first start of this release records the existing schema as version 1, after such a copy:
+  it needs free space for a full copy of the database, and if the copy cannot be written the web
+  UI does not start and logs an ERROR. Of the copies before one migration the newest 3 are kept,
+  and copies from earlier upgrades stay until deleted by hand. Earlier releases ignore the
+  version, so going back to one still works. (phase 10)
+- The worker writes a consistent snapshot of the database to
+  `data/backups/youtube-daily-<UTC time>.db` once a day, from the time `YTM_DB_SNAPSHOT_TIME` sets
+  (HH:MM in UTC, 00:30 by default), and keeps the newest 7. A worker that starts with no snapshot
+  since the previous day's time writes one at once. README, Backups and restore, says how to
+  restore one and how to rehearse an upgrade on a copy. (phase 10)
 
 ### Changed
 
@@ -26,6 +40,9 @@ describes.
 - `YOUTUBE_DB_URI` must be a SQLite URL for Python's sqlite3 driver: the web UI and the worker
   stop at start on a URL for any other database or driver, or one that does not parse, with an
   error that never repeats more of the URL than its scheme. (phase 9)
+- The worker waits up to 300 seconds instead of 60 for the web UI to create or migrate the schema.
+  Both run on a newer schema that only adds to their own, with a warning, and stop with an error
+  on one from a later major release. (phase 10)
 
 ## [1.0.3] - 2026-11-12
 
