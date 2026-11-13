@@ -518,8 +518,14 @@ def ensure_table_columns(conn) -> None:
             # takes the default clause -- which is why a NOT NULL column has to carry one.
             column_type = get_sqlite_column_type(column)
             default_clause = get_sqlite_column_default(column)
+            # NOT NULL where the ORM declares it, so the column comes out as a new file has it.
+            # SQLite refuses that beside a NULL default on a table with rows, so a column whose
+            # type offers no default for its rows is still added without it, as it always was.
+            keeps_not_null = not column.nullable and default_clause not in ('', ' DEFAULT NULL')
+            not_null = ' NOT NULL' if keeps_not_null else ''
             conn.execute(text(
-                f'ALTER TABLE {table_name} ADD COLUMN {column.name} {column_type}{default_clause}'
+                f'ALTER TABLE {table_name} ADD COLUMN {column.name} {column_type}'
+                f'{default_clause}{not_null}'
             ))
 
 
