@@ -39,12 +39,12 @@ from youtube_manager.database import (
 # Job-state vocabulary and progress/speed aggregation, shared with the worker so
 # both processes describe a job the same way.
 from youtube_manager.jobstate import (
-    MAX_AUTO_RETRIES,
     ACTIVE_STATUSES,
     ACTIVE_STATUS_SET,
     CANCELABLE_EFFECTIVE_STATUSES,
     FAILED_OR_CANCELLED,
     HISTORY_STATUSES,
+    MAX_AUTO_RETRIES,
     PARENT_REQUEST_TYPES,
     QUEUE_STATUSES,
     QUEUED_OR_EXPANDING,
