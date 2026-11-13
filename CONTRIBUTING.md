@@ -64,7 +64,7 @@ runs each pending step in one transaction with the version it reaches.
   creates fresh. The tests compare the newest frozen schema with a new file down to column
   types, defaults and index uniqueness, and migrate a file at every frozen version to the ORM's
   tables, columns and indexes, so a schema change without its step and its frozen file fails
-  them. They also upgrade a file as 1.0.3 creates it, version 1's schema with no
+  them. They also upgrade a file as a 1.0.x release creates it, version 1's schema with no
   `user_version`, and compare the result with the newest frozen schema, NOT NULL included.
 
 ## Releasing
