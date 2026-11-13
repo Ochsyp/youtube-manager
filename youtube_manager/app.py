@@ -58,6 +58,7 @@ from youtube_manager.jobstate import (
     is_in_progress,
     is_retriable,
     reset_job_for_retry,
+    restart_auto_retry,
     settle_parent,
 )
 from youtube_manager.media import extract_youtube_id
@@ -522,9 +523,14 @@ REQUEUEABLE_STATUSES = FAILED_OR_CANCELLED | {'deleted', SKIPPED_STATUS}
 # both reset the same fields and both reuse a file already on disk; search_library=False
 # finds that file by a stat of its recorded name alone, walking no tree.
 def requeue_job(job: Download, statuses=FAILED_OR_CANCELLED, search_library: bool = True) -> bool:
-    changed = apply_status_update_to_hierarchy(
-        job, lambda target: reset_job_for_retry(target, statuses, search_library)
-    )
+    # Reset one row and, when it was reset, give it its automatic-retry count back.
+    def reset(target) -> bool:
+        if not reset_job_for_retry(target, statuses, search_library):
+            return False
+        restart_auto_retry(target)
+        return True
+
+    changed = apply_status_update_to_hierarchy(job, reset)
     if changed and job.parent_id is None and job.children:
         # Parent shows queued too, so the UI reflects the retry. A cancel still pending on it
         # would settle the rerun hierarchy as cancelled (jobstate.settle_parent), so it goes.
@@ -1164,6 +1170,9 @@ def reset_for_redownload(db, target: Download, status: Optional[str] = None) -> 
                 'speed': None,
                 'cancel_requested': False,
                 'status': new_status,
+                # A person asked for it again, so the worker's retry schedule starts over.
+                'auto_retry_attempts': 0,
+                'next_auto_retry_at': None,
             },
             synchronize_session=False,
         )

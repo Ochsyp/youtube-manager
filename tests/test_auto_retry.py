@@ -240,3 +240,64 @@ def test_playlist_videos_keep_their_own_counts(monkeypatch, db, make_job, librar
     assert (stored.status, stored.auto_retry_attempts) == ('queued', 3)
     assert row(db, parent.id).status == 'queued'
     assert row(db, parent.id).auto_retry_attempts == 0
+
+
+# A playlist row and the failed videos under it, each video with `attempts` retries spent.
+def failed_playlist(make_job, list_id: str, videos: dict) -> tuple:
+    parent = make_job(url=f'https://www.youtube.com/playlist?list={list_id}',
+                      request_type='playlist', status='failed')
+    children = [
+        failed_video(make_job, youtube_id, parent_id=parent.id, auto_retry_attempts=attempts,
+                     next_auto_retry_at=minutes(5))
+        for youtube_id, attempts in videos.items()
+    ]
+    return parent, children
+
+
+# Whether `job_id` has its full count back: no retries spent and no next time.
+def count_restarted(db, job_id: int) -> bool:
+    stored = row(db, job_id)
+    return (stored.auto_retry_attempts, stored.next_auto_retry_at) == (0, None)
+
+
+# Retry gives a video its full count back, a video already given up on included, and for a
+# playlist each video it requeues; Retry on one video of a playlist does the same for it.
+def test_manual_retry_resets_attempts(client, db, make_job, library):
+    gone = failed_video(make_job, V1, auto_retry_attempts=MAX_AUTO_RETRIES)
+    parent, children = failed_playlist(make_job, 'PL1', {V2: 3, V3: 5})
+    _, (child,) = failed_playlist(make_job, 'PL2', {V4: 2})
+
+    for job_id in (gone.id, parent.id, child.id):
+        client.post(f'/retry/{job_id}', follow_redirects=False)
+
+    for job in (gone, *children, child):
+        assert count_restarted(db, job.id), job.youtube_id
+        assert row(db, job.id).status in ('queued', 'redownload')
+
+
+# Retry All gives every failed video it requeues its full count back, and leaves a row it does
+# not requeue as it was, updated_at included.
+def test_retry_all_resets_attempts(client, db, make_job, library):
+    single = failed_video(make_job, V1, auto_retry_attempts=4, next_auto_retry_at=minutes(5))
+    _, (child,) = failed_playlist(make_job, 'PL1', {V2: 6})
+    done = make_job(youtube_id=V3, status='completed', auto_retry_attempts=2)
+    before = row(db, done.id).updated_at
+
+    client.post('/retry-all', follow_redirects=False)
+
+    assert count_restarted(db, single.id)
+    assert count_restarted(db, child.id)
+    assert (row(db, done.id).auto_retry_attempts, row(db, done.id).updated_at) == (2, before)
+
+
+# Fetch Metadata gives each video it resets its full count back, for a single video given up on
+# and for each video of a playlist.
+def test_redownload_resets_attempts(client, db, make_job, library):
+    gone = failed_video(make_job, V1, auto_retry_attempts=MAX_AUTO_RETRIES)
+    parent, children = failed_playlist(make_job, 'PL1', {V2: 3, V3: 7})
+
+    client.post(f'/job/{gone.id}/redownload', follow_redirects=False)
+    client.post(f'/job/{parent.id}/redownload', follow_redirects=False)
+
+    for job in (gone, *children):
+        assert count_restarted(db, job.id), job.youtube_id

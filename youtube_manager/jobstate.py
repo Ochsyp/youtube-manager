@@ -446,6 +446,13 @@ def apply_status_update_to_hierarchy(job, update_fn: Callable[[object], bool]) -
     return update_fn(job)
 
 
+# Give `job` its full automatic-retry count back, because a person asked for it again: the
+# worker's schedule then starts over. Only sets the fields; the caller commits.
+def restart_auto_retry(job) -> None:
+    job.auto_retry_attempts = 0
+    job.next_auto_retry_at = None
+
+
 # Reset one job so the worker picks it up again, if eligible under allowed_statuses: the manual
 # Retry button passes failed and cancelled alike, scheduled auto-retry only {'failed'} so it
 # never overrides an explicit cancel. A file already on disk routes to 'redownload', reusing the
