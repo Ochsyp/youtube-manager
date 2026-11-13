@@ -290,6 +290,20 @@ def test_retry_all_resets_attempts(client, db, make_job, library):
     assert (row(db, done.id).auto_retry_attempts, row(db, done.id).updated_at) == (2, before)
 
 
+# The job page shows "auto-retry n/8" under a video's status while it has retries spent, on the
+# page and in the section the page refreshes from, and nothing without; a playlist's page shows
+# each video's count in its video list.
+def test_job_page_shows_auto_retry_count(client, db, make_job, library):
+    spent = failed_video(make_job, V1, auto_retry_attempts=3)
+    fresh = failed_video(make_job, V2)
+    parent, _ = failed_playlist(make_job, 'PL1', {V3: 5})
+
+    assert f'auto-retry 3/{MAX_AUTO_RETRIES}' in client.get(f'/job/{spent.id}').text
+    assert f'auto-retry 3/{MAX_AUTO_RETRIES}' in client.get(f'/api/job/{spent.id}/section').text
+    assert 'auto-retry' not in client.get(f'/job/{fresh.id}').text
+    assert f'auto-retry 5/{MAX_AUTO_RETRIES}' in client.get(f'/job/{parent.id}').text
+
+
 # Fetch Metadata gives each video it resets its full count back, for a single video given up on
 # and for each video of a playlist.
 def test_redownload_resets_attempts(client, db, make_job, library):

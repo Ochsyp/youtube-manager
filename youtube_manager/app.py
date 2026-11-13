@@ -39,6 +39,7 @@ from youtube_manager.database import (
 # Job-state vocabulary and progress/speed aggregation, shared with the worker so
 # both processes describe a job the same way.
 from youtube_manager.jobstate import (
+    MAX_AUTO_RETRIES,
     ACTIVE_STATUSES,
     ACTIVE_STATUS_SET,
     CANCELABLE_EFFECTIVE_STATUSES,
@@ -465,6 +466,7 @@ def validate_url_type(url: str, expected_type: str) -> Optional[str]:
 # Register the shared job-state helpers and vocabulary as Jinja globals, so templates render
 # exactly the same status/progress/speed values the worker persists, and check membership
 # against the same status lists rather than keeping their own hardcoded copies.
+templates.env.globals['MAX_AUTO_RETRIES'] = MAX_AUTO_RETRIES
 templates.env.globals['compute_effective_status'] = compute_effective_status
 templates.env.globals['compute_parent_progress'] = compute_parent_progress
 templates.env.globals['compute_parent_speed'] = compute_parent_speed

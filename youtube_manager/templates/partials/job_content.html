@@ -2,7 +2,8 @@
    tail of the log. Rendered inline by job.html and served on its own by GET /api/job/<id>/section,
    which that page swaps into #job-content on a timer. Requires `job`; `job_log` is optional and
    its section is dropped when it is absent. Fetch Metadata, for the job or one child, is offered
-   only while that job is not in progress. #}
+   only while that job is not in progress. A video with automatic retries spent shows
+   `auto_retry_attempts` out of the MAX_AUTO_RETRIES global under its status. #}
 
 {% import "partials/status_label.html" as status %}
 {% import "partials/job_actions.html" as actions %}
@@ -37,7 +38,10 @@
         </tr>
         <tr>
             <th>Status</th>
-            <td>{{ status.status_label(effective_status) }}</td>
+            <td>
+                {{ status.status_label(effective_status) }}
+                {% if job.auto_retry_attempts %}<br><small>auto-retry {{ job.auto_retry_attempts }}/{{ MAX_AUTO_RETRIES }}</small>{% endif %}
+            </td>
         </tr>
         <tr>
             <th>Created</th>
@@ -141,7 +145,10 @@
                     <tr>
                         <td><a href="/job/{{ child.id }}">{{ child.id }}</a></td>
                         <td><a href="/job/{{ child.id }}">{{ child.title or child.url or 'Child download' }}</a></td>
-                        <td>{{ status.status_label(compute_effective_status(child)) }}</td>
+                        <td>
+                            {{ status.status_label(compute_effective_status(child)) }}
+                            {% if child.auto_retry_attempts %}<br><small>auto-retry {{ child.auto_retry_attempts }}/{{ MAX_AUTO_RETRIES }}</small>{% endif %}
+                        </td>
                         {# Each child's own figures, not the parent aggregate shown above. #}
                         <td>{{ child.progress or '-' }}</td>
                         <td>{{ child.speed or '-' }}</td>
