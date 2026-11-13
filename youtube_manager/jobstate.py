@@ -78,6 +78,11 @@ CANCELABLE_EFFECTIVE_STATUSES = ('queued', 'metadata', 'expanding', 'downloading
 # 'completed' is deliberately excluded: its final progress/speed are the values worth keeping.
 RESET_PROGRESS_ON_STATUSES = frozenset({'queued', 'failed', 'cancelled'})
 
+# Automatic retries a failed video gets before the worker gives up on it. The waits between them
+# double from 5 minutes up to 6 hours, so the eight come to about 17 hours. Here rather than in
+# the worker, so that the job page can show the count out of it.
+MAX_AUTO_RETRIES = 8
+
 # Raw statuses a job can be caught in if the worker dies mid-flight, recovered once at startup.
 # 'downloading' is not in WORKER_PICKUP_STATUSES, so without this a job stuck there is never
 # retried; the other two are pickable already but are normalized to clear stale bookkeeping.

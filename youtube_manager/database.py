@@ -62,6 +62,15 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# `dt` as an aware UTC time; a naive one, as SQLite hands back, is read as UTC. None stays None.
+def normalize_datetime(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 # Raise ValueError unless `url` names a SQLite database through Python's sqlite3 driver, the only
 # one the settings and schema checks in this module are written for. The message repeats no more
 # of the URL than its scheme, so a password in a mistaken URL never reaches the log.

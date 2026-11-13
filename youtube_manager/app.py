@@ -28,7 +28,13 @@ from sqlalchemy.orm import aliased, joinedload, selectinload
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from youtube_manager.database import Download, Session, Subscription, initialize_database
+from youtube_manager.database import (
+    Download,
+    Session,
+    Subscription,
+    initialize_database,
+    normalize_datetime,
+)
 
 # Job-state vocabulary and progress/speed aggregation, shared with the worker so
 # both processes describe a job the same way.
@@ -275,15 +281,6 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return dt.astimezone(timezone.utc)
     except ValueError:
         return None
-
-
-# Naive datetimes are read as UTC, so everything compares in UTC.
-def normalize_datetime(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 # The most recent time anything on this row changed, in UTC: updated_at, else completed_at, else
