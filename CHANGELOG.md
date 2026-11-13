@@ -7,6 +7,26 @@ describes.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-13
+
+Phases 9 to 11: SQLite connection settings, versioned schema upgrades with daily backups, and
+automatic retries that survive a restart and stop after 8. Before a host upgrades, check that the
+volume holding the database has room for copies of it. The first start copies the database to
+`backups/` beside it (`data/backups` by default) before it migrates the schema to version 2. The
+web UI answers only once the copy and the migration are done, and it does not start if the copy
+fails. Upgrade the web UI and the worker in one step, as `docker compose up -d` does: the 1.1.0
+worker waits up to 300 seconds for that migration and cannot run beside a 1.0.3 web UI. The
+schema change only adds, so 1.0.3 still runs on the upgraded database and going back needs no
+step. yt-dlp and the bgutil plugin are unchanged, so the PO-token provider stays at 2.0.2.
+
+After the upgrade the worker writes a snapshot of the database into the same folder when it
+starts, then each day from `YTM_DB_SNAPSHOT_TIME` (set on the worker, HH:MM in UTC, 00:30 unless
+set), and keeps 7. A week after a clean upgrade the folder holds 8 copies, and 9 while a snapshot
+is written. They sit beside the database, so a host that backs up its volume copies them too and
+can set that time well before its own backup. Videos that were failing under 1.0.3 start their 8
+retries afresh: any still failing about 17 hours after the upgrade are given up and named in an
+ERROR line.
+
 ### Added
 
 - The web UI's starting line and the worker's `Components:` line name the version of the SQLite
@@ -321,7 +341,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...v1.0.1
