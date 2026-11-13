@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import create_engine, event, text
 
 from youtube_manager import database, worker
 
@@ -22,6 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Each frozen schema, v<version>.sql: what a release at that version creates.
 SCHEMAS_DIR = REPO_ROOT / 'tests' / 'schemas'
+
+# The schema version this release creates, read before any test patches it, so that the tests
+# keep working when a later release adds a version.
+CURRENT_VERSION = database.SCHEMA_VERSION
 
 VIDEO_ID = 'dQw4w9WgXcQ'
 
@@ -151,7 +155,7 @@ def failing_step(conn) -> None:
 def test_fresh_database_gets_current_user_version(empty_db):
     database.initialize_database()
 
-    assert stored_version(empty_db) == database.SCHEMA_VERSION == 1
+    assert stored_version(empty_db) == CURRENT_VERSION
     assert set(database.Base.metadata.tables) <= table_names()
     assert database.is_schema_initialized()
     assert backup_files() == []
@@ -167,7 +171,7 @@ def test_legacy_v0_database_migrates_and_preserves_rows(empty_db, caplog):
 
     database.initialize_database()
 
-    assert stored_version(empty_db) == 1
+    assert stored_version(empty_db) == CURRENT_VERSION
     assert 'downloads_legacy' not in table_names()
     for table in database.Base.metadata.tables:
         assert column_names(table) == orm_columns(table), table
@@ -185,14 +189,14 @@ def test_legacy_v0_database_migrates_and_preserves_rows(empty_db, caplog):
         session.add(database.Download(url=f'https://youtu.be/{VIDEO_ID}', youtube_id=VIDEO_ID))
         session.commit()
 
-    [copy] = copies('pre-v1-from-v0')
+    [copy] = copies(f'pre-v{CURRENT_VERSION}-from-v0')
     infos = messages_at(caplog, logging.INFO)
     assert (
-        f'Backed up the database to {copy.name} before migrating it from schema version 0 to 1'
-        ' (channels 2, downloads 3)'
+        f'Backed up the database to {copy.name} before migrating it from schema version 0 to'
+        f' {CURRENT_VERSION} (channels 2, downloads 3)'
     ) in infos
     assert (
-        'Migrated the database to schema version 1'
+        f'Migrated the database to schema version {CURRENT_VERSION}'
         ' (channels 2, downloads 3, playlists 0, subscriptions 0)'
     ) in infos
 
@@ -205,7 +209,7 @@ def test_pre_migration_backup_written_before_first_step(empty_db, monkeypatch):
 
     # Migration 1 as the ladder runs it, first recording what backups/ holds at that moment.
     def recording_step(conn):
-        found = copies('pre-v1-from-v0')
+        found = copies(f'pre-v{CURRENT_VERSION}-from-v0')
         seen.append([path.name for path in found])
         copy = open_file(found[0])
         try:
@@ -215,14 +219,14 @@ def test_pre_migration_backup_written_before_first_step(empty_db, monkeypatch):
             copy.close()
         database.migrate_to_1(conn)
 
-    monkeypatch.setattr(database, 'MIGRATIONS', {1: recording_step})
+    monkeypatch.setattr(database, 'MIGRATIONS', {**database.MIGRATIONS, 1: recording_step})
 
     database.initialize_database()
 
     names, version, rows = seen
-    assert len(names) == 1 and names[0].startswith('youtube-pre-v1-from-v0-')
+    assert len(names) == 1 and names[0].startswith(f'youtube-pre-v{CURRENT_VERSION}-from-v0-')
     assert (version, rows) == (0, len(LEGACY_DOWNLOADS))
-    assert stored_version(empty_db) == 1
+    assert stored_version(empty_db) == CURRENT_VERSION
     assert not [name for name in backup_files() if '.tmp' in name]
 
 
@@ -241,37 +245,41 @@ def test_failed_step_rolls_back_ddl_and_version(db, monkeypatch, caplog):
         )
         raise RuntimeError('step failed')
 
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 2)
-    monkeypatch.setattr(database, 'MIGRATIONS', {1: database.migrate_to_1, 2: adds_then_fails})
+    following = CURRENT_VERSION + 1
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', following)
+    monkeypatch.setattr(database, 'MIGRATIONS', {**database.MIGRATIONS, following: adds_then_fails})
 
     with pytest.raises(RuntimeError, match='step failed'):
         database.initialize_database()
 
-    assert stored_version(path) == 1
+    assert stored_version(path) == CURRENT_VERSION
     assert 'probe' not in column_names('downloads')
     assert 'probe_table' not in table_names()
     with database.engine.connect() as conn:
         assert conn.execute(text('SELECT count(*) FROM downloads')).scalar() == 0
     assert any(
-        'to schema version 2 failed and was rolled back; it stays at version 1' in message
+        f'to schema version {following} failed and was rolled back; it stays at version'
+        f' {CURRENT_VERSION}' in message
         for message in messages_at(caplog, logging.ERROR)
     )
-    assert len(copies('pre-v2-from-v1')) == 1
+    assert len(copies(f'pre-v{following}-from-v{CURRENT_VERSION}')) == 1
 
-    monkeypatch.setitem(database.MIGRATIONS, 2, create_table_step('step_2'))
+    monkeypatch.setitem(database.MIGRATIONS, following, create_table_step('step_following'))
     database.initialize_database()
 
-    assert stored_version(path) == 2
-    assert 'step_2' in table_names()
+    assert stored_version(path) == following
+    assert 'step_following' in table_names()
 
 
 # The version is written inside the step's own transaction: when writing it fails, the step's
 # DDL goes too, and the next start runs the step again.
 def test_version_written_in_the_steps_transaction(db, monkeypatch):
     path = database.database_file()
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 2)
+    following = CURRENT_VERSION + 1
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', following)
     monkeypatch.setattr(
-        database, 'MIGRATIONS', {1: database.migrate_to_1, 2: create_table_step('step_2')},
+        database, 'MIGRATIONS',
+        {**database.MIGRATIONS, following: create_table_step('step_following')},
     )
 
     # A cursor hook that fails every write of the version, as a crash at that moment would.
@@ -286,29 +294,31 @@ def test_version_written_in_the_steps_transaction(db, monkeypatch):
     finally:
         event.remove(database.engine, 'before_cursor_execute', refuse_version_write)
 
-    assert stored_version(path) == 1
-    assert 'step_2' not in table_names()
+    assert stored_version(path) == CURRENT_VERSION
+    assert 'step_following' not in table_names()
 
     database.initialize_database()
 
-    assert stored_version(path) == 2
-    assert 'step_2' in table_names()
+    assert stored_version(path) == following
+    assert 'step_following' in table_names()
 
 
 # Each step commits on its own: when a later step fails, the steps before it stay, and the file
 # is left at the version the last of them reached.
 def test_each_step_commits_on_its_own(db, monkeypatch):
     path = database.database_file()
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 3)
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', CURRENT_VERSION + 2)
     monkeypatch.setattr(database, 'MIGRATIONS', {
-        1: database.migrate_to_1, 2: create_table_step('step_2'), 3: failing_step,
+        **database.MIGRATIONS,
+        CURRENT_VERSION + 1: create_table_step('step_following'),
+        CURRENT_VERSION + 2: failing_step,
     })
 
     with pytest.raises(RuntimeError, match='step failed'):
         database.initialize_database()
 
-    assert stored_version(path) == 2
-    assert 'step_2' in table_names()
+    assert stored_version(path) == CURRENT_VERSION + 1
+    assert 'step_following' in table_names()
 
 
 # Steps run in order from the stored version, each committed with the version it reaches, and a
@@ -324,15 +334,18 @@ def test_steps_run_in_order_from_stored_version(db, monkeypatch):
             conn.exec_driver_sql(f'CREATE TABLE step_{target} (id INTEGER PRIMARY KEY)')
         return run
 
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 3)
-    monkeypatch.setattr(database, 'MIGRATIONS', {1: step(1), 2: step(2), 3: step(3)})
+    base = CURRENT_VERSION
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', base + 2)
+    monkeypatch.setattr(
+        database, 'MIGRATIONS', {base: step(base), base + 1: step(base + 1), base + 2: step(base + 2)},
+    )
 
     database.initialize_database()
 
-    assert ran == [(2, 1), (3, 2)]
-    assert {'step_2', 'step_3'} <= table_names()
-    assert 'step_1' not in table_names()
-    assert stored_version(database.database_file()) == 3
+    assert ran == [(base + 1, base), (base + 2, base + 1)]
+    assert {f'step_{base + 1}', f'step_{base + 2}'} <= table_names()
+    assert f'step_{base}' not in table_names()
+    assert stored_version(database.database_file()) == base + 2
 
 
 # The last step in MIGRATIONS is SCHEMA_VERSION's, and SCHEMA_VERSION has a frozen schema. A ladder
@@ -342,15 +355,14 @@ def test_ladder_short_of_schema_version_refused(db, monkeypatch, caplog):
     assert max(database.MIGRATIONS) == database.SCHEMA_VERSION
     assert (SCHEMAS_DIR / f'v{database.SCHEMA_VERSION}.sql').is_file()
 
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 2)
-    monkeypatch.setattr(database, 'MIGRATIONS', {1: database.migrate_to_1})
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', CURRENT_VERSION + 1)
 
     with pytest.raises(RuntimeError, match='MIGRATIONS has no step'):
         database.initialize_database()
 
-    assert stored_version(database.database_file()) == 1
+    assert stored_version(database.database_file()) == CURRENT_VERSION
     assert any(
-        'stop at schema version 1, short of' in message
+        f'stop at schema version {CURRENT_VERSION}, short of' in message
         for message in messages_at(caplog, logging.ERROR)
     )
 
@@ -424,6 +436,113 @@ def test_frozen_schemas_migrate_to_the_orm(empty_db, schema):
         assert {index.name for index in table.indexes} <= index_names(name), name
 
 
+# Build the empty file at `path` from the frozen schema of `version`, at that version, and add
+# `rows` to downloads as (id, updated_at, completed_at, created_at).
+def build_frozen_database(path: Path, version: int, rows: tuple = ()) -> None:
+    connection = open_file(path)
+    try:
+        connection.executescript((SCHEMAS_DIR / f'v{version}.sql').read_text(encoding='utf-8'))
+        connection.executemany(
+            'INSERT INTO downloads (id, url, request_type, status, cancel_requested,'
+            ' group_by_channel, updated_at, completed_at, created_at)'
+            " VALUES (?, 'https://youtu.be/aaaaaaaaaaa', 'video', 'failed', 0, 0, ?, ?, ?)",
+            rows,
+        )
+        connection.execute(f'PRAGMA user_version = {version}')
+        connection.commit()
+    finally:
+        connection.close()
+
+
+# Run migration 2 once more on the database the engine is bound to, in its own transaction.
+def rerun_migration_2() -> None:
+    with database._autocommit_connection() as conn:
+        with database._immediate_transaction(conn):
+            database.migrate_to_2(conn)
+
+
+# A file at version 1 gains the two auto-retry columns and the updated_at index through step 2
+# and ends with the schema a new file gets. Running the step again, there or on a new file,
+# changes nothing.
+def test_migration_2_adds_columns_and_index_idempotently(empty_db, tmp_path):
+    build_frozen_database(empty_db, 1)
+
+    database.initialize_database()
+
+    assert stored_version(empty_db) == CURRENT_VERSION
+    assert {'auto_retry_attempts', 'next_auto_retry_at'} <= column_names('downloads')
+    assert 'idx_download_updated_at' in index_names('downloads')
+    fresh = tmp_path / 'fresh.db'
+    connection = open_file(fresh)
+    try:
+        connection.executescript((SCHEMAS_DIR / 'v2.sql').read_text(encoding='utf-8'))
+    finally:
+        connection.close()
+    assert schema_signature(empty_db) == schema_signature(fresh)
+
+    with database.engine.connect() as conn:
+        before = conn.execute(text('SELECT type, name, sql FROM sqlite_master ORDER BY name')).all()
+    rerun_migration_2()
+    with database.engine.connect() as conn:
+        after = conn.execute(text('SELECT type, name, sql FROM sqlite_master ORDER BY name')).all()
+    assert after == before
+
+
+# Step 2 gives every row an updated_at, so the dashboard's change check can read that one column:
+# a row keeps its own, else takes its completed_at, else its created_at, else 1 January 1970.
+# Every row starts with a count of 0 and no next retry, and no row is lost.
+def test_migration_2_backfills_null_updated_at(empty_db):
+    rows = (
+        (1, '2026-01-05 10:00:00.000000', '2026-01-04 10:00:00.000000', '2026-01-01 10:00:00.000000'),
+        (2, None, '2026-01-04 10:00:00.000000', '2026-01-01 10:00:00.000000'),
+        (3, None, None, '2026-01-01 10:00:00.000000'),
+        (4, None, None, None),
+    )
+    build_frozen_database(empty_db, 1, rows)
+
+    database.initialize_database()
+
+    with database.engine.connect() as conn:
+        stored = conn.execute(text(
+            'SELECT id, updated_at, auto_retry_attempts, next_auto_retry_at FROM downloads'
+            ' ORDER BY id'
+        )).all()
+    assert [tuple(row) for row in stored] == [
+        (1, '2026-01-05 10:00:00.000000', 0, None),
+        (2, '2026-01-04 10:00:00.000000', 0, None),
+        (3, '2026-01-01 10:00:00.000000', 0, None),
+        (4, '1970-01-01 00:00:00.000000', 0, None),
+    ]
+
+
+# A version 2 file takes an INSERT that names neither auto-retry column, as the previous release's
+# inserts do, and stores a count of 0: a file migrated from version 1 and a new one alike.
+def test_v2_takes_inserts_without_the_new_columns(empty_db, tmp_path):
+    build_frozen_database(empty_db, 1)
+    database.initialize_database()
+    fresh = tmp_path / 'fresh.db'
+    engine = create_engine(f'sqlite:///{fresh.as_posix()}')
+    try:
+        database.Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    for path in (empty_db, fresh):
+        connection = open_file(path)
+        try:
+            connection.execute(
+                'INSERT INTO downloads (url, request_type, status, cancel_requested,'
+                " group_by_channel) VALUES ('https://youtu.be/bbbbbbbbbbb', 'video', 'queued', 0, 0)"
+            )
+            connection.commit()
+            stored = connection.execute(
+                'SELECT auto_retry_attempts, next_auto_retry_at FROM downloads'
+            ).fetchall()
+        finally:
+            connection.close()
+        assert stored == [(0, None)], path.name
+
+
 # A second start on a migrated file changes nothing and takes no second copy.
 def test_rerun_is_noop_without_new_backup(empty_db):
     build_legacy_database(empty_db)
@@ -438,7 +557,7 @@ def test_rerun_is_noop_without_new_backup(empty_db):
     with database.engine.connect() as conn:
         after = conn.execute(text('SELECT type, name, sql FROM sqlite_master ORDER BY name')).all()
     assert after == before
-    assert stored_version(empty_db) == 1
+    assert stored_version(empty_db) == CURRENT_VERSION
 
 
 # A file at version 0 with any table at all is a database from before versions, not a new file:
@@ -454,8 +573,8 @@ def test_file_with_any_table_is_migrated_not_created(empty_db):
 
     database.initialize_database()
 
-    assert stored_version(empty_db) == 1
-    assert len(copies('pre-v1-from-v0')) == 1
+    assert stored_version(empty_db) == CURRENT_VERSION
+    assert len(copies(f'pre-v{CURRENT_VERSION}-from-v0')) == 1
     assert column_names('channels') == orm_columns('channels')
 
 
@@ -485,7 +604,7 @@ def test_migration_waits_for_another_writer(empty_db, monkeypatch):
         release.join()
         writer.close()
 
-    assert stored_version(empty_db) == 1
+    assert stored_version(empty_db) == CURRENT_VERSION
     with database.engine.connect() as conn:
         assert conn.execute(text('SELECT count(*) FROM channels')).scalar() == 3
 
@@ -498,15 +617,15 @@ def test_step_error_kept_when_sqlite_rolled_back_first(db, monkeypatch):
         conn.exec_driver_sql('ROLLBACK')
         raise RuntimeError('disk full')
 
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 2)
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', CURRENT_VERSION + 1)
     monkeypatch.setattr(
-        database, 'MIGRATIONS', {1: database.migrate_to_1, 2: rolled_back_then_fails},
+        database, 'MIGRATIONS', {**database.MIGRATIONS, CURRENT_VERSION + 1: rolled_back_then_fails},
     )
 
     with pytest.raises(RuntimeError, match='disk full'):
         database.initialize_database()
 
-    assert stored_version(database.database_file()) == 1
+    assert stored_version(database.database_file()) == CURRENT_VERSION
 
 
 # A version another process raised while this one was copying the file is never written back
@@ -523,7 +642,9 @@ def test_version_raised_meanwhile_is_not_lowered(empty_db, monkeypatch, caplog):
         return path
 
     monkeypatch.setattr(database, 'backup_database', backup_then_raise_version)
-    monkeypatch.setattr(database, 'MIGRATIONS', {1: lambda conn: ran.append(conn)})
+    monkeypatch.setattr(
+        database, 'MIGRATIONS', {version: ran.append for version in database.MIGRATIONS},
+    )
 
     database.initialize_database()
 
@@ -544,22 +665,21 @@ def test_pre_migration_copies_kept_per_source_version(empty_db, monkeypatch):
         clock[0] += timedelta(minutes=1)
         return clock[0]
 
+    following = CURRENT_VERSION + 1
     monkeypatch.setattr(database, 'utcnow', ticking_utcnow)
-    monkeypatch.setattr(database, 'SCHEMA_VERSION', 3)
-    monkeypatch.setattr(database, 'MIGRATIONS', {
-        1: database.migrate_to_1, 2: create_table_step('step_2'), 3: failing_step,
-    })
+    monkeypatch.setattr(database, 'SCHEMA_VERSION', following)
+    monkeypatch.setattr(database, 'MIGRATIONS', {**database.MIGRATIONS, following: failing_step})
 
     for _ in range(5):
         with pytest.raises(RuntimeError, match='step failed'):
             database.initialize_database()
 
-    [original] = copies('pre-v3-from-v0')
-    partial = copies('pre-v3-from-v2')
+    [original] = copies(f'pre-v{following}-from-v0')
+    partial = copies(f'pre-v{following}-from-v{CURRENT_VERSION}')
     assert stored_version(original) == 0
     assert len(partial) == database.PRE_MIGRATION_BACKUPS_KEPT == 3
-    assert [stored_version(path) for path in partial] == [2, 2, 2]
-    assert stored_version(empty_db) == 2
+    assert [stored_version(path) for path in partial] == [CURRENT_VERSION] * 3
+    assert stored_version(empty_db) == CURRENT_VERSION
 
 
 # The worker waits while the stored version is older than SCHEMA_VERSION, even on a file with
@@ -581,7 +701,7 @@ def test_worker_waits_for_user_version(db, monkeypatch):
 
     assert database.wait_for_schema(timeout_seconds=30) is True
     assert sleeps == [1]
-    assert stored_version(path) == 1
+    assert stored_version(path) == CURRENT_VERSION
 
 
 # The worker gives the app five minutes, which a backup and a migration on a slow disk can take:

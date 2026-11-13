@@ -282,6 +282,11 @@ class Download(Base):
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     completed_at = Column(DateTime)
+    # Automatic retries this video has had since it last stopped failing or a person retried it,
+    # and when the worker may try it next. Kept on the row, so a restart does not start the
+    # schedule over. The DDL default lets the release before these columns insert rows.
+    auto_retry_attempts = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    next_auto_retry_at = Column(DateTime)
 
     children = relationship('Download', back_populates='parent', cascade='all, delete-orphan', lazy='selectin')
     parent = relationship('Download', remote_side=[id], back_populates='children')
@@ -293,6 +298,8 @@ Index('idx_download_status', Download.status)
 Index('idx_download_parent', Download.parent_id)
 Index('idx_download_youtube_id', Download.youtube_id)
 Index('idx_download_parent_status', Download.parent_id, Download.status)
+# The dashboard's change check reads max(updated_at) on every poll.
+Index('idx_download_updated_at', Download.updated_at)
 
 
 # =======================================================
@@ -309,7 +316,7 @@ Index('idx_download_parent_status', Download.parent_id, Download.status)
 # index or a table, and fill in values that release reads the same way. Anything else -- a
 # dropped, renamed or retyped column, a NOT NULL column without a DDL default, a UNIQUE or CHECK
 # constraint -- takes the next hundred and ships in a major release (CONTRIBUTING, Schema changes).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Copies kept of the database at one version before one migration, tagged
 # pre-v<new version>-from-v<old version>. A start that keeps failing takes one each time, and since
@@ -519,9 +526,32 @@ def migrate_to_1(conn) -> None:
     relax_downloads_youtube_id_uniqueness(conn)
 
 
+# Migration 2: the auto-retry columns and the index for the dashboard's change check, through
+# `conn`. Each column is added only where it is missing, since migration 1 adds today's columns
+# to a database from before versions. Then every row gets an updated_at, so the change check can
+# read that one column: its completed_at, else its created_at, else 1 January 1970. The DDL is
+# written out rather than read from today's model, so later model changes cannot alter the step.
+def migrate_to_2(conn) -> None:
+    columns = {row[1] for row in conn.execute(text('PRAGMA table_info(downloads)'))}
+    if 'auto_retry_attempts' not in columns:
+        conn.execute(text(
+            'ALTER TABLE downloads ADD COLUMN auto_retry_attempts INTEGER DEFAULT 0 NOT NULL'
+        ))
+    if 'next_auto_retry_at' not in columns:
+        conn.execute(text('ALTER TABLE downloads ADD COLUMN next_auto_retry_at DATETIME'))
+    conn.execute(text(
+        'CREATE INDEX IF NOT EXISTS idx_download_updated_at ON downloads (updated_at)'
+    ))
+    conn.execute(text(
+        "UPDATE downloads SET updated_at = COALESCE(completed_at, created_at,"
+        " '1970-01-01 00:00:00.000000') WHERE updated_at IS NULL"
+    ))
+
+
 # The step that brings a database to each schema version, keyed by that version.
 MIGRATIONS = {
     1: migrate_to_1,
+    2: migrate_to_2,
 }
 
 

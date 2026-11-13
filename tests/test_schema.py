@@ -47,6 +47,7 @@ def test_initialize_database_fresh(db):
         'idx_download_parent',
         'idx_download_youtube_id',
         'idx_download_parent_status',
+        'idx_download_updated_at',
     } <= indexes
 
     with database.engine.connect() as conn:
