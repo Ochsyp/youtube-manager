@@ -336,9 +336,9 @@ def test_steps_run_in_order_from_stored_version(db, monkeypatch):
 
     base = CURRENT_VERSION
     monkeypatch.setattr(database, 'SCHEMA_VERSION', base + 2)
-    monkeypatch.setattr(
-        database, 'MIGRATIONS', {base: step(base), base + 1: step(base + 1), base + 2: step(base + 2)},
-    )
+    monkeypatch.setattr(database, 'MIGRATIONS', {
+        base: step(base), base + 1: step(base + 1), base + 2: step(base + 2),
+    })
 
     database.initialize_database()
 
@@ -492,10 +492,13 @@ def test_migration_2_adds_columns_and_index_idempotently(empty_db, tmp_path):
 # a row keeps its own, else takes its completed_at, else its created_at, else 1 January 1970.
 # Every row starts with a count of 0 and no next retry, and no row is lost.
 def test_migration_2_backfills_null_updated_at(empty_db):
+    first, fourth, fifth = (
+        f'2026-01-0{day} 10:00:00.000000' for day in (1, 4, 5)
+    )
     rows = (
-        (1, '2026-01-05 10:00:00.000000', '2026-01-04 10:00:00.000000', '2026-01-01 10:00:00.000000'),
-        (2, None, '2026-01-04 10:00:00.000000', '2026-01-01 10:00:00.000000'),
-        (3, None, None, '2026-01-01 10:00:00.000000'),
+        (1, fifth, fourth, first),
+        (2, None, fourth, first),
+        (3, None, None, first),
         (4, None, None, None),
     )
     build_frozen_database(empty_db, 1, rows)
@@ -532,7 +535,8 @@ def test_v2_takes_inserts_without_the_new_columns(empty_db, tmp_path):
         try:
             connection.execute(
                 'INSERT INTO downloads (url, request_type, status, cancel_requested,'
-                " group_by_channel) VALUES ('https://youtu.be/bbbbbbbbbbb', 'video', 'queued', 0, 0)"
+                " group_by_channel)"
+                " VALUES ('https://youtu.be/bbbbbbbbbbb', 'video', 'queued', 0, 0)"
             )
             connection.commit()
             stored = connection.execute(
@@ -618,9 +622,9 @@ def test_step_error_kept_when_sqlite_rolled_back_first(db, monkeypatch):
         raise RuntimeError('disk full')
 
     monkeypatch.setattr(database, 'SCHEMA_VERSION', CURRENT_VERSION + 1)
-    monkeypatch.setattr(
-        database, 'MIGRATIONS', {**database.MIGRATIONS, CURRENT_VERSION + 1: rolled_back_then_fails},
-    )
+    monkeypatch.setattr(database, 'MIGRATIONS', {
+        **database.MIGRATIONS, CURRENT_VERSION + 1: rolled_back_then_fails,
+    })
 
     with pytest.raises(RuntimeError, match='disk full'):
         database.initialize_database()

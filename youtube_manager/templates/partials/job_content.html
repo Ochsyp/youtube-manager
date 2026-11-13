@@ -40,7 +40,9 @@
             <th>Status</th>
             <td>
                 {{ status.status_label(effective_status) }}
-                {% if job.auto_retry_attempts %}<br><small>auto-retry {{ job.auto_retry_attempts }}/{{ MAX_AUTO_RETRIES }}</small>{% endif %}
+                {% if job.auto_retry_attempts %}
+                    <br><small>auto-retry {{ job.auto_retry_attempts }}/{{ MAX_AUTO_RETRIES }}</small>
+                {% endif %}
             </td>
         </tr>
         <tr>
@@ -147,7 +149,10 @@
                         <td><a href="/job/{{ child.id }}">{{ child.title or child.url or 'Child download' }}</a></td>
                         <td>
                             {{ status.status_label(compute_effective_status(child)) }}
-                            {% if child.auto_retry_attempts %}<br><small>auto-retry {{ child.auto_retry_attempts }}/{{ MAX_AUTO_RETRIES }}</small>{% endif %}
+                            {% if child.auto_retry_attempts %}
+                                <br><small>auto-retry
+                                    {{- ' ' }}{{ child.auto_retry_attempts }}/{{ MAX_AUTO_RETRIES }}</small>
+                            {% endif %}
                         </td>
                         {# Each child's own figures, not the parent aggregate shown above. #}
                         <td>{{ child.progress or '-' }}</td>
