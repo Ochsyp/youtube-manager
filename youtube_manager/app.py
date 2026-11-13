@@ -1432,18 +1432,11 @@ def bulk_delete(job_ids: list[int] = Form(default=[]), return_to: str = Form('/h
 # `since` it reports no change, so a first poll only picks the baseline up.
 @app.get('/api/queue')
 def api_queue(since: Optional[str] = None):
-    # Three aggregates in one round trip, rather than loading and filtering the queue itself
-    # on every poll from every open tab.
+    # One value, read from the updated_at index on every poll from every open tab. Every row has
+    # an updated_at since schema version 2, and every write moves it, through the column's
+    # onupdate.
     with Session() as db:
-        timestamps = db.query(
-            func.max(Download.updated_at),
-            func.max(Download.completed_at),
-            func.max(Download.created_at),
-        ).one()
-
-    # Reduced in Python, not in SQL: SQLite's max() over several columns yields NULL the moment any
-    # one of them is NULL, and completed_at is NULL for everything still running.
-    latest_update = normalize_datetime(max((t for t in timestamps if t is not None), default=None))
+        latest_update = normalize_datetime(db.query(func.max(Download.updated_at)).scalar())
     since_dt = parse_iso_datetime(since)
     changed = bool(since_dt and latest_update and latest_update > since_dt)
 
