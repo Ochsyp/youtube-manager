@@ -28,7 +28,13 @@ from sqlalchemy.orm import aliased, joinedload, selectinload
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from youtube_manager.database import Download, Session, Subscription, initialize_database
+from youtube_manager.database import (
+    Download,
+    Session,
+    Subscription,
+    initialize_database,
+    normalize_datetime,
+)
 
 # Job-state vocabulary and progress/speed aggregation, shared with the worker so
 # both processes describe a job the same way.
@@ -38,6 +44,7 @@ from youtube_manager.jobstate import (
     CANCELABLE_EFFECTIVE_STATUSES,
     FAILED_OR_CANCELLED,
     HISTORY_STATUSES,
+    MAX_AUTO_RETRIES,
     PARENT_REQUEST_TYPES,
     QUEUE_STATUSES,
     QUEUED_OR_EXPANDING,
@@ -52,6 +59,7 @@ from youtube_manager.jobstate import (
     is_in_progress,
     is_retriable,
     reset_job_for_retry,
+    restart_auto_retry,
     settle_parent,
 )
 from youtube_manager.media import extract_youtube_id
@@ -277,15 +285,6 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-# Naive datetimes are read as UTC, so everything compares in UTC.
-def normalize_datetime(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 # The most recent time anything on this row changed, in UTC: updated_at, else completed_at, else
 # created_at. None only when the row carries none of the three.
 def latest_job_timestamp(job: Download) -> Optional[datetime]:
@@ -467,6 +466,7 @@ def validate_url_type(url: str, expected_type: str) -> Optional[str]:
 # Register the shared job-state helpers and vocabulary as Jinja globals, so templates render
 # exactly the same status/progress/speed values the worker persists, and check membership
 # against the same status lists rather than keeping their own hardcoded copies.
+templates.env.globals['MAX_AUTO_RETRIES'] = MAX_AUTO_RETRIES
 templates.env.globals['compute_effective_status'] = compute_effective_status
 templates.env.globals['compute_parent_progress'] = compute_parent_progress
 templates.env.globals['compute_parent_speed'] = compute_parent_speed
@@ -525,9 +525,14 @@ REQUEUEABLE_STATUSES = FAILED_OR_CANCELLED | {'deleted', SKIPPED_STATUS}
 # both reset the same fields and both reuse a file already on disk; search_library=False
 # finds that file by a stat of its recorded name alone, walking no tree.
 def requeue_job(job: Download, statuses=FAILED_OR_CANCELLED, search_library: bool = True) -> bool:
-    changed = apply_status_update_to_hierarchy(
-        job, lambda target: reset_job_for_retry(target, statuses, search_library)
-    )
+    # Reset one row and, when it was reset, give it its automatic-retry count back.
+    def reset(target) -> bool:
+        if not reset_job_for_retry(target, statuses, search_library):
+            return False
+        restart_auto_retry(target)
+        return True
+
+    changed = apply_status_update_to_hierarchy(job, reset)
     if changed and job.parent_id is None and job.children:
         # Parent shows queued too, so the UI reflects the retry. A cancel still pending on it
         # would settle the rerun hierarchy as cancelled (jobstate.settle_parent), so it goes.
@@ -1167,6 +1172,9 @@ def reset_for_redownload(db, target: Download, status: Optional[str] = None) -> 
                 'speed': None,
                 'cancel_requested': False,
                 'status': new_status,
+                # A person asked for it again, so the worker's retry schedule starts over.
+                'auto_retry_attempts': 0,
+                'next_auto_retry_at': None,
             },
             synchronize_session=False,
         )
@@ -1432,18 +1440,11 @@ def bulk_delete(job_ids: list[int] = Form(default=[]), return_to: str = Form('/h
 # `since` it reports no change, so a first poll only picks the baseline up.
 @app.get('/api/queue')
 def api_queue(since: Optional[str] = None):
-    # Three aggregates in one round trip, rather than loading and filtering the queue itself
-    # on every poll from every open tab.
+    # One value, read from the updated_at index on every poll from every open tab. Every row has
+    # an updated_at since schema version 2, and every write moves it, through the column's
+    # onupdate.
     with Session() as db:
-        timestamps = db.query(
-            func.max(Download.updated_at),
-            func.max(Download.completed_at),
-            func.max(Download.created_at),
-        ).one()
-
-    # Reduced in Python, not in SQL: SQLite's max() over several columns yields NULL the moment any
-    # one of them is NULL, and completed_at is NULL for everything still running.
-    latest_update = normalize_datetime(max((t for t in timestamps if t is not None), default=None))
+        latest_update = normalize_datetime(db.query(func.max(Download.updated_at)).scalar())
     since_dt = parse_iso_datetime(since)
     changed = bool(since_dt and latest_update and latest_update > since_dt)
 

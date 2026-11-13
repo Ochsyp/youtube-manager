@@ -15,7 +15,7 @@ describes.
   older database to `data/backups/youtube-pre-v<new version>-from-v<old version>-<UTC time>.db`,
   then migrates it one step at a time, each step and its version in one transaction, so a step
   that fails changes nothing. The log names the copy and each table's row count before and after.
-  The first start of this release records the existing schema as version 1, after such a copy:
+  The first start of this release brings the existing schema up to date, after such a copy:
   it needs free space for a full copy of the database, and if the copy cannot be written the web
   UI does not start and logs an ERROR. Of the copies before one migration the newest 3 are kept,
   and copies from earlier upgrades stay until deleted by hand. Earlier releases ignore the
@@ -25,6 +25,12 @@ describes.
   (HH:MM in UTC, 00:30 by default), and keeps the newest 7. A worker that starts with no snapshot
   since the previous day's time writes one at once. README, Backups and restore, says how to
   restore one and how to rehearse an upgrade on a copy. (phase 10)
+- Each failed video keeps its automatic-retry count and the time of its next retry in the
+  database, so the waits, which double from 5 minutes up to 6 hours, survive a worker restart.
+  After 8 retries, about 17 hours, the worker gives up on the video: its error says so, one ERROR
+  line names it, and its leftover files in staging are removed. Retry, Retry All, adding the URL
+  again and Fetch Metadata give a video its 8 retries back, and so does finishing without
+  failing. The job page shows "auto-retry n/8" under a video's status. (phase 11)
 
 ### Changed
 
@@ -43,6 +49,10 @@ describes.
 - The worker waits up to 300 seconds instead of 60 for the web UI to create or migrate the schema.
   Both run on a newer schema that only adds to their own, with a warning, and stop with an error
   on one from a later major release. (phase 10)
+- Schema version 2 adds each download's retry count and next retry time, and an index on its
+  last-change time. It fills that time on old rows that lack it, from when they finished or were
+  created, else 1 January 1970. The previous release runs on it. The dashboard's change check now
+  reads that one indexed value instead of three. (phase 11)
 
 ## [1.0.3] - 2026-11-12
 

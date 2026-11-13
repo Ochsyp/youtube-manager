@@ -38,11 +38,13 @@ from youtube_manager.database import (
     Subscription,
     backup_database,
     backup_taken_within,
+    normalize_datetime,
     utcnow,
     wait_for_schema,
 )
 from youtube_manager.jobstate import (
     ACTIVE_STATUS_SET,
+    MAX_AUTO_RETRIES,
     PARENT_REQUEST_TYPES,
     RESET_PROGRESS_ON_STATUSES,
     RESTART_RECOVERY_STATUSES,
@@ -53,6 +55,7 @@ from youtube_manager.jobstate import (
     compute_parent_progress,
     compute_parent_speed,
     is_in_progress,
+    is_parent_request,
     reset_job_for_retry,
     resolve_parent_status,
     settle_parent,
@@ -1846,20 +1849,34 @@ def create_download_jobs_for_subscription(
 #        PERIODIC TASKS: RETRY AND SUBSCRIPTIONS
 # =======================================================
 
-# Attempt count and earliest next retry per top-level job. In memory, so a restart retries at
-# once -- which is what a restart should do.
-_retry_backoff: dict[int, tuple[int, float]] = {}
+# The wait after a video's retry number `attempts` + 1: 5 minutes, doubling each time, at most
+# RETRY_BACKOFF_MAX_SECONDS.
+def auto_retry_delay(attempts: int) -> timedelta:
+    return timedelta(seconds=min(RETRY_INTERVAL_SECONDS * 2 ** attempts, RETRY_BACKOFF_MAX_SECONDS))
 
 
-# Automatically retry every failed top-level job. Genuine failures only, never an explicit user
-# cancel, unlike the manual Retry button: a hierarchy whose top row is cancelled or has a cancel
-# pending is skipped whole, and so is a child with a cancel pending. Each retry of the same job
-# waits twice as long as the last, or a permanently dead video costs a YouTube request every five
-# minutes forever.
+# Automatically retry failed videos. Genuine failures only, never an explicit user cancel, unlike
+# the manual Retry button: a hierarchy whose top row is cancelled or has a cancel pending is
+# skipped whole, and so is a video with a cancel pending. Each video keeps its own count and next
+# retry time on its row, so a restart keeps the schedule: each wait doubles, and after
+# MAX_AUTO_RETRIES the video is given up on with an error that says so, one ERROR line for the
+# pass, and its staging leftovers removed. A video that stopped without failing gets its count
+# back. Rows are written only when they change, since every write moves updated_at and refreshes
+# open dashboards.
 def retry_failed_jobs() -> None:
-    now = time.monotonic()
+    now = utcnow()
+    given_up: list[Download] = []
 
     with Session() as db:
+        # A video that stopped without failing gets its full count back; one queued or running
+        # for its retry keeps it.
+        for stopped in db.query(Download).filter(
+            Download.status.in_(('completed', 'cancelled', 'deleted', SKIPPED_STATUS)),
+            or_(Download.auto_retry_attempts != 0, Download.next_auto_retry_at.isnot(None)),
+        ):
+            stopped.auto_retry_attempts = 0
+            stopped.next_auto_retry_at = None
+
         # A parent qualifies on its own stored 'failed' status or on any child's, since the
         # parent's stored status may not have caught up yet -- see resolve_parent_status. A
         # cancelled one does not: its children's failures are no reason to restart what the user
@@ -1883,46 +1900,67 @@ def retry_failed_jobs() -> None:
             .all()
         )
 
-        # A job that is no longer failing starts from the shortest delay again.
-        candidate_ids = {job.id for job in candidates}
-        for job_id in list(_retry_backoff):
-            if job_id not in candidate_ids:
-                del _retry_backoff[job_id]
+        deferred = 0
+
+        # One row of a hierarchy, as apply_status_update_to_hierarchy hands it over; returns
+        # whether it was reset. A playlist or channel row is reset as before, once one of its
+        # videos was. A video is reset when its next time has come, with its count raised and
+        # its next time set, and given up on once it has had MAX_AUTO_RETRIES and the last wait
+        # has passed. Only 'failed' is passed, never 'cancelled': an explicit cancel must not be
+        # undone by an automatic retry, nor one still pending on a video that failed before the
+        # worker acted on it.
+        def retry_one(target: Download) -> bool:
+            nonlocal deferred
+            if target.cancel_requested:
+                return False
+            if is_parent_request(target):
+                return reset_job_for_retry(target, frozenset({'failed'}))
+            if target.status != 'failed':
+                return False
+            due = normalize_datetime(target.next_auto_retry_at)
+            # A next time beyond the longest wait can only come from a clock that was wrong.
+            if due is not None and now < due <= now + auto_retry_delay(MAX_AUTO_RETRIES):
+                deferred += 1
+                return False
+            attempts = target.auto_retry_attempts or 0
+            if attempts >= MAX_AUTO_RETRIES:
+                # A cleared next time marks a video already given up on.
+                if due is not None:
+                    target.error = (
+                        f'Gave up after {MAX_AUTO_RETRIES} automatic retries: '
+                        f'{target.error or "no error recorded"}'
+                    )
+                    target.next_auto_retry_at = None
+                    given_up.append(target)
+                return False
+            if not reset_job_for_retry(target, frozenset({'failed'})):
+                return False
+            target.auto_retry_attempts = attempts + 1
+            target.next_auto_retry_at = now + auto_retry_delay(attempts)
+            return True
 
         retried = 0
-        deferred = 0
         for job in candidates:
-            # A job still inside its backoff window is counted and skipped, not reset.
-            attempts, retry_after = _retry_backoff.get(job.id, (0, 0.0))
-            if now < retry_after:
-                deferred += 1
-                continue
-
-            # Only 'failed' is passed, never 'cancelled': an explicit cancel must not be undone
-            # by an automatic retry, nor one still pending on a video that failed before the
-            # worker acted on it. A parent shows queued while its children rerun.
-            if apply_status_update_to_hierarchy(
-                job,
-                lambda target: (
-                    not target.cancel_requested
-                    and reset_job_for_retry(target, frozenset({'failed'}))
-                ),
-            ):
-                # A deleted parent stays deleted around a video fetched again under it, as
-                # jobstate.settle_parent keeps it.
+            if apply_status_update_to_hierarchy(job, retry_one):
+                # A parent shows queued while its videos rerun. A deleted parent stays deleted
+                # around a video fetched again under it, as jobstate.settle_parent keeps it.
                 if job.children and job.status != 'deleted':
                     job.status = 'queued'
                 retried += 1
 
-            # The window doubles per attempt whether or not this pass reset anything, so a
-            # permanently dead video backs off to RETRY_BACKOFF_MAX_SECONDS instead of retrying
-            # on every cycle forever.
-            delay = min(RETRY_INTERVAL_SECONDS * 2 ** attempts, RETRY_BACKOFF_MAX_SECONDS)
-            _retry_backoff[job.id] = (attempts + 1, now + delay)
-
         if retried or deferred:
-            log(f'Auto-retried {retried} failed job(s), {deferred} still backing off')
+            log(f'Auto-retried {retried} failed job(s), {deferred} video(s) still waiting')
         db.commit()
+
+    if given_up:
+        ids = ', '.join(str(job.id) for job in given_up[:20])
+        more = f' and {len(given_up) - 20} more' if len(given_up) > 20 else ''
+        log_error(
+            f'Gave up on {len(given_up)} video(s) after {MAX_AUTO_RETRIES} automatic retries: '
+            f'job(s) {ids}{more}'
+        )
+        for job in given_up:
+            remove_cancelled_leftovers(job)
 
 
 # Consecutive failed checks per subscription id, cleared by a successful scan. In memory, so a
@@ -2680,8 +2718,9 @@ def finalize_after_download(job: Download) -> None:
         log_error('Organizer run failed', exc)
 
 
-# Remove what a cancelled download left in staging; see organizer.remove_staging_leftovers().
-# A failure is logged at WARN and swallowed, so it never turns the cancel into a failed job.
+# Remove what a download left in staging when it was cancelled or given up on; see
+# organizer.remove_staging_leftovers(). A failure is logged at WARN and swallowed, so it never
+# turns the cancel into a failed job or stops a give-up.
 def remove_cancelled_leftovers(job: Download) -> None:
     try:
         organizer_remove_staging_leftovers(job)

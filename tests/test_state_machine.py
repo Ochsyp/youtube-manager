@@ -30,12 +30,11 @@ V1, V2, V3, V4, V5, V6 = (f'aaaaaaaaaa{n}' for n in range(1, 7))
 EARLIER = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-# Every test starts with no refused worker writes and no auto-retry backoff on record, so neither
-# leaks between tests. raising=False: a module without the refusal record gains one for the test.
+# Every test starts with no refused worker writes on record, so none leaks between tests.
+# raising=False: a module without the refusal record gains one for the test.
 @pytest.fixture(autouse=True)
 def fresh_worker_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worker, '_refused_write_job_ids', set(), raising=False)
-    monkeypatch.setattr(worker, '_retry_backoff', {})
 
 
 # The playlist the numbered rows below belong to, and its id.
