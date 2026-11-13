@@ -14,8 +14,9 @@ named movies and shows with NFO metadata and artwork.
   challenges solved by deno
 - Files finished downloads as movies or Sonarr/Radarr-style shows with Kodi/Jellyfin
   NFOs, posters and thumbnails, then asks Jellyfin to rescan
-- Automatic retry with exponential backoff, restart recovery, and cancel and stall
-  handling
+- Automatic retry of failed downloads, with waits that double from 5 minutes up to 6
+  hours, survive a restart and stop after 8 retries (about 17 hours); restart recovery,
+  and cancel and stall handling
 
 ## Architecture
 
