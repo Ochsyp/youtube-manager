@@ -7,17 +7,20 @@ describes.
 
 ## [Unreleased]
 
-## [1.1.0] - 2026-11-13
+## [1.1.0] - 2026-11-14
 
-Phases 9 to 11: SQLite connection settings, versioned schema upgrades with daily backups, and
-automatic retries that survive a restart and stop after 8. Before a host upgrades, check that the
-volume holding the database has room for copies of it. The first start copies the database to
-`backups/` beside it (`data/backups` by default) before it migrates the schema to version 2. The
-web UI answers only once the copy and the migration are done, and it does not start if the copy
-fails. Upgrade the web UI and the worker in one step, as `docker compose up -d` does: the 1.1.0
-worker waits up to 300 seconds for that migration and cannot run beside a 1.0.3 web UI. The
-schema change only adds, so 1.0.3 still runs on the upgraded database and going back needs no
-step. yt-dlp and the bgutil plugin are unchanged, so the PO-token provider stays at 2.0.2.
+Phases 9 to 11, a fix to how an upgrade adds columns, and a dependency update: SQLite connection
+settings, versioned schema upgrades with daily backups, and automatic retries that survive a
+restart and stop after 8. Before a host upgrades, check that the volume holding the database has
+room for copies of it. The first start copies the database to `backups/` beside it
+(`data/backups` by default) before it migrates the schema to version 2. The web UI answers only
+once the copy and the migration are done, and it does not start if the copy fails. Upgrade the
+web UI and the worker in one step, as `docker compose up -d` does: the 1.1.0 worker waits up to
+300 seconds for that migration and cannot run beside a 1.0.3 web UI. The schema change only adds,
+so 1.0.3 still runs on the upgraded database and going back needs no step. If a host goes back
+and then forward again, a video that 1.1.0 had given up on and that failed again under 1.0.3
+stays failed, with no new ERROR line, until someone uses Retry. yt-dlp and the bgutil plugin are
+unchanged, so the PO-token provider stays at 2.0.2.
 
 After the upgrade the worker writes a snapshot of the database into the same folder when it
 starts, then each day from `YTM_DB_SNAPSHOT_TIME` (set on the worker, HH:MM in UTC, 00:30 unless
@@ -73,6 +76,9 @@ ERROR line.
   last-change time. It fills that time on old rows that lack it, from when they finished or were
   created, else 1 January 1970. The previous release runs on it. The dashboard's change check now
   reads that one indexed value instead of three. (phase 11)
+- The image ships click 8.5.1 instead of 8.5.0, pycryptodomex 3.24.2 instead of 3.24.1, pydantic
+  2.14.3 instead of 2.14.2, and pydantic-core 2.50.4 instead of 2.50.2.
+  ([#22](https://github.com/Ochsyp/youtube-manager/pull/22))
 
 ### Fixed
 
