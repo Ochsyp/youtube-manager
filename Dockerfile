@@ -6,7 +6,7 @@
 FROM denoland/deno:bin-2.9.8@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543 AS deno
 
 # The multi-arch index digest. 3.13 is the Python the test suite runs on.
-FROM python:3.13-slim-trixie@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
+FROM python:3.13-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # yt-dlp and deno cache under XDG_CACHE_HOME; /tmp/.cache, which entrypoint.sh
 # creates for PUID/PGID, keeps that off the root-owned /app home.
