@@ -16,19 +16,19 @@ room for copies of it. The first start copies the database to `backups/` beside 
 (`data/backups` by default) before it migrates the schema to version 2. The web UI answers only
 once the copy and the migration are done, and it does not start if the copy fails. Upgrade the
 web UI and the worker in one step, as `docker compose up -d` does: the 1.1.0 worker waits up to
-300 seconds for that migration and cannot run beside a 1.0.3 web UI. The schema change only adds,
-so 1.0.3 still runs on the upgraded database and going back needs no step. If a host goes back
-and then forward again, a video that 1.1.0 had given up on and that failed again under 1.0.3
-stays failed, with no new ERROR line, until someone uses Retry. yt-dlp and the bgutil plugin are
-unchanged, so the PO-token provider stays at 2.0.2.
+300 seconds for that migration, which a 1.0.3 web UI never runs. The schema change only adds, so
+1.0.3 still runs on the upgraded database and going back needs no step. If a host goes back and
+then forward again, a video that 1.1.0 had given up on and that failed again after 1.0.3 queued
+it stays failed, showing auto-retry 8/8, with no new ERROR line, until someone uses Retry. yt-dlp
+and the bgutil plugin are unchanged, so the PO-token provider stays at 2.0.2.
 
-After the upgrade the worker writes a snapshot of the database into the same folder when it
-starts, then each day from `YTM_DB_SNAPSHOT_TIME` (set on the worker, HH:MM in UTC, 00:30 unless
-set), and keeps 7. A week after a clean upgrade the folder holds 8 copies, and 9 while a snapshot
-is written. They sit beside the database, so a host that backs up its volume copies them too and
-can set that time well before its own backup. Videos that were failing under 1.0.3 start their 8
-retries afresh: any still failing about 17 hours after the upgrade are given up and named in an
-ERROR line.
+After the upgrade the worker writes a snapshot of the database into the same folder soon after it
+starts, between two jobs, then each day from `YTM_DB_SNAPSHOT_TIME` (set on the worker, HH:MM in
+UTC, 00:30 unless set), and keeps 7. A week after a clean upgrade the folder holds 8 copies, and 9
+while a snapshot is written. They sit beside the database, so a host that backs up its volume
+copies them too and can set that time well before its own backup. Videos that were failing under
+1.0.3 start their 8 retries afresh: any still failing about 17 hours after the upgrade are given
+up, and an ERROR line counts them and names up to 20 by job id.
 
 ### Added
 
@@ -87,7 +87,8 @@ ERROR line.
   now such a column was always added without NOT NULL, and a database from 1.0.x would have taken
   the new retry count that way. The table's existing rows read the column's default, and adding
   the column rewrites none of them. A column with no default for those rows is still added
-  without NOT NULL, because SQLite refuses that on a table with rows. (phase 11)
+  without NOT NULL, because SQLite refuses that on a table with rows.
+  ([#21](https://github.com/Ochsyp/youtube-manager/pull/21))
 
 ## [1.0.3] - 2026-11-12
 
