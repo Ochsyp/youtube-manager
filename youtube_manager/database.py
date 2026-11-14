@@ -437,6 +437,17 @@ def get_sqlite_column_default(column) -> str:
     return ''
 
 
+# A DEFAULT clause, as get_sqlite_column_default renders it, that gives the column no value: none
+# at all, or NULL however a server_default spells it, such as "null" or "(NULL)". The text 'NULL'
+# in quotes is a value.
+NULL_DEFAULT_CLAUSE = re.compile(r'\s*(?:DEFAULT\s*\(*\s*NULL\s*\)*\s*)?', re.IGNORECASE)
+
+
+# Whether `default_clause` leaves an added column with no value for the rows already there.
+def is_null_default(default_clause: str) -> bool:
+    return NULL_DEFAULT_CLAUSE.fullmatch(default_clause) is not None
+
+
 # Name of the UNIQUE index covering exactly downloads.youtube_id, if one exists. A column-level
 # UNIQUE from an older schema shows up here as an sqlite_autoindex, which cannot be dropped.
 def find_unique_youtube_id_index(conn) -> str | None:
@@ -518,8 +529,14 @@ def ensure_table_columns(conn) -> None:
             # takes the default clause -- which is why a NOT NULL column has to carry one.
             column_type = get_sqlite_column_type(column)
             default_clause = get_sqlite_column_default(column)
+            # NOT NULL where the ORM declares it, so the column comes out as a new file has it.
+            # SQLite refuses that beside a NULL default on a table with rows, so a column whose
+            # type offers no default for its rows is still added without it, as it always was.
+            keeps_not_null = not column.nullable and not is_null_default(default_clause)
+            not_null = ' NOT NULL' if keeps_not_null else ''
             conn.execute(text(
-                f'ALTER TABLE {table_name} ADD COLUMN {column.name} {column_type}{default_clause}'
+                f'ALTER TABLE {table_name} ADD COLUMN {column.name} {column_type}'
+                f'{default_clause}{not_null}'
             ))
 
 

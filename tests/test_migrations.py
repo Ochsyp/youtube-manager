@@ -547,6 +547,119 @@ def test_v2_takes_inserts_without_the_new_columns(empty_db, tmp_path):
         assert stored == [(0, None)], path.name
 
 
+# A file as a 1.0.x release creates it, which is frozen version 1 at user_version 0 since no
+# release before schema versions set one, comes out with exactly the schema a new file gets, NOT
+# NULL included.
+# Migration 1 adds today's columns, so it has to add them as the ORM declares them, or step 2
+# finds them there and never adds its own. The row the file had reads the defaults of the added
+# columns, and the NOT NULL column refuses a NULL.
+def test_unversioned_release_file_upgrades_to_the_current_schema(empty_db, tmp_path):
+    build_frozen_database(empty_db, 1, rows=((1, None, None, '2026-11-01 10:00:00.000000'),))
+    set_stored_version(empty_db, 0)
+
+    database.initialize_database()
+
+    assert stored_version(empty_db) == CURRENT_VERSION
+    fresh = tmp_path / 'fresh.db'
+    connection = open_file(fresh)
+    try:
+        connection.executescript(
+            (SCHEMAS_DIR / f'v{CURRENT_VERSION}.sql').read_text(encoding='utf-8')
+        )
+    finally:
+        connection.close()
+    assert schema_signature(empty_db) == schema_signature(fresh)
+
+    connection = open_file(empty_db)
+    try:
+        assert connection.execute(
+            'SELECT auto_retry_attempts, next_auto_retry_at FROM downloads WHERE id = 1'
+        ).fetchall() == [(0, None)]
+        with pytest.raises(sqlite3.IntegrityError, match='NOT NULL'):
+            connection.execute('UPDATE downloads SET auto_retry_attempts = NULL WHERE id = 1')
+    finally:
+        connection.close()
+
+
+# A table from before versions that lacks a NOT NULL column with no default for its rows, here
+# playlists.title, still migrates. SQLite refuses ADD COLUMN NOT NULL with a NULL default on a
+# table with rows, which is why the playlist row is there, so such a column is added without
+# NOT NULL, as it always was, and the row is kept with no title.
+def test_not_null_column_without_default_still_added_to_a_table_with_rows(empty_db):
+    build_legacy_database(empty_db)
+    connection = open_file(empty_db)
+    try:
+        connection.execute('CREATE TABLE playlists (id INTEGER PRIMARY KEY, youtube_id VARCHAR)')
+        connection.execute("INSERT INTO playlists VALUES (1, 'PL1')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    database.initialize_database()
+
+    assert stored_version(empty_db) == CURRENT_VERSION
+    assert column_names('playlists') == orm_columns('playlists')
+    connection = open_file(empty_db)
+    try:
+        not_null = {row[1]: row[3] for row in connection.execute('PRAGMA table_info(playlists)')}
+        rows = connection.execute('SELECT id, youtube_id, title FROM playlists').fetchall()
+    finally:
+        connection.close()
+    assert not_null['title'] == 0
+    assert rows == [(1, 'PL1', None)]
+
+
+# A table from before versions that lacks NOT NULL columns whose default lives only in the ORM,
+# here subscriptions.enabled and backfill_existing, gets them NOT NULL as a new file has them, and
+# its row reads their defaults. Nothing rebuilds this table, so the added columns' DDL decides.
+def test_not_null_column_with_orm_default_added_not_null_to_a_table_with_rows(empty_db):
+    build_legacy_database(empty_db)
+    connection = open_file(empty_db)
+    try:
+        connection.execute(
+            'CREATE TABLE subscriptions (id INTEGER PRIMARY KEY, url VARCHAR NOT NULL,'
+            ' type VARCHAR NOT NULL)'
+        )
+        connection.execute(
+            "INSERT INTO subscriptions VALUES (1, 'https://www.youtube.com/@first', 'channel')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database.initialize_database()
+
+    assert stored_version(empty_db) == CURRENT_VERSION
+    assert column_names('subscriptions') == orm_columns('subscriptions')
+    connection = open_file(empty_db)
+    try:
+        not_null = {
+            row[1]: row[3] for row in connection.execute('PRAGMA table_info(subscriptions)')
+        }
+        row = connection.execute(
+            'SELECT enabled, backfill_existing FROM subscriptions WHERE id = 1'
+        ).fetchone()
+    finally:
+        connection.close()
+    assert (not_null['enabled'], not_null['backfill_existing']) == (1, 1)
+    assert row == (1, 1)
+
+
+# A default clause that gives the column no value, however NULL is spelled, keeps an added column
+# from NOT NULL; a real value, the text 'NULL' included, does not.
+@pytest.mark.parametrize(('clause', 'expected'), [
+    ('', True),
+    (' DEFAULT NULL', True),
+    (' DEFAULT null', True),
+    (' DEFAULT (NULL)', True),
+    (' DEFAULT 0', False),
+    (" DEFAULT 'NULL'", False),
+    (" DEFAULT ''", False),
+])
+def test_null_default_clause_recognised_however_spelled(clause, expected):
+    assert database.is_null_default(clause) is expected
+
+
 # A second start on a migrated file changes nothing and takes no second copy.
 def test_rerun_is_noop_without_new_backup(empty_db):
     build_legacy_database(empty_db)
