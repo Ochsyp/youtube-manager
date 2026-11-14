@@ -7,6 +7,29 @@ describes.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-14
+
+Phases 9 to 11, a fix to how an upgrade adds columns, and a dependency update: SQLite connection
+settings, versioned schema upgrades with daily backups, and automatic retries that survive a
+restart and stop after 8. Before a host upgrades, check that the volume holding the database has
+room for copies of it. The first start copies the database to `backups/` beside it
+(`data/backups` by default) before it migrates the schema to version 2. The web UI answers only
+once the copy and the migration are done, and it does not start if the copy fails. Upgrade the
+web UI and the worker in one step, as `docker compose up -d` does: the 1.1.0 worker waits up to
+300 seconds for that migration, which a 1.0.3 web UI never runs. The schema change only adds, so
+1.0.3 still runs on the upgraded database and going back needs no step. If a host goes back and
+then forward again, a video that 1.1.0 had given up on and that failed again after 1.0.3 queued
+it stays failed, showing auto-retry 8/8, with no new ERROR line, until someone uses Retry. yt-dlp
+and the bgutil plugin are unchanged, so the PO-token provider stays at 2.0.2.
+
+After the upgrade the worker writes a snapshot of the database into the same folder soon after it
+starts, between two jobs, then each day from `YTM_DB_SNAPSHOT_TIME` (set on the worker, HH:MM in
+UTC, 00:30 unless set), and keeps 7. A week after a clean upgrade the folder holds 8 copies, and 9
+while a snapshot is written. They sit beside the database, so a host that backs up its volume
+copies them too and can set that time well before its own backup. Videos that were failing under
+1.0.3 start their 8 retries afresh: any still failing about 17 hours after the upgrade are given
+up, and an ERROR line counts them and names up to 20 by job id.
+
 ### Added
 
 - The web UI's starting line and the worker's `Components:` line name the version of the SQLite
@@ -53,6 +76,9 @@ describes.
   last-change time. It fills that time on old rows that lack it, from when they finished or were
   created, else 1 January 1970. The previous release runs on it. The dashboard's change check now
   reads that one indexed value instead of three. (phase 11)
+- The image ships click 8.5.1 instead of 8.5.0, pycryptodomex 3.24.2 instead of 3.24.1, pydantic
+  2.14.3 instead of 2.14.2, and pydantic-core 2.50.4 instead of 2.50.2.
+  ([#22](https://github.com/Ochsyp/youtube-manager/pull/22))
 
 ### Fixed
 
@@ -61,7 +87,8 @@ describes.
   now such a column was always added without NOT NULL, and a database from 1.0.x would have taken
   the new retry count that way. The table's existing rows read the column's default, and adding
   the column rewrites none of them. A column with no default for those rows is still added
-  without NOT NULL, because SQLite refuses that on a table with rows. (phase 11)
+  without NOT NULL, because SQLite refuses that on a table with rows.
+  ([#21](https://github.com/Ochsyp/youtube-manager/pull/21))
 
 ## [1.0.3] - 2026-11-12
 
@@ -330,7 +357,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.0...v1.0.1
