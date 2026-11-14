@@ -54,6 +54,15 @@ describes.
   created, else 1 January 1970. The previous release runs on it. The dashboard's change check now
   reads that one indexed value instead of three. (phase 11)
 
+### Fixed
+
+- A column that an upgrade adds to an existing table now gets NOT NULL where the schema declares
+  it and the column has a default, so a database from 1.0.x comes out as a new one does. Until
+  now such a column was always added without NOT NULL, and a database from 1.0.x would have taken
+  the new retry count that way. The table's existing rows read the column's default, and adding
+  the column rewrites none of them. A column with no default for those rows is still added
+  without NOT NULL, because SQLite refuses that on a table with rows. (phase 11)
+
 ## [1.0.3] - 2026-11-12
 
 Phase 8, the job state machine, and a dependency update. The web app and the worker now settle a
