@@ -10,7 +10,7 @@ import re
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import (
@@ -29,6 +29,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.exc import ArgumentError
+from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 # =======================================================
@@ -325,7 +326,7 @@ Index('idx_download_updated_at', Download.updated_at)
 # index or a table, and fill in values that release reads the same way. Anything else -- a
 # dropped, renamed or retyped column, a NOT NULL column without a DDL default, a UNIQUE or CHECK
 # constraint -- takes the next hundred and ships in a major release (CONTRIBUTING, Schema changes).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Copies kept of the database at one version before one migration, tagged
 # pre-v<new version>-from-v<old version>. A start that keeps failing takes one each time, and since
@@ -400,28 +401,45 @@ def get_sqlite_column_type(column) -> str:
         return 'TEXT'
 
 
-# Render a column's default as a SQLite DEFAULT clause for ALTER TABLE ADD COLUMN.
+# A Python value as a SQLite literal: text in quotes with its quotes doubled, a bool as 0 or 1, a
+# date-time or date as SQLAlchemy stores it in SQLite, so the row reads it back, and a number as is.
+def sqlite_literal(value) -> str:
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, datetime):
+        value = value.strftime('%Y-%m-%d %H:%M:%S.%f')
+    elif isinstance(value, date):
+        value = value.strftime('%Y-%m-%d')
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    return str(value)
+
+
+# Render a column's default as a SQLite DEFAULT clause for ALTER TABLE ADD COLUMN. A DDL default
+# written as SQL text is used as written. A DDL default that is a SQL expression, such as
+# func.now(), raises ValueError: ADD COLUMN takes only a constant, so that column needs a step
+# written by hand.
 def get_sqlite_column_default(column) -> str:
     server_default = getattr(column, 'server_default', None)
     if server_default is not None and getattr(server_default, 'arg', None) is not None:
         default_value = server_default.arg
         if isinstance(default_value, str):
-            return f" DEFAULT '{default_value}'"
-        return f' DEFAULT {default_value}'
+            return f' DEFAULT {sqlite_literal(default_value)}'
+        if isinstance(default_value, TextClause):
+            return f' DEFAULT {default_value.text}'
+        raise ValueError(
+            f'{column.table.name}.{column.name}: ALTER TABLE ADD COLUMN cannot take the SQL '
+            f'expression default {default_value}; add this column in a step written by hand'
+        )
 
     default = getattr(column, 'default', None)
     if default is not None:
-        # A callable default (utcnow) has no SQLite equivalent, so the column gets none.
-        if getattr(default, 'is_callable', False):
+        # A callable default (utcnow) has no SQLite equivalent, and a SQL expression never reaches
+        # the DDL, as create_all leaves it out too, so the column gets none.
+        if getattr(default, 'is_callable', False) or getattr(default, 'is_clause_element', False):
             default = None
         elif getattr(default, 'arg', None) is not None:
-            default_value = default.arg
-
-            if isinstance(default_value, str):
-                return f" DEFAULT '{default_value}'"
-            if isinstance(default_value, bool):
-                return f' DEFAULT {int(default_value)}'
-            return f' DEFAULT {default_value}'
+            return f' DEFAULT {sqlite_literal(default.arg)}'
 
     # SQLite rejects ADD COLUMN NOT NULL without a default, so synthesize one from the type.
     if not column.nullable:
@@ -574,10 +592,30 @@ def migrate_to_2(conn) -> None:
     ))
 
 
+# The downloads indexes migration 3 makes sure of, as (name, columns), exactly as the ORM declares
+# them. Written out, like step 2's DDL, so later model changes cannot alter the step.
+STEP_3_INDEXES = (
+    ('idx_download_status', 'status'),
+    ('idx_download_parent', 'parent_id'),
+    ('idx_download_youtube_id', 'youtube_id'),
+    ('idx_download_parent_status', 'parent_id, status'),
+)
+
+
+# Migration 3: the four downloads indexes, through `conn`, where the file lacks them. A database
+# from before versions whose youtube_id was never UNIQUE keeps its table through step 1, which
+# adds columns but no indexes, so it can reach version 2 without them. Only adds indexes, so the
+# release before it runs on the result.
+def migrate_to_3(conn) -> None:
+    for name, columns in STEP_3_INDEXES:
+        conn.execute(text(f'CREATE INDEX IF NOT EXISTS {name} ON downloads ({columns})'))
+
+
 # The step that brings a database to each schema version, keyed by that version.
 MIGRATIONS = {
     1: migrate_to_1,
     2: migrate_to_2,
+    3: migrate_to_3,
 }
 
 

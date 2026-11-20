@@ -10,11 +10,13 @@ import ast
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import (
+    Column, Date, DateTime, Integer, MetaData, String, Table, create_engine, event, func, text,
+)
 
 from youtube_manager import database, worker
 
@@ -1120,3 +1122,273 @@ def test_snapshot_time_setting(monkeypatch, caplog, value, minutes, error):
     assert worker.snapshot_minute_of_day() == minutes
     errors = [m for m in messages_at(caplog, logging.ERROR) if 'YTM_DB_SNAPSHOT_TIME' in m]
     assert bool(errors) == error
+
+
+# =======================================================
+#            SCHEMA 3 AND COLUMN DEFAULTS
+# =======================================================
+
+# The downloads indexes step 3 makes sure of, by name.
+STEP_3_INDEX_NAMES = (
+    'idx_download_status', 'idx_download_parent', 'idx_download_youtube_id',
+    'idx_download_parent_status',
+)
+
+
+# Drop the step 3 indexes from the file at `path`, as a database from before 1.0 can lack them.
+def drop_step_3_indexes(path: Path) -> None:
+    connection = open_file(path)
+    try:
+        for name in STEP_3_INDEX_NAMES:
+            connection.execute(f'DROP INDEX {name}')
+        connection.commit()
+    finally:
+        connection.close()
+
+
+# A new file at the frozen schema of `version`, at `path`, for schema_signature to read.
+def frozen_file(path: Path, version: int) -> Path:
+    connection = open_file(path)
+    try:
+        connection.executescript((SCHEMAS_DIR / f'v{version}.sql').read_text(encoding='utf-8'))
+    finally:
+        connection.close()
+    return path
+
+
+# Step 3's indexes carry exactly the names and columns the ORM declares on downloads; the fifth,
+# on updated_at, is step 2's.
+def test_step_3_indexes_are_the_orm_indexes():
+    declared = {
+        index.name: tuple(column.name for column in index.columns)
+        for index in database.Base.metadata.tables['downloads'].indexes
+    }
+    del declared['idx_download_updated_at']
+    step = {name: tuple(columns.split(', ')) for name, columns in database.STEP_3_INDEXES}
+    assert step == declared
+
+
+# A version 2 file without the four indexes, as one upgraded from before 1.0 can be, gets them from
+# step 3 and ends with exactly the frozen version 3 schema.
+def test_migration_3_brings_a_v2_file_to_the_frozen_v3_schema(empty_db, tmp_path):
+    build_frozen_database(empty_db, 2, rows=((1, None, None, '2026-11-01 10:00:00.000000'),))
+    drop_step_3_indexes(empty_db)
+
+    database.initialize_database()
+
+    assert stored_version(empty_db) == 3
+    assert schema_signature(empty_db) == schema_signature(frozen_file(tmp_path / 'v3.db', 3))
+
+
+# A file as a 1.0.x release made it, but without the four indexes, the gap a database from before
+# 1.0 without the unique youtube_id index fell into, ends with exactly the frozen version 3 schema.
+def test_unversioned_file_without_indexes_upgrades_to_the_frozen_v3_schema(empty_db, tmp_path):
+    build_frozen_database(empty_db, 1, rows=((1, None, None, '2026-11-01 10:00:00.000000'),))
+    drop_step_3_indexes(empty_db)
+    set_stored_version(empty_db, 0)
+
+    database.initialize_database()
+
+    assert stored_version(empty_db) == 3
+    assert schema_signature(empty_db) == schema_signature(frozen_file(tmp_path / 'v3.db', 3))
+
+
+# A schema from before versions whose downloads.youtube_id was never UNIQUE, so step 1 does not
+# rebuild the table, ends with exactly the downloads indexes of the frozen version 3 schema. Its
+# columns keep the legacy table's declarations, so only the indexes are compared.
+def test_legacy_file_without_unique_youtube_id_gets_every_downloads_index(empty_db, tmp_path):
+    connection = open_file(empty_db)
+    try:
+        connection.execute(LEGACY_SCHEMA[0])
+        connection.execute(LEGACY_SCHEMA[1].replace('youtube_id VARCHAR UNIQUE', 'youtube_id VARCHAR'))
+        connection.executemany(
+            'INSERT INTO downloads VALUES (?, ?, ?, ?, ?, ?, ?)', LEGACY_DOWNLOADS,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database.initialize_database()
+
+    frozen = schema_signature(frozen_file(tmp_path / 'v3.db', 3))
+    assert schema_signature(empty_db)['downloads'][1] == frozen['downloads'][1]
+    with database.engine.connect() as conn:
+        assert conn.execute(text('SELECT COUNT(*) FROM downloads')).scalar() == len(LEGACY_DOWNLOADS)
+
+
+# Step 3 run again, on a migrated file and on a new one, changes nothing.
+def test_migration_3_is_idempotent(db):
+    with database.engine.connect() as conn:
+        before = conn.execute(text('SELECT type, name, sql FROM sqlite_master ORDER BY name')).all()
+    with database._autocommit_connection() as conn:
+        with database._immediate_transaction(conn):
+            database.migrate_to_3(conn)
+    with database.engine.connect() as conn:
+        after = conn.execute(text('SELECT type, name, sql FROM sqlite_master ORDER BY name')).all()
+    assert after == before
+
+
+# A step 3 that fails halfway, after it has built two indexes, leaves the file at version 2 with
+# none of them, and the copy in backups/ is the file as it was before the upgrade.
+def test_failed_migration_3_leaves_v2_untouched_and_its_backup(empty_db, monkeypatch):
+    build_frozen_database(empty_db, 2, rows=((1, None, None, '2026-11-01 10:00:00.000000'),))
+    drop_step_3_indexes(empty_db)
+    before = schema_signature(empty_db)
+    connection = open_file(empty_db)
+    try:
+        rows_before = connection.execute('SELECT * FROM downloads ORDER BY id').fetchall()
+    finally:
+        connection.close()
+    monkeypatch.setattr(database, 'STEP_3_INDEXES', (
+        *database.STEP_3_INDEXES[:2], ('idx_download_broken', 'no_such_column'),
+    ))
+
+    with pytest.raises(Exception, match='no_such_column'):
+        database.initialize_database()
+
+    assert stored_version(empty_db) == 2
+    assert schema_signature(empty_db) == before
+    assert index_names('downloads') == {'idx_download_updated_at'}
+    [backup] = copies('pre-v3-from-v2')
+    assert stored_version(backup) == 2
+    assert schema_signature(backup) == before
+    connection = open_file(backup)
+    try:
+        assert connection.execute('SELECT * FROM downloads ORDER BY id').fetchall() == rows_before
+    finally:
+        connection.close()
+
+
+# What get_sqlite_column_default yielded for every ORM column before it learnt quotes, dates and
+# SQL expressions, which step 1, already released, writes into ALTER TABLE.
+RELEASED_COLUMN_DEFAULTS = {
+    ('channels', 'id'): ' DEFAULT 0',
+    ('channels', 'youtube_id'): '',
+    ('channels', 'name'): ' DEFAULT NULL',
+    ('channels', 'url'): ' DEFAULT NULL',
+    ('channels', 'description'): '',
+    ('channels', 'thumbnail'): '',
+    ('channels', 'folder_name'): '',
+    ('channels', 'created_at'): '',
+    ('playlists', 'id'): ' DEFAULT 0',
+    ('playlists', 'youtube_id'): '',
+    ('playlists', 'channel_id'): '',
+    ('playlists', 'title'): ' DEFAULT NULL',
+    ('playlists', 'description'): '',
+    ('playlists', 'thumbnail'): '',
+    ('playlists', 'folder_name'): '',
+    ('playlists', 'created_at'): '',
+    ('subscriptions', 'id'): ' DEFAULT 0',
+    ('subscriptions', 'type'): ' DEFAULT NULL',
+    ('subscriptions', 'url'): ' DEFAULT NULL',
+    ('subscriptions', 'youtube_id'): '',
+    ('subscriptions', 'channel_id'): '',
+    ('subscriptions', 'playlist_id'): '',
+    ('subscriptions', 'enabled'): ' DEFAULT 1',
+    ('subscriptions', 'backfill_existing'): ' DEFAULT 1',
+    ('subscriptions', 'last_checked'): '',
+    ('subscriptions', 'created_at'): '',
+    ('downloads', 'id'): ' DEFAULT 0',
+    ('downloads', 'url'): ' DEFAULT NULL',
+    ('downloads', 'request_type'): " DEFAULT 'video'",
+    ('downloads', 'youtube_id'): '',
+    ('downloads', 'parent_id'): '',
+    ('downloads', 'playlist_id'): '',
+    ('downloads', 'channel_id'): '',
+    ('downloads', 'group_by_channel'): ' DEFAULT 0',
+    ('downloads', 'title'): '',
+    ('downloads', 'filename'): '',
+    ('downloads', 'metadata_file'): '',
+    ('downloads', 'thumbnail'): '',
+    ('downloads', 'description'): '',
+    ('downloads', 'upload_date'): '',
+    ('downloads', 'playlist_index'): '',
+    ('downloads', 'duration'): '',
+    ('downloads', 'view_count'): '',
+    ('downloads', 'like_count'): '',
+    ('downloads', 'tags'): '',
+    ('downloads', 'categories'): '',
+    ('downloads', 'metadata_json'): '',
+    ('downloads', 'progress'): '',
+    ('downloads', 'speed'): '',
+    ('downloads', 'organized_at'): '',
+    ('downloads', 'log'): '',
+    ('downloads', 'status'): " DEFAULT 'queued'",
+    ('downloads', 'cancel_requested'): ' DEFAULT 0',
+    ('downloads', 'error'): '',
+    ('downloads', 'created_at'): '',
+    ('downloads', 'updated_at'): '',
+    ('downloads', 'completed_at'): '',
+    ('downloads', 'auto_retry_attempts'): ' DEFAULT 0',
+    ('downloads', 'next_auto_retry_at'): '',
+}
+
+
+# Step 1 writes the same default for every column the ORM has today as it did when it was
+# released, so the change to get_sqlite_column_default alters no released upgrade.
+def test_released_column_defaults_unchanged():
+    current = {
+        (table_name, column.name): database.get_sqlite_column_default(column)
+        for table_name, table in database.Base.metadata.tables.items()
+        for column in table.columns
+    }
+    assert current == RELEASED_COLUMN_DEFAULTS
+
+
+# Add `column` to a one-row table in memory as ensure_table_columns adds it, NOT NULL where the
+# column declares it and its default allows, and return the value the row then reads.
+def added_value(column):
+    clause = database.get_sqlite_column_default(column)
+    not_null = '' if column.nullable or database.is_null_default(clause) else ' NOT NULL'
+    connection = sqlite3.connect(':memory:')
+    try:
+        connection.execute('CREATE TABLE extra (id INTEGER PRIMARY KEY)')
+        connection.execute('INSERT INTO extra (id) VALUES (1)')
+        connection.execute(
+            f'ALTER TABLE extra ADD COLUMN {column.name} '
+            f'{database.get_sqlite_column_type(column)}{clause}{not_null}'
+        )
+        return connection.execute(f'SELECT {column.name} FROM extra').fetchone()[0]
+    finally:
+        connection.close()
+
+
+# `column` in a throwaway table named extra, so it has a table name to report.
+def in_table(column):
+    Table('extra', MetaData(), Column('id', Integer, primary_key=True), column)
+    return column
+
+
+# A text default with a quote in it, as a Python-side or a DDL default, reaches the row whole.
+def test_quoted_text_default_is_escaped():
+    assert added_value(in_table(Column('note', String, nullable=False, default="it's"))) == "it's"
+    assert added_value(in_table(Column('memo', String, server_default="it's"))) == "it's"
+
+
+# A date-time or date default reaches the row as SQLAlchemy stores such values in SQLite.
+def test_date_and_datetime_defaults_are_written_as_sqlite_stores_them():
+    at = in_table(Column('at', DateTime, nullable=False, default=datetime(2026, 1, 2, 3, 4, 5)))
+    on = in_table(Column('on_day', Date, nullable=False, default=date(2026, 1, 2)))
+    assert added_value(at) == '2026-01-02 03:04:05.000000'
+    assert added_value(on) == '2026-01-02'
+
+
+# A DDL default written as SQL text is used exactly as written.
+def test_text_server_default_is_used_as_written():
+    column = in_table(Column('flag', Integer, server_default=text('7')))
+    assert database.get_sqlite_column_default(column) == ' DEFAULT 7'
+    assert added_value(column) == 7
+
+
+# A SQL function as the DDL default is refused with an error that names the column: SQLite's
+# ADD COLUMN takes no default that is not constant, so such a step has to be written by hand.
+def test_sql_function_server_default_is_refused():
+    column = in_table(Column('stamped', DateTime, server_default=func.now()))
+    with pytest.raises(ValueError, match='extra.stamped'):
+        database.get_sqlite_column_default(column)
+
+
+# A Python-side SQL expression default never reaches the DDL, as create_all leaves it out too.
+def test_python_side_sql_expression_default_gives_no_ddl_default():
+    column = in_table(Column('stamped', DateTime, default=func.now()))
+    assert database.get_sqlite_column_default(column) == ''

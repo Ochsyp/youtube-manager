@@ -25,6 +25,15 @@ describes.
   as deno, instead of leaving them running. (phase 13)
 - Filing and the parent backfills touch the worker's heartbeat for each item, so a long filing
   run no longer marks the worker unhealthy. (phase 13)
+- Schema version 3 gives every database the four indexes on downloads that the app's queries
+  use. A database from before 1.0 whose youtube_id was never unique could reach version 2
+  without them. The step only adds indexes, so 1.1.0 still runs on the upgraded database, with a
+  warning in its log. Like every upgrade, the first start copies the database to `backups/`
+  (`youtube-pre-v3-from-v2-<UTC time>.db`) before it migrates, so it needs free space for one
+  copy. (phase 13)
+- The upgrade code writes a column default that holds a quote, a date or a date-time correctly,
+  and stops with an error naming the column for a SQL-function default, which SQLite cannot add
+  to an existing table. No column of this release has such a default. (phase 13)
 
 ## [1.1.0] - 2026-11-14
 
