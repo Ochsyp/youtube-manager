@@ -13,8 +13,9 @@ describes.
   few seconds. A metadata lookup or channel scan ends yt-dlp together with every process it
   started, and the subscription check, the parent backfills and filing stop between two items,
   never inside a copy. A download cut short goes back in the queue, and a refresh or an
-  expansion keeps its status, so the next start does the same work again. A yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15, which keeps the whole stop
-  inside Docker's default 10 seconds. (phase 13)
+  expansion keeps its status, so the next start does the same work again. A yt-dlp that ignores
+  SIGTERM is killed 5 seconds later instead of 15, which keeps the whole stop inside Docker's
+  default 10 seconds. (phase 13)
 
 ### Fixed
 
