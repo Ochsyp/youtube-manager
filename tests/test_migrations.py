@@ -822,14 +822,14 @@ def test_worker_waits_for_user_version(db, monkeypatch):
 
 
 # The worker gives the app five minutes, which a backup and a migration on a slow disk can take:
-# SCHEMA_WAIT_SECONDS is 300, and the worker's entry point passes it to wait_for_schema.
+# SCHEMA_WAIT_SECONDS is 300, and the worker's entry point, main(), passes it to wait_for_schema.
 def test_worker_schema_wait_is_300_seconds():
     assert worker.SCHEMA_WAIT_SECONDS == 300
 
     tree = ast.parse((REPO_ROOT / 'youtube_manager' / 'worker.py').read_text(encoding='utf-8'))
     main_blocks = [
         node for node in tree.body
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
+        if isinstance(node, ast.FunctionDef) and node.name == 'main'
     ]
     calls = [
         node for block in main_blocks for node in ast.walk(block)

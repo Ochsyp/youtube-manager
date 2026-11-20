@@ -157,8 +157,10 @@ COMMAND_TIMEOUT_SECONDS = 120
 # ARM host.
 DOWNLOAD_STALL_TIMEOUT_SECONDS = 1800
 
-# Longest wait for a signalled process group to actually die before escalating to SIGKILL.
-PROCESS_KILL_TIMEOUT_SECONDS = 15
+# Longest wait for a signalled process group to die, after SIGTERM and again after SIGKILL. yt-dlp
+# and ffmpeg exit within a second of SIGTERM; 5 s keeps the worst case, SIGTERM then SIGKILL,
+# inside Docker's default 10 s stop, with time left to put the job back in the queue.
+PROCESS_KILL_TIMEOUT_SECONDS = 5
 
 # yt-dlp emits progress dozens of lines per second. Persisting each one costs two SQLite
 # transactions on a database the web app shares, so progress is written at most this often.
@@ -174,6 +176,13 @@ MAX_STORED_LOG_CHARS = 256 * 1024
 # Set by SIGTERM/SIGINT so the loop and any running download stop at the next check instead of
 # being killed mid-write by the SIGKILL that follows `docker stop`.
 _shutdown = threading.Event()
+
+
+# Raised by checkpoint() once a stop is asked for, to end whatever the worker is doing between two
+# steps. A BaseException, so the `except Exception` guards around jobs, subscriptions and periodic
+# tasks pass it on to the main loop instead of recording it as a failure.
+class ShutdownRequested(BaseException):
+    pass
 
 # Liveness marker for the container healthcheck: this process serves nothing over HTTP, so it
 # proves itself by touching a file. /tmp is a tmpfs in compose.example.yaml, so this stays off
@@ -196,6 +205,15 @@ def touch_heartbeat() -> None:
         HEARTBEAT_PATH.touch()
     except OSError as exc:
         warn(f'Could not update the heartbeat marker: {exc}')
+
+
+# Called between the steps of every long pass: touches the heartbeat, and raises
+# ShutdownRequested once a stop is asked for. Never call it between finishing work and recording
+# it, or a stop would throw the finished work away.
+def checkpoint() -> None:
+    touch_heartbeat()
+    if _shutdown.is_set():
+        raise ShutdownRequested()
 
 
 # Log a message at INFO level, which is what the worker's stdout handler writes to the
@@ -569,26 +587,49 @@ def relay_ytdlp_warnings(stderr: Optional[str]) -> str:
     return '\n'.join(remainder)
 
 
-# Run a yt-dlp command to completion, throttled and blocking; raises on a non-zero exit or timeout.
-# encoding='utf-8' is explicit because text=True's locale default mangles non-ASCII titles into
-# mojibake on a container with no UTF-8 locale, so the stored filename stops matching the file
-# on disk. The timeout is what keeps a stalled call from freezing the whole worker loop.
+# Run a yt-dlp command to completion, throttled and blocking; raises CalledProcessError on a
+# non-zero exit, TimeoutExpired after `timeout` seconds and ShutdownRequested within about a second
+# of a stop. yt-dlp runs in its own session, so a timeout or a stop ends it together with the deno
+# or ffmpeg it started. encoding='utf-8' is explicit because text=True's locale default mangles
+# non-ASCII titles into mojibake on a container with no UTF-8 locale, so the stored filename stops
+# matching the file on disk.
 def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
     throttle_youtube_requests()
-    result = subprocess.run(
+    process = subprocess.Popen(
         command,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding='utf-8',
         errors='replace',
-        check=True,
-        timeout=timeout,
+        start_new_session=True,
     )
+    deadline = time.monotonic() + timeout
+    try:
+        # Waits in one-second slices to notice a stop; communicate() keeps the output read so far
+        # across them, so a large JSON answer arrives whole.
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                checkpoint()
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout) from None
+    finally:
+        if process.poll() is None:
+            terminate_process_group(process)
+            for pipe in (process.stdout, process.stderr):
+                if pipe:
+                    pipe.close()
+
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
 
     # A successful call's stderr is otherwise discarded, and with it yt-dlp's warnings, such as a
     # PO-token or JS-solver fallback. yt-dlp repeats a warning per item, so each relays once.
-    relay_ytdlp_warnings(result.stderr)
-    return result
+    relay_ytdlp_warnings(stderr)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 # Stop a download and everything it spawned. yt-dlp runs in its own session and forks ffmpeg,
@@ -1207,8 +1248,40 @@ def is_cancelled(job_id: int) -> bool:
         return bool(job and job.cancel_requested)
 
 
-# Re-home jobs left in RESTART_RECOVERY_STATUSES by an unclean restart. A job with a cancel
-# pending is cancelled instead, and its parent settled in the same commit.
+# Put each of `jobs`, interrupted in one of RESTART_RECOVERY_STATUSES, back where its work can
+# start again, in the caller's session `db`; the caller commits. A job with a cancel pending is
+# cancelled instead, and its parent settled.
+def recover_interrupted_jobs(db, jobs: list[Download]) -> None:
+    cancelled_parent_ids = set()
+    for job in jobs:
+        log(f'Recovering stuck job {job.id} ({job.request_type}) status={job.status}')
+
+        # Whatever the interrupted job reported last is stale by definition.
+        job.progress = None
+        job.speed = None
+
+        if job.cancel_requested:
+            job.status = 'cancelled'
+            job.error = 'Cancelled during restart'
+            if job.parent_id is not None:
+                cancelled_parent_ids.add(job.parent_id)
+        else:
+            job.error = None
+            # Interrupted mid-expansion; 'expanding' keeps the UI showing discovery pending.
+            if job.request_type in PARENT_REQUEST_TYPES and not job.children:
+                job.status = 'expanding'
+            else:
+                job.status = 'queued'
+
+    # A child cancelled here stopped without update_job(), which would otherwise settle its
+    # parent; left alone, a parent with its cancel pending shows 'cancel requested' for good.
+    for parent_id in cancelled_parent_ids:
+        parent = db.get(Download, parent_id)
+        if parent is not None:
+            settle_parent(parent)
+
+
+# Re-home jobs left in RESTART_RECOVERY_STATUSES by an unclean restart (recover_interrupted_jobs).
 def recover_stuck_jobs() -> None:
     with Session() as db:
         stuck_jobs = db.query(Download).filter(Download.status.in_(RESTART_RECOVERY_STATUSES)).all()
@@ -1217,36 +1290,20 @@ def recover_stuck_jobs() -> None:
             log('No stuck jobs to recover')
             return
 
-        cancelled_parent_ids = set()
-        for job in stuck_jobs:
-            log(f'Recovering stuck job {job.id} ({job.request_type}) status={job.status}')
-
-            # Whatever the interrupted job reported last is stale by definition.
-            job.progress = None
-            job.speed = None
-
-            if job.cancel_requested:
-                job.status = 'cancelled'
-                job.error = 'Cancelled during restart'
-                if job.parent_id is not None:
-                    cancelled_parent_ids.add(job.parent_id)
-            else:
-                job.error = None
-                # Interrupted mid-expansion; 'expanding' keeps the UI showing discovery pending.
-                if job.request_type in PARENT_REQUEST_TYPES and not job.children:
-                    job.status = 'expanding'
-                else:
-                    job.status = 'queued'
-
-        # A child cancelled here stopped without update_job(), which would otherwise settle its
-        # parent; left alone, a parent with its cancel pending shows 'cancel requested' for good.
-        for parent_id in cancelled_parent_ids:
-            parent = db.get(Download, parent_id)
-            if parent is not None:
-                settle_parent(parent)
-
+        recover_interrupted_jobs(db, stuck_jobs)
         db.commit()
         log(f'Recovered {len(stuck_jobs)} stuck job(s)')
+
+
+# Put job `job_id`, cut short by a stop, back where the next start would put it. A job still in a
+# status the worker picks up is left as it is.
+def requeue_interrupted_job(job_id: int) -> None:
+    with Session() as db:
+        job = db.get(Download, job_id)
+        if job is None or job.status not in RESTART_RECOVERY_STATUSES:
+            return
+        recover_interrupted_jobs(db, [job])
+        db.commit()
 
 
 
@@ -1269,6 +1326,7 @@ def populate_missing_parent_metadata() -> None:
 
         updated = 0
         for parent in candidates:
+            checkpoint()
             log(f'populate_missing_parent_metadata: discovering metadata for parent {parent.id} ({parent.url})')
 
             # Guarded per parent so one unreachable URL doesn't abandon the rest of the batch;
@@ -2102,8 +2160,8 @@ def check_subscriptions() -> None:
 
         for subscription_id in subscription_ids:
             # Each subscription costs at least one yt-dlp call, so a long list keeps the main loop
-            # -- and its heartbeat -- waiting for minutes at a time.
-            touch_heartbeat()
+            # -- and its heartbeat -- waiting for minutes at a time, and a stop waits for none.
+            checkpoint()
             try:
                 subscription = db.get(Subscription, subscription_id)
                 # Deleted or disabled since the run began.
@@ -2369,6 +2427,7 @@ def backfill_all_playlist_indexes() -> None:
         log(f'backfill_all_playlist_indexes: {len(parents)} playlist(s) missing an index, scanning...')
 
     for parent in parents:
+        checkpoint()
         log(f'backfill_all_playlist_indexes: scanning parent {parent.id} ({parent.url})')
         try:
             video_ids, error = scan_video_ids(parent.url)
@@ -2713,7 +2772,7 @@ def finalize_after_download(job: Download) -> None:
 
     try:
         append_log(job.id, 'Organizer: running scan after completion')
-        organizer_scan_and_process(dry_run=False)
+        organizer_scan_and_process(dry_run=False, tick=organizer_tick)
     except Exception as exc:
         log_error('Organizer run failed', exc)
 
@@ -2849,10 +2908,15 @@ def download_video(job: Download) -> None:
 # =======================================================
 
 # Run one job, keeping the loop alive whatever it does. An unhandled error here ends the
-# process; the container restarts, recovery requeues the job, and it happens again.
+# process; the container restarts, recovery requeues the job, and it happens again. A stop puts
+# the job back in the queue and goes on to the loop as ShutdownRequested.
 def run_job_guarded(job: Download) -> None:
     try:
         process_job(job)
+    except ShutdownRequested:
+        log(f'Job {job.id}: stopped by the shutdown, back in the queue')
+        requeue_interrupted_job(job.id)
+        raise
     except Exception as exc:
         log_error(f'Job {job.id}: processing failed', exc)
         try:
@@ -2861,6 +2925,13 @@ def run_job_guarded(job: Download) -> None:
             update_job(job.id, status='failed', error=str(exc))
         except Exception as update_exc:
             log_error(f'Job {job.id}: could not record the failure', update_exc)
+
+
+# The organizer's tick, asked before each video it files: touches the heartbeat, and answers False
+# once a stop is asked for, so the organizer ends its pass between two videos, never inside a copy.
+def organizer_tick() -> bool:
+    touch_heartbeat()
+    return not _shutdown.is_set()
 
 
 # SIGTERM/SIGINT handler. Only sets the flag: the loop and the download-output reader poll it and
@@ -2971,9 +3042,8 @@ def take_daily_snapshot(snapshot: DailySnapshot) -> None:
 
 
 # The worker process's entry point, and the only caller of the job loop. Runs startup housekeeping
-# once, then takes one job at a time until shutdown, interleaving the periodic tasks -- organize,
-# subscription check, auto-retry, parent backfill -- between jobs on their own timers. Returns
-# only when a signal sets _shutdown; every step is guarded so no single failure ends the process.
+# once, then main_loop until a signal sets _shutdown. Every step is guarded so no single failure
+# ends the process.
 def worker() -> None:
     log('YouTube worker started')
 
@@ -3008,6 +3078,17 @@ def worker() -> None:
         log_error('resequence_all_channel_indexes failed', exc)
     log('Startup housekeeping done, entering main loop')
 
+    try:
+        main_loop()
+    except ShutdownRequested:
+        pass
+    log('YouTube worker stopped')
+
+
+# Take one job at a time until a stop, interleaving the periodic tasks -- organize, subscription
+# check, auto-retry, parent backfill -- between jobs on their own timers. Returns when a signal
+# sets _shutdown between two passes; raises ShutdownRequested when the stop cuts a pass short.
+def main_loop() -> None:
     snapshot = DailySnapshot(snapshot_minute_of_day())
 
     # Monotonic: an NTP correction on a host without a real-time clock would otherwise postpone
@@ -3044,18 +3125,20 @@ def worker() -> None:
 
         # The periodic tasks run between jobs, never during one, so none of them can contend with
         # a download for the write lock. Each is independently guarded: one failing must not stop
-        # the others or end the loop.
+        # the others or end the loop. A stop ends the pass before the next task starts.
         now = time.monotonic()
 
         if now - last_organize >= ORGANIZER_INTERVAL_SECONDS:
             last_organize = now
+            checkpoint()
             try:
-                organizer_scan_and_process(dry_run=False)
+                organizer_scan_and_process(dry_run=False, tick=organizer_tick)
             except Exception as exc:
                 log_error('Periodic organizer run failed', exc)
 
         if now - last_retry >= RETRY_INTERVAL_SECONDS:
             last_retry = now
+            checkpoint()
             try:
                 retry_failed_jobs()
             except Exception as exc:
@@ -3063,6 +3146,7 @@ def worker() -> None:
 
         if now - last_subscription_check >= SUBSCRIPTION_CHECK_INTERVAL_SECONDS:
             last_subscription_check = now
+            checkpoint()
             try:
                 check_subscriptions()
             except Exception as exc:
@@ -3072,10 +3156,12 @@ def worker() -> None:
         # passes, and running them on the same clock keeps their YouTube requests in one burst.
         if now - last_parent_backfill >= SUBSCRIPTION_CHECK_INTERVAL_SECONDS:
             last_parent_backfill = now
+            checkpoint()
             try:
                 populate_missing_parent_metadata()
             except Exception as exc:
                 log_error('Periodic parent metadata backfill failed', exc)
+            checkpoint()
             try:
                 backfill_all_playlist_indexes()
             except Exception as exc:
@@ -3083,18 +3169,17 @@ def worker() -> None:
 
         # Checked on every pass, since the time of day is what makes it due. run_if_due returns at
         # once once the span's copy is written or found, and until an hour after a failed attempt.
+        checkpoint()
         try:
             take_daily_snapshot(snapshot)
         except Exception as exc:
             log_error('Daily database snapshot check failed', exc)
 
-    log('YouTube worker stopped')
 
-
-if __name__ == '__main__':
-    # Line buffering, so container logs appear as the worker runs rather than in blocks.
-    sys.stdout.reconfigure(line_buffering=True)
-    applog.configure()
+# Start the worker process once its logging is set up, and return its exit status: 0 after a
+# requested stop, 1 when the database never became usable, so that Docker's restart policy and
+# monitoring see a failure rather than a clean exit.
+def main() -> int:
     # Logged first, so the log of every run, a failed start included, names what it ran.
     log(components_line())
 
@@ -3110,8 +3195,16 @@ if __name__ == '__main__':
         schema_ready = wait_for_schema(timeout_seconds=SCHEMA_WAIT_SECONDS)
     except SchemaTooNewError:
         # wait_for_schema has logged the ERROR; this release must not touch the file.
-        sys.exit(1)
-    if schema_ready:
-        worker()
-    else:
+        return 1
+    if not schema_ready:
         logging.error('Timed out waiting for database schema')
+        return 1
+    worker()
+    return 0
+
+
+if __name__ == '__main__':
+    # Line buffering, so container logs appear as the worker runs rather than in blocks.
+    sys.stdout.reconfigure(line_buffering=True)
+    applog.configure()
+    sys.exit(main())

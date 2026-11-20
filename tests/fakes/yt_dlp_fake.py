@@ -4,18 +4,28 @@
 #
 # Stands in for yt-dlp in worker tests, so a download runs end to end with no network and no
 # video. Honours -P home:/temp:, -o and --print-to-file the way yt-dlp does, and answers
-# --get-filename and --dump-single-json. YTDLP_FAKE_MODE picks the download's outcome.
+# --get-filename and --dump-single-json. YTDLP_FAKE_MODE picks the outcome of a download, or of
+# any call for the modes that hang.
 # -------------------------------------------------------
 
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 
 # 'complete' writes the media and its .info.json and reports the final path; 'fragment-then-fail'
 # leaves one format stream under the temp path and exits 1, as a download cut off mid-way does.
-MODES = ('complete', 'fragment-then-fail')
+# The hanging modes apply to every call, lookups included, and print nothing: 'stall' sleeps,
+# 'ignore-sigterm' sleeps through SIGTERM, and 'spawn-child' starts a sleeping child, as yt-dlp
+# starts ffmpeg or deno, and writes its pid to YTDLP_FAKE_CHILD_PID_FILE.
+MODES = ('complete', 'fragment-then-fail', 'stall', 'ignore-sigterm', 'spawn-child')
+
+# How long a hanging mode sleeps: far longer than any test waits.
+HANG_SECONDS = 3600
 
 # Options that consume the next argument; every other dashed argument is a flag.
 VALUE_OPTIONS = {
@@ -86,6 +96,16 @@ def write_file(path: str, content: str) -> None:
         fh.write(content)
 
 
+# Sleep as hanging `mode` says, printing nothing.
+def hang(mode: str) -> None:
+    if mode == 'ignore-sigterm':
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if mode == 'spawn-child':
+        child = subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({HANG_SECONDS})'])
+        write_file(os.environ['YTDLP_FAKE_CHILD_PID_FILE'], str(child.pid))
+    time.sleep(HANG_SECONDS)
+
+
 # Run one fake yt-dlp invocation and return its exit code.
 def main(argv: list[str]) -> int:
     paths, options, prints, flags, url = parse_args(argv)
@@ -93,6 +113,10 @@ def main(argv: list[str]) -> int:
     if mode not in MODES:
         print(f'ERROR: unknown YTDLP_FAKE_MODE {mode!r}', file=sys.stderr)
         return 2
+
+    if mode in ('stall', 'ignore-sigterm', 'spawn-child'):
+        hang(mode)
+        return 0
 
     info = video_info(url)
     if '--dump-single-json' in flags:
