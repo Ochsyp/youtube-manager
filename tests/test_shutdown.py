@@ -366,3 +366,84 @@ def test_run_command_returns_output_and_raises_on_failure(monkeypatch):
     with pytest.raises(subprocess.CalledProcessError) as raised:
         worker.run_command(['yt-dlp', '--dump-single-json', 'u'])
     assert raised.value.stderr == 'ERROR: gone'
+
+
+# A stop during a lookup that runs while the job is still in a status the worker picks up, a
+# metadata refresh or an expansion, leaves that status as it was, so the next start does the same
+# work again: a refresh stays a refresh instead of becoming a new download.
+@pytest.mark.parametrize('status, request_type', [
+    ('metadata', 'video'), ('metadata', 'playlist'), ('expanding', 'playlist'),
+])
+def test_stop_leaves_a_job_in_a_pickup_status_as_it_was(db, make_job, monkeypatch, status, request_type):
+    parent = make_job(
+        url='https://www.youtube.com/playlist?list=PL9', request_type=request_type, status=status,
+        filename='/downloads/Fake Video [dQw4w9WgXcQ].mp4' if request_type == 'video' else None,
+    )
+    if request_type == 'playlist' and status == 'metadata':
+        make_job(youtube_id='ccccccccccc', parent_id=parent.id, status='completed')
+
+    # Stand in for the job's lookup cut off by a stop.
+    def interrupted_process_job(job):
+        worker._shutdown.set()
+        raise worker.ShutdownRequested()
+
+    monkeypatch.setattr(worker, 'process_job', interrupted_process_job)
+
+    with pytest.raises(worker.ShutdownRequested):
+        worker.run_job_guarded(parent)
+
+    row = stored(db, parent.id)
+    assert (row.status, row.error) == (status, None)
+
+
+# A job cut short by a stop is logged as stopped, not as a stuck job recovered after a crash, and
+# a pending cancel reads as one at a stop.
+def test_stop_logs_a_stop_not_a_crash_recovery(db, make_job, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    job = make_job(youtube_id='dQw4w9WgXcQ', status='downloading', cancel_requested=True)
+
+    # Stand in for a download cut off by a stop.
+    def interrupted_process_job(job):
+        worker._shutdown.set()
+        raise worker.ShutdownRequested()
+
+    monkeypatch.setattr(worker, 'process_job', interrupted_process_job)
+
+    with pytest.raises(worker.ShutdownRequested):
+        worker.run_job_guarded(job)
+
+    assert stored(db, job.id).error == 'Cancelled during shutdown'
+    assert not any('stuck job' in record.getMessage() for record in caplog.records)
+
+
+# A lookup asked for after a stop raises ShutdownRequested at once and starts no yt-dlp.
+def test_run_command_starts_nothing_after_a_stop(monkeypatch):
+    monkeypatch.setattr(worker, 'throttle_youtube_requests', lambda: None)
+    monkeypatch.setattr(
+        worker.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('yt-dlp was started'),
+    )
+    worker._shutdown.set()
+
+    with pytest.raises(worker.ShutdownRequested):
+        worker.run_command(['yt-dlp', '--dump-single-json', 'u'])
+
+
+# A stop that arrives during the lookups before a download starts no download: the job stays
+# queued, as it was, and goes back to the loop as ShutdownRequested.
+def test_download_not_started_after_a_stop(db, make_job, monkeypatch):
+    job = make_job(youtube_id='dQw4w9WgXcQ', title='Known title')
+
+    # The expected-path lookup returns quickly, and a stop arrives meanwhile.
+    def resolve(job, output_template=None):
+        worker._shutdown.set()
+        return None
+
+    monkeypatch.setattr(worker, 'resolve_expected_output_path', resolve)
+    monkeypatch.setattr(
+        worker.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('yt-dlp was started'),
+    )
+
+    with pytest.raises(worker.ShutdownRequested):
+        worker.download_video(job)
+
+    assert stored(db, job.id).status == 'queued'

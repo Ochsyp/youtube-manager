@@ -595,6 +595,8 @@ def relay_ytdlp_warnings(stderr: Optional[str]) -> str:
 # matching the file on disk.
 def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
     throttle_youtube_requests()
+    # A stop asked for before this call starts no yt-dlp at all.
+    checkpoint()
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -1248,13 +1250,14 @@ def is_cancelled(job_id: int) -> bool:
         return bool(job and job.cancel_requested)
 
 
-# Put each of `jobs`, interrupted in one of RESTART_RECOVERY_STATUSES, back where its work can
-# start again, in the caller's session `db`; the caller commits. A job with a cancel pending is
-# cancelled instead, and its parent settled.
-def recover_interrupted_jobs(db, jobs: list[Download]) -> None:
+# Put each of `jobs`, interrupted in one of RESTART_RECOVERY_STATUSES by `cause` ('restart' or
+# 'shutdown'), back where its work can start again, in the caller's session `db`; the caller
+# commits. A job with a cancel pending is cancelled instead, and its parent settled.
+def recover_interrupted_jobs(db, jobs: list[Download], cause: str = 'restart') -> None:
     cancelled_parent_ids = set()
     for job in jobs:
-        log(f'Recovering stuck job {job.id} ({job.request_type}) status={job.status}')
+        if cause == 'restart':
+            log(f'Recovering stuck job {job.id} ({job.request_type}) status={job.status}')
 
         # Whatever the interrupted job reported last is stale by definition.
         job.progress = None
@@ -1262,7 +1265,7 @@ def recover_interrupted_jobs(db, jobs: list[Download]) -> None:
 
         if job.cancel_requested:
             job.status = 'cancelled'
-            job.error = 'Cancelled during restart'
+            job.error = f'Cancelled during {cause}'
             if job.parent_id is not None:
                 cancelled_parent_ids.add(job.parent_id)
         else:
@@ -1296,13 +1299,17 @@ def recover_stuck_jobs() -> None:
 
 
 # Put job `job_id`, cut short by a stop, back where the next start would put it. A job still in a
-# status the worker picks up is left as it is.
+# status the worker picks up, such as 'metadata' for a refresh, is left as it is, so the next
+# start does the same work again rather than, say, download a refreshed video anew.
 def requeue_interrupted_job(job_id: int) -> None:
     with Session() as db:
         job = db.get(Download, job_id)
-        if job is None or job.status not in RESTART_RECOVERY_STATUSES:
+        if (
+            job is None or job.status in WORKER_PICKUP_STATUSES
+            or job.status not in RESTART_RECOVERY_STATUSES
+        ):
             return
-        recover_interrupted_jobs(db, [job])
+        recover_interrupted_jobs(db, [job], cause='shutdown')
         db.commit()
 
 
@@ -2827,6 +2834,9 @@ def download_video(job: Download) -> None:
         remove_cancelled_leftovers(job)
         return
 
+    # The last point before the download starts: a stop that came during the lookups above leaves
+    # the job queued, as it was.
+    checkpoint()
     update_job(job.id, status='downloading')
 
     command = build_download_command(job.url, output_template, job.id)
