@@ -1518,8 +1518,10 @@ def repair_missing_thumbnails(db, dry_run: bool = False) -> int:
 
 # File every completed video job that isn't organized yet. Called periodically by the worker, and
 # once after each parent job finishes. Returns 0, touching nothing, while library_ready() refuses:
-# the jobs stay completed and unorganized for the first pass after the library is back.
-def scan_and_process(dry_run: bool = False) -> int:
+# the jobs stay completed and unorganized for the first pass after the library is back. `tick`, if
+# given, is asked before each video; False ends the filing there, and the pass finishes as usual,
+# so the worker can stop between two videos and Jellyfin still hears about those already filed.
+def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] = None) -> int:
     if not library_ready():
         return 0
     SHOWS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1559,6 +1561,9 @@ def scan_and_process(dry_run: bool = False) -> int:
 
         log(f'Found {len(jobs)} completed video(s) pending organization')
         for job in jobs:
+            if tick is not None and not tick():
+                log('Organizer stopped before filing every pending video; the next pass goes on')
+                break
             if not is_organizable(db, job, dry_run):
                 continue
 

@@ -710,7 +710,7 @@ def test_all_skipped_parent_offers_no_retry(client, db, make_job):
 def test_child_updates_reach_parent_and_organizer(monkeypatch, db, make_job):
     runs = []
     monkeypatch.setattr(worker, 'organizer_scan_and_process',
-                        lambda dry_run=False: runs.append(dry_run))
+                        lambda dry_run=False, tick=None: runs.append(dry_run))
     parent = playlist_parent(make_job)
     first = video(make_job, V1, parent_id=parent.id, status='downloading')
     second = video(make_job, V2, parent_id=parent.id, status='downloading')

@@ -130,10 +130,17 @@ def test_run_command_relays_ytdlp_warnings_deduplicated(caplog, monkeypatch):
     jsc_warning = 'WARNING: [youtube] [jsc] JS challenge solver unavailable, falling back'
     stderr = f'{pot_warning}\n[youtube] dQw4w9WgXcQ: Downloading webpage\n{jsc_warning}\n{pot_warning}\n'
 
-    def fake_run(command, **kwargs):
-        return subprocess.CompletedProcess(command, 0, stdout='{"id": "dQw4w9WgXcQ"}', stderr=stderr)
+    # A yt-dlp that has already exited 0 with that output.
+    class Finished:
+        returncode, pid = 0, 0
 
-    monkeypatch.setattr(worker.subprocess, 'run', fake_run)
+        def communicate(self, timeout=None):
+            return '{"id": "dQw4w9WgXcQ"}', stderr
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(worker.subprocess, 'Popen', lambda command, **kwargs: Finished())
     monkeypatch.setattr(worker, 'throttle_youtube_requests', lambda: None)
 
     result = worker.run_command(['yt-dlp', '--dump-single-json', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'])
@@ -174,10 +181,17 @@ def test_discovery_failure_keeps_ytdlp_error_past_warnings(caplog, monkeypatch, 
     reason = 'ERROR: [youtube] dQw4w9WgXcQ: Video unavailable. This video has been removed'
     stderr = f'{pot_warning}\n{sabr_warning}\n{reason}\n'
 
-    def fake_run(command, **kwargs):
-        raise subprocess.CalledProcessError(1, command, output='', stderr=stderr)
+    # A yt-dlp that has already exited 1 with that stderr.
+    class Failed:
+        returncode, pid = 1, 0
 
-    monkeypatch.setattr(worker.subprocess, 'run', fake_run)
+        def communicate(self, timeout=None):
+            return '', stderr
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(worker.subprocess, 'Popen', lambda command, **kwargs: Failed())
     monkeypatch.setattr(worker, 'throttle_youtube_requests', lambda: None)
 
     assert worker.discover_metadata(job) is None

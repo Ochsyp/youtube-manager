@@ -131,8 +131,12 @@ docker compose -f compose.example.yaml up -d
 - **Healthchecks.** The web UI answers `GET /health` without touching the database, and
   the image includes curl to ask it. The worker touches `WORKER_HEARTBEAT_PATH` from
   every long-running loop; treat it as dead once that file is more than 600 seconds old.
-- **Stopping.** On SIGTERM the worker stops at its next check. Give it a stop grace
-  period of 60 seconds, since Docker's default of 10 can kill a step mid-write.
+- **Stopping.** On SIGTERM the worker stops within a few seconds. A download or a yt-dlp
+  lookup ends with every process it started, and its job goes back in the queue. The
+  subscription check, the backfills and filing stop between two items, never inside a
+  copy. Give the worker a stop grace period of 60 seconds: filing a large file to a slow
+  disk can outlast Docker's default of 10, and a copy cut short is redone at the next
+  start.
 - **Updating.** Set `YTM_VERSION` to the new release, with its digest, and run
   `docker compose -f compose.example.yaml up -d`, which pulls the image and recreates
   both containers together. Read the release's CHANGELOG section first: a major release
@@ -168,7 +172,7 @@ restore from these copies.
   one transaction, so a step that fails changes nothing. The log names the copy and
   each table's row count before and after. Every start needs free space for that copy:
   if it cannot be written, the web UI does not start and logs an ERROR, and the worker
-  gives up after waiting 300 seconds.
+  exits with status 1 after waiting 300 seconds, so a restart policy brings it back.
 - **Older releases.** From this release on, a release runs on a newer schema that only
   adds to its own, and logs a warning. On a schema from a later major release, both
   services log an ERROR and exit, and keep restarting that way: run that release, or
