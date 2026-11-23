@@ -21,8 +21,11 @@ from urllib.parse import parse_qs, urlparse
 # leaves one format stream under the temp path and exits 1, as a download cut off mid-way does.
 # The hanging modes apply to every call, lookups included, and print nothing: 'stall' sleeps,
 # 'ignore-sigterm' sleeps through SIGTERM, and 'spawn-child' starts a sleeping child, as yt-dlp
-# starts ffmpeg or deno, and writes its pid to YTDLP_FAKE_CHILD_PID_FILE.
-MODES = ('complete', 'fragment-then-fail', 'stall', 'ignore-sigterm', 'spawn-child')
+# starts ffmpeg or deno, and writes its pid to YTDLP_FAKE_CHILD_PID_FILE. 'close-output-hang' applies
+# to a download only: it finishes the file, closes stdout and stderr, and never exits.
+MODES = (
+    'complete', 'fragment-then-fail', 'stall', 'ignore-sigterm', 'spawn-child', 'close-output-hang',
+)
 
 # How long a hanging mode sleeps: far longer than any test waits.
 HANG_SECONDS = 3600
@@ -155,6 +158,12 @@ def main(argv: list[str]) -> int:
     os.replace(temp_path, final_path)
     print(f'Moving file "{temp_path}" to "{final_path}"')
     print_after_move(prints, info, final_path)
+    if mode == 'close-output-hang':
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.close(sys.stdout.fileno())
+        os.close(sys.stderr.fileno())
+        time.sleep(HANG_SECONDS)
     return 0
 
 

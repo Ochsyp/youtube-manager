@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
 from contextlib import contextmanager, suppress
@@ -54,6 +55,13 @@ CHANNEL_DIR = MEDIA_PATH
 # unset the notification is skipped rather than treated as an error, since the videos are filed.
 JELLYFIN_URL = os.getenv('JELLYFIN_URL')
 JELLYFIN_TOKEN = os.getenv('JELLYFIN_TOKEN')
+
+# How long a refresh still in flight may hold up a stop. A healthy Jellyfin answers well within it,
+# and one that does not costs only the refresh: the video appears at its next library scan.
+JELLYFIN_STOP_WAIT_SECONDS = 3.0
+
+# How often the worker checks for a stop while a refresh is in flight.
+JELLYFIN_POLL_SECONDS = 0.25
 
 # Characters that are unsafe (or awkward) across common filesystems used for media shares.
 ILLEGAL_FILENAME_CHARS = '<>:"/\\|?*'
@@ -1313,7 +1321,7 @@ def organize_job(db, job: Download, dry_run: bool, force_nfo: bool = False) -> b
 # Re-run organizing for one job, rewriting its NFO even though the video is already in place.
 # Backs "Fetch Metadata": the user asked for this one job, so the scan's caution about healthy
 # NFOs doesn't apply. Returns False, touching nothing, while library_ready() refuses.
-def organize_single_job(job_id: int) -> bool:
+def organize_single_job(job_id: int, tick: Optional[Callable[[], bool]] = None) -> bool:
     if not library_ready():
         return False
     SHOWS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1324,20 +1332,48 @@ def organize_single_job(job_id: int) -> bool:
             return False
         result = organize_job(db, job, dry_run=False, force_nfo=True)
     if result:
-        notify_jellyfin()
+        notify_jellyfin(tick=tick)
     return result
 
 
-# Ask Jellyfin to scan for library changes rather than wait on its schedule or its filesystem
-# watcher (unreliable across bind mounts). An unreachable Jellyfin is not an organizing failure
-# and logs WARN; a rejected token (401/403) fails every refresh until fixed, so it logs ERROR.
-def notify_jellyfin() -> None:
+# Ask Jellyfin to scan for library changes, if it is configured. With a `tick`, the request runs
+# on a daemon thread while this thread keeps asking tick; once tick answers False, the request has
+# JELLYFIN_STOP_WAIT_SECONDS left. A daemon, because a blocked request cannot be interrupted and
+# must not keep the process alive at exit.
+def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
     if not JELLYFIN_URL or not JELLYFIN_TOKEN:
         return
+    if tick is None:
+        send_jellyfin_refresh(JELLYFIN_URL, JELLYFIN_TOKEN)
+        return
+
+    sender = threading.Thread(
+        target=send_jellyfin_refresh, args=(JELLYFIN_URL, JELLYFIN_TOKEN),
+        name='jellyfin-refresh', daemon=True,
+    )
+    sender.start()
+    stop_deadline = None
+    while True:
+        sender.join(JELLYFIN_POLL_SECONDS)
+        if not sender.is_alive():
+            return
+        if stop_deadline is None and not tick():
+            stop_deadline = time.monotonic() + JELLYFIN_STOP_WAIT_SECONDS
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            warn(f'Jellyfin did not answer the library refresh within '
+                 f'{JELLYFIN_STOP_WAIT_SECONDS}s of a stop; not waiting for it')
+            return
+
+
+# Send one library refresh rather than wait on Jellyfin's schedule or its filesystem watcher
+# (unreliable across bind mounts). An unreachable Jellyfin is not an organizing failure and logs
+# WARN; a rejected token (401/403) fails every refresh until fixed, so it logs ERROR. Can run on its
+# own thread, so it takes what it needs as arguments and touches no database session.
+def send_jellyfin_refresh(url: str, token: str) -> None:
     try:
         response = requests.post(
-            f"{JELLYFIN_URL.rstrip('/')}/Library/Refresh",
-            headers={'X-Emby-Token': JELLYFIN_TOKEN},
+            f"{url.rstrip('/')}/Library/Refresh",
+            headers={'X-Emby-Token': token},
             # Jellyfin serves a self-signed cert from jellyfin-cert and this call never leaves the
             # internal docker network, the same trust boundary Seerr uses against it.
             verify=False,
@@ -1556,7 +1592,7 @@ def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] =
         # Nothing left to organize, but new artwork still needs picking up by Jellyfin.
         if not jobs:
             if repaired and not dry_run:
-                notify_jellyfin()
+                notify_jellyfin(tick=tick)
             return 0
 
         log(f'Found {len(jobs)} completed video(s) pending organization')
@@ -1590,7 +1626,7 @@ def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] =
     if organized:
         log(f'Organized {organized} video(s)')
     if (organized or repaired) and not dry_run:
-        notify_jellyfin()
+        notify_jellyfin(tick=tick)
     return organized
 
 
