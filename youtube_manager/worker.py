@@ -162,6 +162,10 @@ DOWNLOAD_STALL_TIMEOUT_SECONDS = 1800
 # inside Docker's default 10 s stop, with time left to put the job back in the queue.
 PROCESS_KILL_TIMEOUT_SECONDS = 5
 
+# How long a yt-dlp that has closed its output gets to exit by itself, as a final move or cleanup
+# can outlast its last line. A stop cuts this short.
+PROCESS_EXIT_WAIT_SECONDS = 60.0
+
 # yt-dlp emits progress dozens of lines per second. Persisting each one costs two SQLite
 # transactions on a database the web app shares, so progress is written at most this often.
 PROGRESS_UPDATE_INTERVAL_SECONDS = 1.0
@@ -637,14 +641,7 @@ def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> s
 # Stop a download and everything it spawned. yt-dlp runs in its own session and forks ffmpeg,
 # so the whole process group is signalled; SIGKILL follows a SIGTERM that goes unanswered, or a
 # merge wedged inside ffmpeg would hold the job in 'downloading' forever. Waits, so no zombie.
-def terminate_process_group(process: subprocess.Popen, grace_seconds: float = 0.0) -> None:
-    if grace_seconds:
-        try:
-            process.wait(timeout=grace_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            log(f'yt-dlp closed its output but has not exited after {grace_seconds}s; terminating')
-
+def terminate_process_group(process: subprocess.Popen) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         # Only ever signal a live child: once it is reaped its pid can belong to somebody else.
         if process.poll() is not None:
@@ -660,6 +657,19 @@ def terminate_process_group(process: subprocess.Popen, grace_seconds: float = 0.
             continue
 
     process.poll()
+
+
+# Wait up to `seconds` for `process` to exit by itself, checking for a stop once a second. True
+# once it has exited; False, with the process still running, when time runs out or a stop came.
+def wait_for_exit(process: subprocess.Popen, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            process.wait(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
+            return True
+        except subprocess.TimeoutExpired:
+            if _shutdown.is_set() or time.monotonic() >= deadline:
+                return False
 
 
 # =======================================================
@@ -837,8 +847,21 @@ def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[
     finally:
         # A process still running here was cancelled, stalled, or raised past this loop; left
         # alone it keeps downloading into staging with nothing watching it. Only a stream that
-        # ended at EOF gets time to exit on its own.
-        terminate_process_group(process, grace_seconds=60.0 if outcome == 'finished' else 0.0)
+        # ended at EOF gets time to exit on its own. A stop during that time counts as a stop, so
+        # the job goes back in the queue and uses none of its retries, unless yt-dlp still exits 0:
+        # then its download is finished.
+        if outcome != 'finished':
+            terminate_process_group(process)
+        elif not wait_for_exit(process, PROCESS_EXIT_WAIT_SECONDS):
+            stopping = _shutdown.is_set()
+            if stopping:
+                log(f'Job {job_id}: stopping a yt-dlp that closed its output but has not exited')
+            else:
+                log(f'yt-dlp closed its output but has not exited after '
+                    f'{PROCESS_EXIT_WAIT_SECONDS}s; terminating')
+            terminate_process_group(process)
+            if stopping and process.returncode != 0:
+                outcome = 'shutdown'
         reader_thread.join(timeout=5)
 
     if final_speed:
@@ -1181,7 +1204,7 @@ def redownload_or_rename(job: Download) -> bool:
         append_log(job.id, 'Existing file is already in the media library; refreshing metadata in place')
         update_job(job.id, status='completed', completed_at=utcnow(), progress='100%', organized_at=None)
         try:
-            organizer_organize_single_job(job.id)
+            organizer_organize_single_job(job.id, tick=organizer_tick)
         except Exception as exc:
             log_error(f'Job {job.id}: organizer run failed', exc)
         return True

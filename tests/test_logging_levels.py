@@ -241,7 +241,7 @@ def test_failed_download_stores_last_ytdlp_error(caplog, monkeypatch, db, make_j
     monkeypatch.setattr(worker, 'resolve_expected_output_path', lambda job, output_template=None: None)
     monkeypatch.setattr(worker.subprocess, 'Popen', lambda command, **kwargs: FinishedProcess(f'{reason}\n', 1))
     # The real one signals with SIGKILL, which Windows lacks; this process has exited anyway.
-    monkeypatch.setattr(worker, 'terminate_process_group', lambda process, grace_seconds=0.0: None)
+    monkeypatch.setattr(worker, 'terminate_process_group', lambda process: None)
     monkeypatch.setattr(worker, 'finalize_after_download', lambda job: None)
 
     worker.download_video(job)

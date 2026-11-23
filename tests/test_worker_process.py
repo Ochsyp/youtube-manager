@@ -142,3 +142,44 @@ def test_ignored_sigterm_is_followed_by_sigkill_within_5_s(ytdlp_on_path, monkey
 
     assert worker.PROCESS_KILL_TIMEOUT_SECONDS == 5
     assert time.monotonic() - started < 1 + worker.PROCESS_KILL_TIMEOUT_SECONDS + 3
+
+
+# A yt-dlp that finished its file, closed its output and never exits is ended within seconds of a
+# stop. The job goes back in the queue with its retries as they were, and the next run adopts the
+# finished file instead of downloading it again.
+@pytest.mark.posix
+def test_stop_ends_a_yt_dlp_that_closed_its_output(ytdlp_on_path, db, make_job, library, monkeypatch):
+    job = make_job(youtube_id=VIDEO_ID, title='Fake Video', auto_retry_attempts=3)
+    final = library.staging / f'Fake Video [{VIDEO_ID}].mp4'
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'close-output-hang')
+    stopped_at = []
+
+    # Ask for the stop once the fake has written its file and gone quiet.
+    def stop_after_the_file() -> None:
+        deadline = time.monotonic() + 30
+        while not final.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)
+        stopped_at.append(time.monotonic())
+        worker._shutdown.set()
+
+    stopper = threading.Thread(target=stop_after_the_file, daemon=True)
+    stopper.start()
+    try:
+        worker.download_video(job)
+        ended_at = time.monotonic()
+    finally:
+        stopper.join(35)
+        worker._shutdown.clear()
+
+    assert ended_at - stopped_at[0] < 1 + worker.PROCESS_KILL_TIMEOUT_SECONDS + 3
+    row = stored(db, job.id)
+    assert row.status == 'queued'
+    assert row.error is None
+    assert row.auto_retry_attempts == 3
+
+    worker.download_video(job)
+
+    row = stored(db, job.id)
+    assert row.status == 'completed'
+    assert row.filename == str(final)
