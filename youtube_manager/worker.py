@@ -848,17 +848,20 @@ def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[
         # A process still running here was cancelled, stalled, or raised past this loop; left
         # alone it keeps downloading into staging with nothing watching it. Only a stream that
         # ended at EOF gets time to exit on its own. A stop during that time counts as a stop, so
-        # the job goes back in the queue and uses none of its retries.
+        # the job goes back in the queue and uses none of its retries, unless yt-dlp still exits 0:
+        # then its download is finished.
         if outcome != 'finished':
             terminate_process_group(process)
         elif not wait_for_exit(process, PROCESS_EXIT_WAIT_SECONDS):
-            if _shutdown.is_set():
-                outcome = 'shutdown'
+            stopping = _shutdown.is_set()
+            if stopping:
                 log(f'Job {job_id}: stopping a yt-dlp that closed its output but has not exited')
             else:
                 log(f'yt-dlp closed its output but has not exited after '
                     f'{PROCESS_EXIT_WAIT_SECONDS}s; terminating')
             terminate_process_group(process)
+            if stopping and process.returncode != 0:
+                outcome = 'shutdown'
         reader_thread.join(timeout=5)
 
     if final_speed:

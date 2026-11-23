@@ -4,7 +4,7 @@
 # What the worker does when a stop is asked for in the middle of its work: a job goes back in the
 # queue, long passes stop between items and touch the heartbeat as they go, the main loop ends,
 # and the process exits with a status that says whether it stopped or failed. The tests that run
-# real processes are in test_worker_process.py.
+# yt-dlp as a real process are in test_worker_process.py.
 # -------------------------------------------------------
 
 import io
@@ -14,13 +14,14 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 import requests
 
-from youtube_manager import organizer, worker
+from youtube_manager import database, organizer, worker
 from youtube_manager.database import Channel, Download, SchemaTooNewError, Subscription
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -482,15 +483,17 @@ class LingeringProcess:
 
 
 # Start `process` as the download's yt-dlp, running `on_start` first. Ending the process group sets
-# exit code -15. Returns the list of jobs handed to the filing pass.
-def start_download(monkeypatch, process: LingeringProcess, on_start=lambda: None) -> list[Download]:
+# exit code `ended_with`. Returns the list of jobs handed to the filing pass.
+def start_download(
+    monkeypatch, process: LingeringProcess, on_start=lambda: None, ended_with: int = -15,
+) -> list[Download]:
     def popen(command, **kwargs):
         on_start()
         return process
 
     def end(target):
         if target.returncode is None:
-            target.returncode = -15
+            target.returncode = ended_with
 
     filed = []
     monkeypatch.setattr(worker.subprocess, 'Popen', popen)
@@ -538,8 +541,14 @@ def test_exit_wait_running_out_fails_the_job(db, make_job, library, monkeypatch)
     assert process.waits >= 1
 
 
-# A yt-dlp that exits 0 during the wait has finished, even with a stop pending: its file counts.
-def test_clean_exit_during_the_wait_completes_despite_a_stop(db, make_job, library, monkeypatch):
+# A yt-dlp that exits 0 has finished, even with a stop pending and even if it got there just as the
+# stop ended the wait: its file counts.
+@pytest.mark.parametrize(
+    'exits_on_wait, ended_with', [(1, -15), (None, 0)], ids=['during-the-wait', 'at-the-signal'],
+)
+def test_clean_exit_completes_despite_a_stop(
+    db, make_job, library, monkeypatch, exits_on_wait, ended_with,
+):
     job = make_job(youtube_id='dQw4w9WgXcQ', title='Known title')
     media = library.staging / 'Known title [dQw4w9WgXcQ].mp4'
 
@@ -548,7 +557,10 @@ def test_clean_exit_during_the_wait_completes_despite_a_stop(db, make_job, libra
         worker.final_path_file(job.id).write_text(f'{media}\n', encoding='utf-8')
         worker._shutdown.set()
 
-    filed = start_download(monkeypatch, LingeringProcess(exits_on_wait=1), on_start=finish_and_stop)
+    filed = start_download(
+        monkeypatch, LingeringProcess(exits_on_wait=exits_on_wait), on_start=finish_and_stop,
+        ended_with=ended_with,
+    )
 
     worker.download_video(job)
 
@@ -618,15 +630,18 @@ def test_refresh_is_still_sent_after_a_stop(caplog, monkeypatch, jellyfin):
     assert any('Requested Jellyfin' in message for message in messages_at(caplog, logging.INFO))
 
 
-# With no stop, a refresh reports its result as it always did: a refused token is an ERROR, and any
-# other failure a WARN.
+# A refresh reports its result from the calling thread, with or without a stop: a refused token is
+# an ERROR, and any other failure a WARN.
+@pytest.mark.parametrize('stop', [False, True], ids=['no-stop', 'stop'])
 @pytest.mark.parametrize('failure, level', [
     (401, logging.ERROR),
     (403, logging.ERROR),
     (500, logging.WARNING),
     (requests.ConnectionError('connection refused'), logging.WARNING),
 ], ids=['http-401', 'http-403', 'http-500', 'unreachable'])
-def test_refresh_result_is_logged_with_no_stop(caplog, monkeypatch, jellyfin, failure, level):
+def test_refresh_result_is_logged_on_the_calling_thread(
+    caplog, monkeypatch, jellyfin, failure, level, stop,
+):
     caplog.set_level(logging.INFO)
 
     def post(*args, **kwargs):
@@ -636,11 +651,106 @@ def test_refresh_result_is_logged_with_no_stop(caplog, monkeypatch, jellyfin, fa
 
     monkeypatch.setattr(organizer.requests, 'post', post)
 
-    organizer.notify_jellyfin(tick=lambda: True)
+    organizer.notify_jellyfin(tick=lambda: not stop)
 
     assert any('Jellyfin' in message for message in messages_at(caplog, level))
     if level == logging.WARNING:
         assert messages_at(caplog, logging.ERROR) == []
+    assert {record.threadName for record in caplog.records} == {threading.current_thread().name}
+
+
+# An error the refresh does not expect is raised to the caller, as it is without a thread.
+@pytest.mark.parametrize('stop', [False, True], ids=['no-stop', 'stop'])
+def test_unexpected_refresh_error_reaches_the_caller(monkeypatch, jellyfin, stop):
+    def post(*args, **kwargs):
+        raise UnicodeEncodeError('latin-1', 'token', 0, 1, 'not encodable')
+
+    monkeypatch.setattr(organizer.requests, 'post', post)
+
+    with pytest.raises(UnicodeEncodeError):
+        organizer.notify_jellyfin(tick=lambda: not stop)
+
+
+# The worker's guard logs that error as one ERROR, with or without a stop.
+@pytest.mark.parametrize('stop', [False, True], ids=['no-stop', 'stop'])
+def test_unexpected_refresh_error_is_logged_as_error(
+    caplog, db, make_job, monkeypatch, jellyfin, stop,
+):
+    caplog.set_level(logging.INFO)
+    job = make_job(youtube_id='dQw4w9WgXcQ', status='completed')
+
+    def post(*args, **kwargs):
+        raise RuntimeError('refresh broke')
+
+    monkeypatch.setattr(organizer.requests, 'post', post)
+    monkeypatch.setattr(
+        worker, 'organizer_scan_and_process',
+        lambda dry_run, tick: organizer.notify_jellyfin(tick=tick),
+    )
+    if stop:
+        worker._shutdown.set()
+
+    worker.finalize_after_download(job)
+
+    errors = messages_at(caplog, logging.ERROR)
+    assert len(errors) == 1
+    assert 'Organizer run failed' in errors[0]
+
+
+# A refresh the worker has stopped waiting for ends in silence, even if it fails: the WARN has said
+# so, and a thread that writes to the log while Python shuts down can abort the process.
+def test_abandoned_refresh_logs_nothing(caplog, monkeypatch, jellyfin):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(organizer, 'JELLYFIN_STOP_WAIT_SECONDS', 0.05)
+    release = threading.Event()
+    crashed = []
+    monkeypatch.setattr(threading, 'excepthook', crashed.append)
+
+    def post(*args, **kwargs):
+        release.wait(30)
+        raise RuntimeError('too late')
+
+    monkeypatch.setattr(organizer.requests, 'post', post)
+
+    try:
+        organizer.notify_jellyfin(tick=lambda: False)
+        logged = len(caplog.records)
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == 'jellyfin-refresh':
+                thread.join(5)
+
+    assert len(messages_at(caplog, logging.WARNING)) == 1
+    assert len(caplog.records) == logged
+    assert crashed == []
+
+
+# A pass that only repaired something asks for the refresh after its database session has closed.
+def test_repair_only_refresh_runs_after_the_session_closes(db, monkeypatch):
+    real_session = organizer.Session
+    open_sessions = []
+    seen = []
+
+    @contextmanager
+    def counted_session():
+        with real_session() as session:
+            open_sessions.append(session)
+            try:
+                yield session
+            finally:
+                open_sessions.remove(session)
+
+    monkeypatch.setattr(organizer, 'Session', counted_session)
+    monkeypatch.setattr(organizer, 'library_ready', lambda: True)
+    monkeypatch.setattr(organizer, 'relocate_misfiled_shows', lambda session, dry_run: 0)
+    monkeypatch.setattr(organizer, 'repair_stale_filenames', lambda session, dry_run: 0)
+    monkeypatch.setattr(organizer, 'repair_missing_thumbnails', lambda session, dry_run: 1)
+    monkeypatch.setattr(organizer, 'notify_jellyfin', lambda tick=None: seen.append(len(open_sessions)))
+
+    assert organizer.scan_and_process(dry_run=False) == 0
+
+    assert seen == [0]
 
 
 # The refresh runs on a daemon thread and opens no database session; the stop check stays on the
@@ -661,7 +771,8 @@ def test_refresh_thread_is_a_daemon_and_uses_no_session(monkeypatch, jellyfin):
         return True
 
     monkeypatch.setattr(organizer.requests, 'post', post)
-    monkeypatch.setattr(organizer, 'Session', lambda: pytest.fail('the refresh opened a session'))
+    for module in (organizer, database):
+        monkeypatch.setattr(module, 'Session', lambda: pytest.fail('the refresh opened a session'))
 
     organizer.notify_jellyfin(tick=tick)
 

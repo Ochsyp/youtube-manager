@@ -1336,49 +1336,21 @@ def organize_single_job(job_id: int, tick: Optional[Callable[[], bool]] = None) 
     return result
 
 
-# Ask Jellyfin to scan for library changes, if it is configured. With a `tick`, the request runs
-# on a daemon thread while this thread keeps asking tick; once tick answers False, the request has
-# JELLYFIN_STOP_WAIT_SECONDS left. A daemon, because a blocked request cannot be interrupted and
-# must not keep the process alive at exit.
+# Ask Jellyfin to scan for library changes rather than wait on its schedule or its filesystem
+# watcher (unreliable across bind mounts), if it is configured. An unreachable Jellyfin is not an
+# organizing failure and logs WARN; a rejected token (401/403) fails every refresh until fixed, so
+# it logs ERROR. Any other error is raised to the caller. With a `tick`, a stop can cut the wait
+# for the answer short.
 def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
     if not JELLYFIN_URL or not JELLYFIN_TOKEN:
         return
-    if tick is None:
-        send_jellyfin_refresh(JELLYFIN_URL, JELLYFIN_TOKEN)
-        return
-
-    sender = threading.Thread(
-        target=send_jellyfin_refresh, args=(JELLYFIN_URL, JELLYFIN_TOKEN),
-        name='jellyfin-refresh', daemon=True,
-    )
-    sender.start()
-    stop_deadline = None
-    while True:
-        sender.join(JELLYFIN_POLL_SECONDS)
-        if not sender.is_alive():
-            return
-        if stop_deadline is None and not tick():
-            stop_deadline = time.monotonic() + JELLYFIN_STOP_WAIT_SECONDS
-        if stop_deadline is not None and time.monotonic() >= stop_deadline:
-            warn(f'Jellyfin did not answer the library refresh within '
-                 f'{JELLYFIN_STOP_WAIT_SECONDS}s of a stop; not waiting for it')
-            return
-
-
-# Send one library refresh rather than wait on Jellyfin's schedule or its filesystem watcher
-# (unreliable across bind mounts). An unreachable Jellyfin is not an organizing failure and logs
-# WARN; a rejected token (401/403) fails every refresh until fixed, so it logs ERROR. Can run on its
-# own thread, so it takes what it needs as arguments and touches no database session.
-def send_jellyfin_refresh(url: str, token: str) -> None:
     try:
-        response = requests.post(
-            f"{url.rstrip('/')}/Library/Refresh",
-            headers={'X-Emby-Token': token},
-            # Jellyfin serves a self-signed cert from jellyfin-cert and this call never leaves the
-            # internal docker network, the same trust boundary Seerr uses against it.
-            verify=False,
-            timeout=10,
-        )
+        if tick is None:
+            response = post_jellyfin_refresh(JELLYFIN_URL, JELLYFIN_TOKEN)
+        else:
+            response = post_jellyfin_refresh_until_stop(JELLYFIN_URL, JELLYFIN_TOKEN, tick)
+        if response is None:
+            return
         # A rejected token answers 401 rather than failing the request, and would otherwise be
         # logged as a successful refresh.
         response.raise_for_status()
@@ -1389,6 +1361,53 @@ def send_jellyfin_refresh(url: str, token: str) -> None:
             error(f'Jellyfin rejected the library refresh token (HTTP {status}): {exc}')
         else:
             warn(f'Failed to notify Jellyfin of library changes: {exc}')
+
+
+# Send one library refresh and return Jellyfin's answer.
+def post_jellyfin_refresh(url: str, token: str) -> requests.Response:
+    return requests.post(
+        f"{url.rstrip('/')}/Library/Refresh",
+        headers={'X-Emby-Token': token},
+        # Jellyfin serves a self-signed cert from jellyfin-cert and this call never leaves the
+        # internal docker network, the same trust boundary Seerr uses against it.
+        verify=False,
+        timeout=10,
+    )
+
+
+# Send the refresh on a daemon thread while this thread keeps asking `tick`. Returns the answer and
+# raises the request's error here, or logs a WARN and returns None once tick has answered False and
+# JELLYFIN_STOP_WAIT_SECONDS have passed. A daemon, because a blocked request cannot be interrupted
+# and must not keep the process alive at exit. The thread only makes the request: it logs nothing,
+# since writing to the log while Python shuts down can abort the process, and uses no database.
+def post_jellyfin_refresh_until_stop(
+    url: str, token: str, tick: Callable[[], bool],
+) -> Optional[requests.Response]:
+    outcome: list[Any] = []
+
+    def send() -> None:
+        try:
+            outcome.append(post_jellyfin_refresh(url, token))
+        except BaseException as exc:
+            outcome.append(exc)
+
+    sender = threading.Thread(target=send, name='jellyfin-refresh', daemon=True)
+    sender.start()
+    stop_deadline = None
+    while True:
+        sender.join(JELLYFIN_POLL_SECONDS)
+        if not sender.is_alive():
+            break
+        if stop_deadline is None and not tick():
+            stop_deadline = time.monotonic() + JELLYFIN_STOP_WAIT_SECONDS
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            warn(f'Jellyfin did not answer the library refresh within '
+                 f'{JELLYFIN_STOP_WAIT_SECONDS}s of a stop; not waiting for it')
+            return None
+
+    if isinstance(outcome[0], BaseException):
+        raise outcome[0]
+    return outcome[0]
 
 
 # Shared pre-checks applied before a job is organized.
@@ -1589,13 +1608,8 @@ def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] =
         # never reach the loop below and have to be counted here to be visible at all.
         repaired += relocated
 
-        # Nothing left to organize, but new artwork still needs picking up by Jellyfin.
-        if not jobs:
-            if repaired and not dry_run:
-                notify_jellyfin(tick=tick)
-            return 0
-
-        log(f'Found {len(jobs)} completed video(s) pending organization')
+        if jobs:
+            log(f'Found {len(jobs)} completed video(s) pending organization')
         for job in jobs:
             if tick is not None and not tick():
                 log('Organizer stopped before filing every pending video; the next pass goes on')
