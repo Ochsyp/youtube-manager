@@ -37,15 +37,14 @@ seconds before the stop fix. A rare database lock can add up to 15 seconds per w
 stuck on a hung disk, which SIGKILL cannot end, can take longer.
 
 Keep `stop_grace_period: 60s` on the worker, as `compose.example.yaml` sets it, because Docker's
-default of 10 seconds can cut off the slow steps. Steps that do not check for a stop have no fixed
-limit. The large ones are a copy into the library with the artwork fetched for it, the daily
-database snapshot, and the repairs at the start of a filing pass (missing thumbnails and stale
-paths).
+default of 10 seconds can cut off the slow steps. Some steps do not check for a stop and have no
+fixed limit: a copy into the library with the artwork fetched for it, the daily database snapshot,
+and the repairs at the start of a filing pass (missing thumbnails and stale paths).
 
 If Docker kills one of these steps, no video or database data is lost. A copy leaves the library's
-file untouched and is normally redone at the first filing pass after the next start, at most 5
-minutes after it unless a job is running. A playlist still in progress or a missing library disk
-delays it. A snapshot is written again after the next start, once the first queued job and any
+file untouched, with a hidden `.partial` file beside it, and is normally redone at the first
+filing pass after the next start, at most 5 minutes after it unless a job is running. A playlist
+still in progress or a missing library disk delays it. A snapshot is written again after the next start, once the first queued job and any
 task due by then are done. A kill right after a video's move can leave its thumbnail and
 description in staging. A refresh that never reaches Jellyfin means the video appears at
 Jellyfin's next library scan.
