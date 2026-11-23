@@ -239,7 +239,7 @@ def test_organizer_gate_uses_effective_parent_status(monkeypatch, db, make_job, 
     monkeypatch.delenv('LIBRARY_SENTINEL', raising=False)
     monkeypatch.setattr(organizer, 'is_organizable', lambda session, job, dry_run=False: True)
     monkeypatch.setattr(organizer, 'organize_job', organize)
-    monkeypatch.setattr(organizer, 'notify_jellyfin', lambda: None)
+    monkeypatch.setattr(organizer, 'notify_jellyfin', lambda tick=None: None)
     stale = playlist_parent(make_job, 'queued')
     finished = video(make_job, V1, parent_id=stale.id, status='completed')
     reopened = playlist_parent(make_job, 'completed')

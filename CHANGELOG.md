@@ -24,6 +24,11 @@ describes.
   the failure. (phase 13)
 - A metadata lookup or scan that runs out of time also ends the processes yt-dlp started, such
   as deno, instead of leaving them running. (phase 13)
+- A stop no longer waits up to 60 seconds for a yt-dlp that has closed its output but not exited.
+  It ends yt-dlp within seconds, and the job goes back in the queue with its retries unchanged. A
+  Jellyfin refresh that gets no answer holds up a stop for about 3 seconds instead of up to 20,
+  and a Jellyfin that answers still gets the refresh.
+  ([#30](https://github.com/Ochsyp/youtube-manager/pull/30))
 - Filing and the parent backfills touch the worker's heartbeat for each item, so a long filing
   run no longer marks the worker unhealthy. (phase 13)
 - Schema version 3 gives every database the four indexes on downloads that the app's queries

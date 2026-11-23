@@ -67,7 +67,7 @@ def fake_ytdlp(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(subprocess, 'Popen', popen)
     monkeypatch.setattr(worker, 'throttle_youtube_requests', lambda: None)
-    monkeypatch.setattr(worker, 'terminate_process_group', lambda process, grace_seconds=0.0: process.wait())
+    monkeypatch.setattr(worker, 'terminate_process_group', lambda process: process.wait())
     monkeypatch.setattr(worker, 'finalize_after_download', lambda job: None)
     monkeypatch.setenv('YTDLP_FAKE_MODE', 'complete')
 
@@ -82,7 +82,7 @@ def stub_download(monkeypatch: pytest.MonkeyPatch, on_start=lambda: None, output
 
     monkeypatch.setattr(worker.subprocess, 'Popen', popen)
     monkeypatch.setattr(worker, 'resolve_expected_output_path', lambda job, output_template=None: None)
-    monkeypatch.setattr(worker, 'terminate_process_group', lambda process, grace_seconds=0.0: None)
+    monkeypatch.setattr(worker, 'terminate_process_group', lambda process: None)
     monkeypatch.setattr(worker, 'finalize_after_download', lambda job: None)
 
 
