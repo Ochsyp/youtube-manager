@@ -9,8 +9,8 @@ describes.
 
 ## [1.2.0] - 2026-11-23
 
-Phase 13 and dependency updates: most stops of the worker take a few seconds, and schema version
-3 closes two gaps in how an upgrade builds the schema.
+Phase 13, a fix to how the worker stops, and dependency updates: most stops of the worker take a
+few seconds, and schema version 3 closes two gaps in how an upgrade builds the schema.
 
 Before a host upgrades from 1.1.0, check that the volume holding the database has room for one
 more copy of it. The first start copies the database to `backups/` beside it (`data/backups` by
@@ -31,27 +31,26 @@ again after 1.0.3 queued it stays failed, showing auto-retry 8/8, with no new ER
 someone uses Retry. yt-dlp and the bgutil plugin are unchanged, so the PO-token provider stays at
 2.0.2.
 
-These parts of a stop can take longer than a few seconds, because the worker does not check for
-a stop during them:
+The parts of a stop that have a fixed limit now take about 8 seconds at most: up to 3 to notice
+the stop and 5 for a yt-dlp that ignores SIGTERM. That limit was about 90 seconds before the stop
+fix, and about 110 in 1.1.0, whose wait to kill a process was longer. A rare database lock can add
+up to 15 seconds per write.
 
-- A yt-dlp that has closed its output but not exited: up to 70 seconds, a 60-second wait and up
-  to 10 more to end it.
-- The Jellyfin refresh after a filing pass: 10 to 20 seconds if Jellyfin does not answer.
-- A copy into the library, the missing thumbnails a filing pass fetches again, and the daily
-  database snapshot: as long as their size and the disk or network need, with no fixed limit.
+Keep `stop_grace_period: 60s` on the worker, as `compose.example.yaml` sets it, because Docker's
+default of 10 seconds can cut off the slow steps. Steps that do not check for a stop have no fixed
+limit. The large ones are a copy into the library with the artwork fetched for it, the daily
+database snapshot, and the repairs at the start of a filing pass (missing thumbnails and stale
+paths).
 
-With Compose, set `stop_grace_period: 120s` on the worker service. The first two cases can follow
-each other and take up to 90 seconds together, and the rest leaves room for a busy database.
-Docker's default of 10 seconds covers none of them for certain, and the 60 seconds in
-`compose.example.yaml` do not cover a hung yt-dlp. No period covers a copy or a snapshot of any
-size.
-
-A stop that runs out of time loses no data. A download that Docker kills goes back in the queue
-at the next start. If the worker's own 60-second wait ended yt-dlp first, the job is marked failed
-and retried automatically, which uses one of its 8 retries. A killed copy leaves the library's
+If Docker kills one of these steps, no video or database data is lost. A copy leaves the library's
 file untouched and is redone at the first filing pass after the next start, at most 5 minutes
-after it unless a download is running. A killed snapshot is written again soon after the next
-start. A lost Jellyfin refresh means the new video appears at Jellyfin's next library scan.
+after it unless a job is running. A snapshot is written again after the next start, once the first
+queued job and any task due by then are done. A kill right after a video's move can leave its
+thumbnail and description in staging. A refresh that never reaches Jellyfin means the video
+appears at Jellyfin's next library scan.
+
+Stops were tested with a fake yt-dlp and a stubbed Jellyfin. They were not tried on a live
+download or a real Jellyfin.
 
 ### Changed
 
@@ -60,8 +59,7 @@ start. A lost Jellyfin refresh means the new video appears at Jellyfin's next li
   with every process it started, and the subscription check, the parent backfills and filing
   stop between two items, never inside a copy. A download cut short goes back in the queue, and
   a refresh or an expansion keeps its status, so the next start does the same work again. A
-  yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15, so stopping a running
-  download or lookup takes at most about 8 seconds. (phase 13)
+  yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15. (phase 13)
 - The image ships FastAPI 0.162.7 instead of 0.162.0, annotated-doc 0.0.6 instead of 0.0.5, and
   a newer build of its Python 3.13 base image. The image workflow uses docker/login-action 4.8.0.
   ([#23](https://github.com/Ochsyp/youtube-manager/pull/23),
@@ -77,16 +75,16 @@ start. A lost Jellyfin refresh means the new video appears at Jellyfin's next li
 - A metadata lookup or scan that runs out of time also ends the processes yt-dlp started, such
   as deno, instead of leaving them running. (phase 13)
 - A stop no longer waits up to 60 seconds for a yt-dlp that has closed its output but not exited.
-  It ends yt-dlp within seconds, and the job goes back in the queue with its retries unchanged. A
-  Jellyfin refresh that gets no answer holds up a stop for about 3 seconds instead of up to 20,
-  and a Jellyfin that answers still gets the refresh.
-  ([#30](https://github.com/Ochsyp/youtube-manager/pull/30))
+  It ends yt-dlp within seconds, and the job goes back in the queue with its retries unchanged.
+  Two rare cases still fail the job and use one retry: a stop that arrives while yt-dlp is being
+  ended after the full 60-second wait, and a yt-dlp that exits 0 on SIGTERM and leaves no file. A
+  Jellyfin refresh that gets no answer holds up a stop for about 3 seconds, and a Jellyfin that
+  answers still gets the refresh. ([#30](https://github.com/Ochsyp/youtube-manager/pull/30))
 - Filing and the parent backfills touch the worker's heartbeat for each item, so a long filing
   run no longer marks the worker unhealthy. (phase 13)
 - Schema version 3 gives every database the four indexes on downloads that the app's queries
   use. A database from before 1.0 whose youtube_id was never unique could reach version 2
-  without them. The step only adds indexes, so 1.1.0 still runs on the upgraded database, with a
-  warning in its log. (phase 13)
+  without them. (phase 13)
 - The upgrade code writes a column default that holds a quote, a date or a date-time correctly,
   and stops with an error naming the column for a SQL-function default, which SQLite cannot add
   to an existing table. No column of this release has such a default. (phase 13)
