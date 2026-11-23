@@ -9,32 +9,59 @@ describes.
 
 ## [1.2.0] - 2026-11-23
 
-Phase 13 and dependency updates: a stop of the worker is quick and clean, and schema version 3
-closes two gaps in how an upgrade builds the schema. Before a host upgrades, check that the volume
-holding the database has room for one copy of it. The first start copies the database to
-`backups/` beside it (`data/backups` by default) before it migrates the schema to version 3, as
-`youtube-pre-v3-from-v2-<UTC time>.db`, or `youtube-pre-v3-from-v0-<UTC time>.db` for a file from
-1.0.x. Upgrade the web UI and the worker in one step, as `docker compose up -d` does: the 1.2.0
-worker waits up to 300 seconds for that migration, which a 1.1.0 web UI never runs. The schema
-change only adds indexes, so going back needs no step: 1.1.0 runs on the upgraded database with a
-warning in the log of each service, and 1.0.3 ignores the schema version. yt-dlp and the bgutil
-plugin are unchanged, so the PO-token provider stays at 2.0.2.
+Phase 13 and dependency updates: most stops of the worker take a few seconds, and schema version
+3 closes two gaps in how an upgrade builds the schema.
 
-With Compose, set `stop_grace_period: 60s` on the worker service, as `compose.example.yaml` does.
-Without it, Docker kills the worker 10 seconds after the stop signal. A download or a lookup ends
-well within that time, but filing never stops inside a copy, and a large file on a slow disk can
-take longer. A copy that is killed leaves the library's file untouched and is redone at the next
-start.
+Before a host upgrades from 1.1.0, check that the volume holding the database has room for one
+more copy of it. The first start copies the database to `backups/` beside it (`data/backups` by
+default) before it migrates the schema to version 3, as `youtube-pre-v3-from-v2-<UTC time>.db`. If
+the copy cannot be written, the web UI logs an ERROR and does not start, and the database stays
+as it was. Upgrade the web UI and the worker in one step, as `docker compose up -d` does: the
+1.2.0 worker waits up to 300 seconds for that migration, which a 1.1.0 web UI never runs.
+
+A host that comes straight from 1.0.x needs room for 9 copies of the database beside the live
+file: the first copy, named `youtube-pre-v3-from-v0-<UTC time>.db`, the 7 daily snapshots that
+start with this upgrade, and one more while a snapshot is written. The 1.1.0 section below
+describes those snapshots and what else changes for such a host.
+
+The schema change only adds indexes, so going back needs no step: 1.1.0 runs on the upgraded
+database with a warning in the log of each service, and 1.0.3 ignores the schema version. If a
+host goes back to 1.0.3 and then forward again, a video that had been given up on and that failed
+again after 1.0.3 queued it stays failed, showing auto-retry 8/8, with no new ERROR line, until
+someone uses Retry. yt-dlp and the bgutil plugin are unchanged, so the PO-token provider stays at
+2.0.2.
+
+These parts of a stop can take longer than a few seconds, because the worker does not check for
+a stop during them:
+
+- A yt-dlp that has closed its output but not exited: up to 70 seconds, a 60-second wait and up
+  to 10 more to end it.
+- The Jellyfin refresh after a filing pass: 10 to 20 seconds if Jellyfin does not answer.
+- A copy into the library, the missing thumbnails a filing pass fetches again, and the daily
+  database snapshot: as long as their size and the disk or network need, with no fixed limit.
+
+With Compose, set `stop_grace_period: 120s` on the worker service. The first two cases can follow
+each other and take up to 90 seconds together, and the rest leaves room for a busy database.
+Docker's default of 10 seconds covers none of them for certain, and the 60 seconds in
+`compose.example.yaml` do not cover a hung yt-dlp. No period covers a copy or a snapshot of any
+size.
+
+A stop that runs out of time loses no data. A download that Docker kills goes back in the queue
+at the next start. If the worker's own 60-second wait ended yt-dlp first, the job is marked failed
+and retried automatically, which uses one of its 8 retries. A killed copy leaves the library's
+file untouched and is redone at the first filing pass after the next start, at most 5 minutes
+after it unless a download is running. A killed snapshot is written again soon after the next
+start. A lost Jellyfin refresh means the new video appears at Jellyfin's next library scan.
 
 ### Changed
 
-- A stop of the worker, such as `docker stop` or an update, takes a few seconds, or as long as a
-  running copy into the library needs. A metadata lookup or channel scan ends yt-dlp together
+- A stop of the worker, such as `docker stop` or an update, usually takes a few seconds, and the
+  notes above list what can take longer. A metadata lookup or channel scan ends yt-dlp together
   with every process it started, and the subscription check, the parent backfills and filing
   stop between two items, never inside a copy. A download cut short goes back in the queue, and
   a refresh or an expansion keeps its status, so the next start does the same work again. A
-  yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15, so stopping a download or
-  a lookup fits inside Docker's default 10 seconds. (phase 13)
+  yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15, so stopping a running
+  download or lookup takes at most about 8 seconds. (phase 13)
 - The image ships FastAPI 0.162.7 instead of 0.162.0, annotated-doc 0.0.6 instead of 0.0.5, and
   a newer build of its Python 3.13 base image. The image workflow uses docker/login-action 4.8.0.
   ([#23](https://github.com/Ochsyp/youtube-manager/pull/23),
@@ -54,9 +81,7 @@ start.
 - Schema version 3 gives every database the four indexes on downloads that the app's queries
   use. A database from before 1.0 whose youtube_id was never unique could reach version 2
   without them. The step only adds indexes, so 1.1.0 still runs on the upgraded database, with a
-  warning in its log. Like every upgrade, the first start copies the database to `backups/`
-  (`youtube-pre-v3-from-v2-<UTC time>.db`) before it migrates, so it needs free space for one
-  copy. (phase 13)
+  warning in its log. (phase 13)
 - The upgrade code writes a column default that holds a quote, a date or a date-time correctly,
   and stops with an error naming the column for a SQL-function default, which SQLite cannot add
   to an existing table. No column of this release has such a default. (phase 13)
