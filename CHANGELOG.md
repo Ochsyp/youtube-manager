@@ -32,9 +32,9 @@ someone uses Retry. yt-dlp and the bgutil plugin are unchanged, so the PO-token 
 2.0.2.
 
 The parts of a stop that have a fixed limit now take about 8 seconds at most: up to 3 to notice
-the stop and 5 for a yt-dlp that ignores SIGTERM. That limit was about 90 seconds before the stop
-fix, and about 110 in 1.1.0, whose wait to kill a process was longer. A rare database lock can add
-up to 15 seconds per write.
+the stop and 5 for a yt-dlp that ignores SIGTERM and then ends on SIGKILL. That limit was about 90
+seconds before the stop fix. A rare database lock can add up to 15 seconds per write, and a process
+stuck on a hung disk, which SIGKILL cannot end, can take longer.
 
 Keep `stop_grace_period: 60s` on the worker, as `compose.example.yaml` sets it, because Docker's
 default of 10 seconds can cut off the slow steps. Steps that do not check for a stop have no fixed
@@ -43,11 +43,12 @@ database snapshot, and the repairs at the start of a filing pass (missing thumbn
 paths).
 
 If Docker kills one of these steps, no video or database data is lost. A copy leaves the library's
-file untouched and is redone at the first filing pass after the next start, at most 5 minutes
-after it unless a job is running. A snapshot is written again after the next start, once the first
-queued job and any task due by then are done. A kill right after a video's move can leave its
-thumbnail and description in staging. A refresh that never reaches Jellyfin means the video
-appears at Jellyfin's next library scan.
+file untouched and is normally redone at the first filing pass after the next start, at most 5
+minutes after it unless a job is running. A playlist still in progress or a missing library disk
+delays it. A snapshot is written again after the next start, once the first queued job and any
+task due by then are done. A kill right after a video's move can leave its thumbnail and
+description in staging. A refresh that never reaches Jellyfin means the video appears at
+Jellyfin's next library scan.
 
 Stops were tested with a fake yt-dlp and a stubbed Jellyfin. They were not tried on a live
 download or a real Jellyfin.
@@ -80,9 +81,10 @@ download or a real Jellyfin.
   ended after the full 60-second wait, and a yt-dlp that exits 0 on SIGTERM and leaves no file. A
   Jellyfin refresh that gets no answer holds up a stop for about 3 seconds, and a Jellyfin that
   answers still gets the refresh. ([#30](https://github.com/Ochsyp/youtube-manager/pull/30))
-- Filing and the parent backfills touch the worker's heartbeat for each item, so a long filing
-  run no longer marks the worker unhealthy. (phase 13)
-- Schema version 3 gives every database the four indexes on downloads that the app's queries
+- Filing and the parent backfills touch the worker's heartbeat for each item, so a filing run of
+  many videos no longer marks the worker unhealthy. A single copy or repair pass that outlasts
+  the healthcheck's 600 seconds still can. (phase 13)
+- Schema version 3 makes sure every database has four indexes on downloads that the app's queries
   use. A database from before 1.0 whose youtube_id was never unique could reach version 2
   without them. (phase 13)
 - The upgrade code writes a column default that holds a quote, a date or a date-time correctly,
