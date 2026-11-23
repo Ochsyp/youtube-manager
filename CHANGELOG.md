@@ -7,15 +7,40 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-23
+
+Phase 13 and dependency updates: a stop of the worker is quick and clean, and schema version 3
+closes two gaps in how an upgrade builds the schema. Before a host upgrades, check that the volume
+holding the database has room for one copy of it. The first start copies the database to
+`backups/` beside it (`data/backups` by default) before it migrates the schema to version 3, as
+`youtube-pre-v3-from-v2-<UTC time>.db`, or `youtube-pre-v3-from-v0-<UTC time>.db` for a file from
+1.0.x. Upgrade the web UI and the worker in one step, as `docker compose up -d` does: the 1.2.0
+worker waits up to 300 seconds for that migration, which a 1.1.0 web UI never runs. The schema
+change only adds indexes, so going back needs no step: 1.1.0 runs on the upgraded database with a
+warning in the log of each service, and 1.0.3 ignores the schema version. yt-dlp and the bgutil
+plugin are unchanged, so the PO-token provider stays at 2.0.2.
+
+With Compose, set `stop_grace_period: 60s` on the worker service, as `compose.example.yaml` does.
+Without it, Docker kills the worker 10 seconds after the stop signal. A download or a lookup ends
+well within that time, but filing never stops inside a copy, and a large file on a slow disk can
+take longer. A copy that is killed leaves the library's file untouched and is redone at the next
+start.
+
 ### Changed
 
-- A stop of the worker, such as `docker stop` or an update, ends whatever it is doing within a
-  few seconds. A metadata lookup or channel scan ends yt-dlp together with every process it
-  started, and the subscription check, the parent backfills and filing stop between two items,
-  never inside a copy. A download cut short goes back in the queue, and a refresh or an
-  expansion keeps its status, so the next start does the same work again. A yt-dlp that ignores
-  SIGTERM is killed 5 seconds later instead of 15, which keeps the whole stop inside Docker's
-  default 10 seconds. (phase 13)
+- A stop of the worker, such as `docker stop` or an update, takes a few seconds, or as long as a
+  running copy into the library needs. A metadata lookup or channel scan ends yt-dlp together
+  with every process it started, and the subscription check, the parent backfills and filing
+  stop between two items, never inside a copy. A download cut short goes back in the queue, and
+  a refresh or an expansion keeps its status, so the next start does the same work again. A
+  yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15, so stopping a download or
+  a lookup fits inside Docker's default 10 seconds. (phase 13)
+- The image ships FastAPI 0.162.7 instead of 0.162.0, annotated-doc 0.0.6 instead of 0.0.5, and
+  a newer build of its Python 3.13 base image. The image workflow uses docker/login-action 4.8.0.
+  ([#23](https://github.com/Ochsyp/youtube-manager/pull/23),
+  [#24](https://github.com/Ochsyp/youtube-manager/pull/24),
+  [#26](https://github.com/Ochsyp/youtube-manager/pull/26),
+  [#28](https://github.com/Ochsyp/youtube-manager/pull/28))
 
 ### Fixed
 
@@ -386,7 +411,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...v1.0.2
