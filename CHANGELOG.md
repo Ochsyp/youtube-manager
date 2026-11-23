@@ -7,6 +7,35 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- A stop of the worker, such as `docker stop` or an update, ends whatever it is doing within a
+  few seconds. A metadata lookup or channel scan ends yt-dlp together with every process it
+  started, and the subscription check, the parent backfills and filing stop between two items,
+  never inside a copy. A download cut short goes back in the queue, and a refresh or an
+  expansion keeps its status, so the next start does the same work again. A yt-dlp that ignores
+  SIGTERM is killed 5 seconds later instead of 15, which keeps the whole stop inside Docker's
+  default 10 seconds. (phase 13)
+
+### Fixed
+
+- The worker exits with status 1 instead of 0 when the web UI has not prepared the database
+  within 300 seconds, so a container set to restart on failure comes back and monitoring sees
+  the failure. (phase 13)
+- A metadata lookup or scan that runs out of time also ends the processes yt-dlp started, such
+  as deno, instead of leaving them running. (phase 13)
+- Filing and the parent backfills touch the worker's heartbeat for each item, so a long filing
+  run no longer marks the worker unhealthy. (phase 13)
+- Schema version 3 gives every database the four indexes on downloads that the app's queries
+  use. A database from before 1.0 whose youtube_id was never unique could reach version 2
+  without them. The step only adds indexes, so 1.1.0 still runs on the upgraded database, with a
+  warning in its log. Like every upgrade, the first start copies the database to `backups/`
+  (`youtube-pre-v3-from-v2-<UTC time>.db`) before it migrates, so it needs free space for one
+  copy. (phase 13)
+- The upgrade code writes a column default that holds a quote, a date or a date-time correctly,
+  and stops with an error naming the column for a SQL-function default, which SQLite cannot add
+  to an existing table. No column of this release has such a default. (phase 13)
+
 ## [1.1.0] - 2026-11-14
 
 Phases 9 to 11, a fix to how an upgrade adds columns, and a dependency update: SQLite connection

@@ -253,11 +253,13 @@ def run_worker_passes(
     stop = InstantEvent()
     calls = []
 
-    # Move the clock to the next pass's time, stopping the loop after the last pass.
+    # Move the clock to the next pass's time. After the last pass, ask for a stop instead, which
+    # ends the loop before that extra pass runs any task.
     def next_job():
-        clock[0] = start + pending.pop(0)
         if not pending:
             stop.set()
+            return None
+        clock[0] = start + pending.pop(0)
         return None
 
     monkeypatch.setattr(worker, '_shutdown', stop)
