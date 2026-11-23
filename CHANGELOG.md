@@ -7,15 +7,65 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-23
+
+Phase 13, a fix to how the worker stops, and dependency updates: most stops of the worker take a
+few seconds, and schema version 3 closes two gaps in how an upgrade builds the schema.
+
+Before a host upgrades from 1.1.0, check that the volume holding the database has room for one
+more copy of it. The first start copies the database to `backups/` beside it (`data/backups` by
+default) before it migrates the schema to version 3, as `youtube-pre-v3-from-v2-<UTC time>.db`. If
+the copy cannot be written, the web UI logs an ERROR and does not start, and the database stays
+as it was. Upgrade the web UI and the worker in one step, as `docker compose up -d` does: the
+1.2.0 worker waits up to 300 seconds for that migration, which a 1.1.0 web UI never runs.
+
+A host that comes straight from 1.0.x needs room for 9 copies of the database beside the live
+file: the first copy, named `youtube-pre-v3-from-v0-<UTC time>.db`, the 7 daily snapshots that
+start with this upgrade, and one more while a snapshot is written. The 1.1.0 section below
+describes those snapshots and what else changes for such a host.
+
+The schema change only adds indexes, so going back needs no step: 1.1.0 runs on the upgraded
+database with a warning in the log of each service, and 1.0.3 ignores the schema version. If a
+host goes back to 1.0.3 and then forward again, a video that had been given up on and that failed
+again after 1.0.3 queued it stays failed, showing auto-retry 8/8, with no new ERROR line, until
+someone uses Retry. yt-dlp and the bgutil plugin are unchanged, so the PO-token provider stays at
+2.0.2.
+
+The parts of a stop that have a fixed limit now take about 8 seconds at most: up to 3 to notice
+the stop and 5 for a yt-dlp that ignores SIGTERM and then ends on SIGKILL. That limit was about 90
+seconds before the stop fix. A rare database lock can add up to 15 seconds per write, and a process
+stuck on a hung disk, which SIGKILL cannot end, can take longer.
+
+Keep `stop_grace_period: 60s` on the worker, as `compose.example.yaml` sets it, because Docker's
+default of 10 seconds can cut off the slow steps. Some steps do not check for a stop and have no
+fixed limit: a copy into the library with the artwork fetched for it, the daily database snapshot,
+and the repairs at the start of a filing pass (missing thumbnails and stale paths).
+
+If Docker kills one of these steps, no video or database data is lost. A killed copy leaves a
+hidden `.partial` file in the library, never a half-written video under its final name. It is
+normally redone at the first filing pass after the next start, at most 5 minutes after it unless
+a job is running. A playlist still in progress or a missing library disk delays it. A snapshot is
+written again after the next start, once the first queued job and any task due by then are done.
+A kill right after a video's move can leave its thumbnail and description in staging. A refresh
+that never reaches Jellyfin means the video appears at Jellyfin's next library scan.
+
+Stops were tested with a fake yt-dlp and a stubbed Jellyfin. They were not tried on a live
+download or a real Jellyfin.
+
 ### Changed
 
-- A stop of the worker, such as `docker stop` or an update, ends whatever it is doing within a
-  few seconds. A metadata lookup or channel scan ends yt-dlp together with every process it
-  started, and the subscription check, the parent backfills and filing stop between two items,
-  never inside a copy. A download cut short goes back in the queue, and a refresh or an
-  expansion keeps its status, so the next start does the same work again. A yt-dlp that ignores
-  SIGTERM is killed 5 seconds later instead of 15, which keeps the whole stop inside Docker's
-  default 10 seconds. (phase 13)
+- A stop of the worker, such as `docker stop` or an update, usually takes a few seconds, and the
+  notes above list what can take longer. A metadata lookup or channel scan ends yt-dlp together
+  with every process it started, and the subscription check, the parent backfills and filing
+  stop between two items, never inside a copy. A download cut short goes back in the queue, and
+  a refresh or an expansion keeps its status, so the next start does the same work again. A
+  yt-dlp that ignores SIGTERM is killed 5 seconds later instead of 15. (phase 13)
+- The image ships FastAPI 0.162.7 instead of 0.162.0, annotated-doc 0.0.6 instead of 0.0.5, and
+  a newer build of its Python 3.13 base image. The image workflow uses docker/login-action 4.8.0.
+  ([#23](https://github.com/Ochsyp/youtube-manager/pull/23),
+  [#24](https://github.com/Ochsyp/youtube-manager/pull/24),
+  [#26](https://github.com/Ochsyp/youtube-manager/pull/26),
+  [#28](https://github.com/Ochsyp/youtube-manager/pull/28))
 
 ### Fixed
 
@@ -25,18 +75,17 @@ describes.
 - A metadata lookup or scan that runs out of time also ends the processes yt-dlp started, such
   as deno, instead of leaving them running. (phase 13)
 - A stop no longer waits up to 60 seconds for a yt-dlp that has closed its output but not exited.
-  It ends yt-dlp within seconds, and the job goes back in the queue with its retries unchanged. A
-  Jellyfin refresh that gets no answer holds up a stop for about 3 seconds instead of up to 20,
-  and a Jellyfin that answers still gets the refresh.
-  ([#30](https://github.com/Ochsyp/youtube-manager/pull/30))
-- Filing and the parent backfills touch the worker's heartbeat for each item, so a long filing
-  run no longer marks the worker unhealthy. (phase 13)
-- Schema version 3 gives every database the four indexes on downloads that the app's queries
+  It ends yt-dlp within seconds, and the job goes back in the queue with its retries unchanged.
+  Two rare cases still fail the job and use one retry: a stop that arrives while yt-dlp is being
+  ended after the full 60-second wait, and a yt-dlp that exits 0 on SIGTERM and leaves no file. A
+  Jellyfin refresh that gets no answer holds up a stop for about 3 seconds, and a Jellyfin that
+  answers still gets the refresh. ([#30](https://github.com/Ochsyp/youtube-manager/pull/30))
+- Filing and the parent backfills touch the worker's heartbeat for each item, so a filing run of
+  many videos no longer marks the worker unhealthy. A single copy or repair pass that outlasts
+  the healthcheck's 600 seconds still can. (phase 13)
+- Schema version 3 makes sure every database has four indexes on downloads that the app's queries
   use. A database from before 1.0 whose youtube_id was never unique could reach version 2
-  without them. The step only adds indexes, so 1.1.0 still runs on the upgraded database, with a
-  warning in its log. Like every upgrade, the first start copies the database to `backups/`
-  (`youtube-pre-v3-from-v2-<UTC time>.db`) before it migrates, so it needs free space for one
-  copy. (phase 13)
+  without them. (phase 13)
 - The upgrade code writes a column default that holds a quote, a date or a date-time correctly,
   and stops with an error naming the column for a SQL-function default, which SQLite cannot add
   to an existing table. No column of this release has such a default. (phase 13)
@@ -391,7 +440,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.1...v1.0.2
