@@ -6,7 +6,9 @@
 # POSIX only: the fake is started through its shebang and stopped with os.killpg.
 # -------------------------------------------------------
 
+import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -258,3 +260,99 @@ def test_stop_during_a_hanging_download_ends_the_whole_tree(
     row = stored(db, job.id)
     assert row.status == 'queued'
     assert row.auto_retry_attempts == 2
+
+
+# The pids of the children the fake's stubborn modes started, read from the file they append to.
+# Any child still alive after the test is killed, so a failing test leaves nothing running.
+@pytest.fixture
+def stubborn_pids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    pid_file = tmp_path / 'children.pid'
+    monkeypatch.setenv('YTDLP_FAKE_CHILD_PID_FILE', str(pid_file))
+
+    def pids() -> list[int]:
+        return [int(pid) for pid in pid_file.read_text().split()] if pid_file.exists() else []
+
+    yield pids
+    for pid in pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+# The pids among `pids` that still run.
+def still_running(pids: list[int]) -> list[int]:
+    return [pid for pid in pids if is_running(pid)]
+
+
+# A lookup that runs out of time also ends a child of yt-dlp that ignores SIGTERM: SIGKILL follows
+# after PROCESS_KILL_TIMEOUT_SECONDS, so the call takes no longer than when yt-dlp itself ignores
+# SIGTERM.
+@pytest.mark.posix
+def test_lookup_timeout_ends_a_stubborn_child(ytdlp_on_path, stubborn_pids, monkeypatch):
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'stubborn-child')
+    started = time.monotonic()
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        worker.run_command(LOOKUP, timeout=2)
+
+    assert time.monotonic() - started < 2 + 2 * worker.PROCESS_KILL_TIMEOUT_SECONDS + 3
+    assert stubborn_pids()
+    assert still_running(stubborn_pids()) == []
+
+
+# A cancelled download ends a child of yt-dlp that ignores SIGTERM before download_video returns,
+# and the job ends cancelled.
+@pytest.mark.posix
+def test_cancel_ends_a_stubborn_child(ytdlp_on_path, stubborn_pids, db, make_job, library, monkeypatch):
+    job = make_job(youtube_id=VIDEO_ID, title='Fake Video')
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'stubborn-child-download')
+
+    # Ask for the cancel once the download has started its child.
+    def cancel_once_started() -> None:
+        deadline = time.monotonic() + 30
+        while not stubborn_pids() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        with db() as session:
+            session.get(Download, job.id).cancel_requested = True
+            session.commit()
+
+    canceller = threading.Thread(target=cancel_once_started, daemon=True)
+    canceller.start()
+    try:
+        worker.download_video(job)
+    finally:
+        canceller.join(35)
+
+    assert stored(db, job.id).status == 'cancelled'
+    assert stubborn_pids()
+    assert still_running(stubborn_pids()) == []
+
+
+# A child that yt-dlp leaves running when it exits by itself, here after a successful lookup, is
+# ended before run_command returns.
+@pytest.mark.posix
+def test_child_left_by_a_finished_lookup_is_ended(ytdlp_on_path, stubborn_pids, monkeypatch):
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'stubborn-child-exit')
+
+    result = worker.run_command(LOOKUP, timeout=60)
+
+    assert json.loads(result.stdout)['id'] == VIDEO_ID
+    assert stubborn_pids()
+    assert still_running(stubborn_pids()) == []
+
+
+# The same for a download that completes: the children its lookup and its download left are
+# ended, and the job completes.
+@pytest.mark.posix
+def test_children_left_by_a_finished_download_are_ended(
+    ytdlp_on_path, stubborn_pids, db, make_job, library, monkeypatch,
+):
+    job = make_job(youtube_id=VIDEO_ID, title='Fake Video')
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'stubborn-child-exit')
+
+    worker.download_video(job)
+
+    assert stored(db, job.id).status == 'completed'
+    assert stubborn_pids()
+    assert still_running(stubborn_pids()) == []

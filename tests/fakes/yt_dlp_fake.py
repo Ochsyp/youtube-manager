@@ -26,9 +26,14 @@ from urllib.parse import parse_qs, urlparse
 # 'hang-tree-lookup' hangs in every call and 'hang-tree-download' only in a download; both start a
 # child and write marker files to YTDLP_FAKE_MARKER_DIR, so a caller can see that SIGTERM reached
 # each process (see hang_tree). The image smoke test mounts this file as the image's yt-dlp.
+# The stubborn modes start a child that ignores SIGTERM (see start_stubborn_child): in every call
+# then hang ('stubborn-child'), only in a download then hang ('stubborn-child-download'), or in
+# every call and then go on as 'complete' and exit 0, leaving the child behind
+# ('stubborn-child-exit').
 MODES = (
     'complete', 'fragment-then-fail', 'stall', 'ignore-sigterm', 'spawn-child', 'close-output-hang',
     'hang-tree-lookup', 'hang-tree-download',
+    'stubborn-child', 'stubborn-child-download', 'stubborn-child-exit',
 )
 
 # How long a hanging mode sleeps: far longer than any test waits.
@@ -137,6 +142,19 @@ def hang_tree() -> None:
     time.sleep(HANG_SECONDS)
 
 
+# Start a child that ignores SIGTERM and sleeps, with no stdin, stdout or stderr of ours, as
+# yt-dlp runs ffmpeg on pipes of its own. Its pid is appended as one line to
+# YTDLP_FAKE_CHILD_PID_FILE, so a test sees every child its calls left.
+def start_stubborn_child() -> None:
+    code = f'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep({HANG_SECONDS})'
+    child = subprocess.Popen(
+        [sys.executable, '-c', code],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    with open(os.environ['YTDLP_FAKE_CHILD_PID_FILE'], 'a', encoding='utf-8') as fh:
+        fh.write(f'{child.pid}\n')
+
+
 # Sleep as hanging `mode` says, printing nothing.
 def hang(mode: str) -> None:
     if mode == 'ignore-sigterm':
@@ -161,6 +179,12 @@ def main(argv: list[str]) -> int:
     if mode == 'hang-tree-lookup':
         hang_tree()
         return 0
+    if mode == 'stubborn-child':
+        start_stubborn_child()
+        time.sleep(HANG_SECONDS)
+        return 0
+    if mode == 'stubborn-child-exit':
+        start_stubborn_child()
 
     info = video_info(url)
     if '--dump-single-json' in flags:
@@ -187,6 +211,12 @@ def main(argv: list[str]) -> int:
     if mode == 'hang-tree-download':
         sys.stdout.flush()
         hang_tree()
+        return 0
+
+    if mode == 'stubborn-child-download':
+        sys.stdout.flush()
+        start_stubborn_child()
+        time.sleep(HANG_SECONDS)
         return 0
 
     if mode == 'fragment-then-fail':
