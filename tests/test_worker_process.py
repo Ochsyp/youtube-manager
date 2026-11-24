@@ -356,3 +356,31 @@ def test_children_left_by_a_finished_download_are_ended(
     assert stored(db, job.id).status == 'completed'
     assert stubborn_pids()
     assert still_running(stubborn_pids()) == []
+
+
+# A process whose pid names no group of its own is never signalled, running or not: killpg(0) is
+# the caller's own group, killpg(-1) reaches pid 1, and pid 1 and the caller's group are not
+# yt-dlp's. Stand-ins in tests carry such pids; os.killpg is replaced, so a failure signals nothing.
+@pytest.mark.posix
+@pytest.mark.parametrize('running', [False, True])
+@pytest.mark.parametrize('pid', [0, -1, 1, 'own group'])
+def test_terminate_never_signals_a_group_that_is_not_yt_dlps(monkeypatch, pid, running):
+    sent = []
+    monkeypatch.setattr(worker.os, 'killpg', lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(worker, 'PROCESS_KILL_TIMEOUT_SECONDS', 0.2)
+
+    # A Popen stand-in with that pid, still running or already exited 0.
+    class Process:
+        def __init__(self):
+            self.pid = os.getpgrp() if pid == 'own group' else pid
+            self.returncode = None if running else 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    worker.terminate_process_group(Process())
+
+    assert sent == []
