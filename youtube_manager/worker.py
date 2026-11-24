@@ -623,8 +623,11 @@ def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> s
                 if time.monotonic() >= deadline:
                     raise subprocess.TimeoutExpired(command, timeout) from None
     finally:
-        if process.poll() is None:
-            terminate_process_group(process)
+        cut_short = process.poll() is None
+        # Also when yt-dlp exited by itself, to end a child it left running.
+        terminate_process_group(process)
+        # communicate() has closed the pipes of a call that ran to its end.
+        if cut_short:
             for pipe in (process.stdout, process.stderr):
                 if pipe:
                     pipe.close()
@@ -638,23 +641,67 @@ def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> s
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
-# Stop a download and everything it spawned. yt-dlp runs in its own session and forks ffmpeg,
-# so the whole process group is signalled; SIGKILL follows a SIGTERM that goes unanswered, or a
-# merge wedged inside ffmpeg would hold the job in 'downloading' forever. Waits, so no zombie.
+# Whether process group `pgid` still has a member that is not a zombie. Reads /proc where it
+# exists, as in the image, since a zombie that tini has yet to reap still counts for killpg.
+def group_has_live_members(pgid: int) -> bool:
+    # Windows, where only the tests run, has no process groups to look into.
+    if not hasattr(os, 'killpg'):
+        return False
+    proc = Path('/proc')
+    if not proc.is_dir():
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            # After the ')' that ends the command name: state, ppid, pgrp, ...
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(fields[2]) == pgid and fields[0] != 'Z':
+            return True
+    return False
+
+
+# Wait up to `seconds` for `process` to exit and its group to have no live member left. True once
+# both hold; the exit is reaped, so no zombie stays behind.
+def wait_for_group(process: subprocess.Popen, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while True:
+        if process.poll() is not None and not group_has_live_members(process.pid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+# End yt-dlp and everything it started. yt-dlp runs in its own session and forks ffmpeg or deno,
+# so the whole process group is signalled: SIGTERM, then SIGKILL to whatever is still alive after
+# PROCESS_KILL_TIMEOUT_SECONDS, or a merge wedged inside ffmpeg would hold the job forever. Also
+# called after yt-dlp exited by itself, which ends a child it left running; with nothing left it
+# signals nothing. Returns once the group is gone or both waits ran out.
 def terminate_process_group(process: subprocess.Popen) -> None:
+    # The group id stays reserved while the group has a live member, so this signals no stranger;
+    # once it is empty there is nothing to signal. Checked before the loop names SIGKILL, which
+    # Windows, where the tests also call this, lacks.
+    if process.poll() is not None and not group_has_live_members(process.pid):
+        return
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        # Only ever signal a live child: once it is reaped its pid can belong to somebody else.
-        if process.poll() is not None:
-            return
+        if sig == signal.SIGKILL:
+            warn(f'yt-dlp (pid {process.pid}) or a process it started ignored SIGTERM for '
+                 f'{PROCESS_KILL_TIMEOUT_SECONDS}s; killing its process group')
         try:
             os.killpg(process.pid, sig)
         except (ProcessLookupError, PermissionError):
             break
-        try:
-            process.wait(timeout=PROCESS_KILL_TIMEOUT_SECONDS)
+        if wait_for_group(process, PROCESS_KILL_TIMEOUT_SECONDS):
             return
-        except subprocess.TimeoutExpired:
-            continue
 
     process.poll()
 
