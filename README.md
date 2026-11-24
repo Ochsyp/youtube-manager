@@ -103,14 +103,14 @@ release that `YTM_VERSION` names, and every Compose command for that file needs 
 variable, so keep it in an `.env` file beside the example:
 
 ```sh
-echo 'YTM_VERSION=1.0.0' > .env
+echo 'YTM_VERSION=1.2.0' > .env
 docker compose -f compose.example.yaml up -d
 ```
 
 - **Image.** Each release is published as `ghcr.io/ochsyp/youtube-manager:<version>`,
-  such as `1.0.0`, for amd64 and arm64, and `latest` moves with every release that is not
+  such as `X.Y.Z`, for amd64 and arm64, and `latest` moves with every release that is not
   a prerelease. In production, pin the digest the release notes list as well, as in
-  `YTM_VERSION=1.0.0@sha256:<digest>`: a tag can be moved to another image, a digest
+  `YTM_VERSION=X.Y.Z@sha256:<digest>`: a tag can be moved to another image, a digest
   cannot.
 - **Commands.** The image has two: `web`, the default, serves the UI on port 8080, and
   `worker` runs the download worker. Arguments after either go to its process, and any
