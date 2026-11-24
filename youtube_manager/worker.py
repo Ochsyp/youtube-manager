@@ -647,7 +647,7 @@ def terminate_process_group(process: subprocess.Popen) -> None:
         if process.poll() is not None:
             return
         try:
-            os.kill(process.pid, sig)  # RED ON PURPOSE: skips yt-dlp's children; reverted next
+            os.killpg(process.pid, sig)
         except (ProcessLookupError, PermissionError):
             break
         try:
