@@ -79,7 +79,7 @@ uvicorn==0.54.0
     # via -r requirements.in
 websockets==17.4
     # via yt-dlp
-yt-dlp==2026.10.26
+yt-dlp==2026.11.23
     # via -r requirements.in
 yt-dlp-ejs==0.8.0
     # via yt-dlp
