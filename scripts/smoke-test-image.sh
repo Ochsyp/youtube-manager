@@ -5,7 +5,9 @@
 #
 # Checks one built image on one platform: the package imports, yt-dlp, deno and ffmpeg run, the
 # web UI answers /health, and the worker finds its components, reaches its main loop under tini
-# and stops on SIGTERM. CI runs it for each architecture before anything is pushed.
+# and stops on SIGTERM. It then stops a worker during a hanging lookup and a hanging download,
+# with tests/fakes/yt_dlp_fake.py standing in for yt-dlp, so no call reaches YouTube. CI runs it
+# for each architecture before anything is pushed.
 # Usage: smoke-test-image.sh IMAGE [PLATFORM], such as ytm-smoke:arm64 linux/arm64.
 # -------------------------------------------------------
 
@@ -23,9 +25,17 @@ PLATFORM="${2:-}"
 # under QEMU in CI and starts many times slower; a container that exits fails its wait at once.
 TIMEOUT="${SMOKE_TIMEOUT:-300}"
 
+# Seconds a worker may take to stop during a hanging yt-dlp, SMOKE_STOP_LIMIT if set. It stops in
+# a few seconds; the limit leaves room for a slow runner and stays under the 60 s grace period.
+STOP_LIMIT="${SMOKE_STOP_LIMIT:-20}"
+
+# The fake yt-dlp in the checkout this script belongs to.
+FAKE_YTDLP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tests/fakes/yt_dlp_fake.py"
+
 # Unique per run, so a container left by an aborted run cannot collide with these.
 WEB="ytm-smoke-web-$$"
 WORKER="ytm-smoke-worker-$$"
+STALLED="ytm-smoke-stalled-$$"
 
 # data/, staging/ and library/ for /app/data, /downloads and /media, owned by the user running the
 # test. Both containers run as that user through PUID/PGID, so the trap can remove all they write.
@@ -45,7 +55,7 @@ USER_ENV=(-e "PUID=$RUN_UID" -e "PGID=$RUN_GID")
 cleanup() {
     local status=$?
     local name
-    for name in "$WEB" "$WORKER"; do
+    for name in "$WEB" "$WORKER" "$STALLED"; do
         if docker container inspect "$name" >/dev/null 2>&1; then
             echo "----- log of $name -----"
             docker logs "$name" 2>&1 || true
@@ -138,13 +148,102 @@ if [[ "$pid1" != *tini* ]]; then
     exit 1
 fi
 
+# The web container keeps running: the stops below queue a job through it.
 echo "==> Stop"
-docker stop -t 30 "$WORKER" "$WEB" >/dev/null
+docker stop -t 30 "$WORKER" >/dev/null
 if [[ "$(docker logs "$WORKER" 2>&1)" != *'YouTube worker stopped'* ]]; then
     echo "the worker did not log 'YouTube worker stopped' after SIGTERM" >&2
     exit 1
 fi
-echo "exit codes: web $(docker container inspect -f '{{.State.ExitCode}}' "$WEB")," \
-    "worker $(docker container inspect -f '{{.State.ExitCode}}' "$WORKER")"
+echo "worker exit code: $(docker container inspect -f '{{.State.ExitCode}}' "$WORKER")"
+
+# The stand-in for yt-dlp, executable by the containers' user: the checkout's copy lacks the
+# executable bit. It is mounted read-only over the image's yt-dlp.
+STAND_IN="$WORKDIR/yt-dlp"
+cp "$FAKE_YTDLP" "$STAND_IN"
+chmod 755 "$STAND_IN"
+
+# Every row of the downloads table as "status retries", one per line, read by the web container.
+job_rows() {
+    docker exec -u "$RUN_UID:$RUN_GID" "$WEB" python -c '
+import sqlite3
+db = sqlite3.connect("file:/app/data/youtube.db?mode=ro", uri=True)
+for status, retries in db.execute("SELECT status, auto_retry_attempts FROM downloads"):
+    print(status, retries)
+'
+}
+
+# Starts a worker whose yt-dlp hangs as the fake's MODE says, stops it once the hang has begun,
+# and fails unless it exits 0 within STOP_LIMIT seconds, with the stand-in and its child each ended
+# by the worker's SIGTERM and the job back in the queue with no retry used. Each stop has a marker
+# folder of its own, so the second never sees the first one's files.
+stop_during() {
+    local mode="$1" what="$2"
+    local markers="$WORKDIR/markers-$mode"
+    mkdir "$markers"
+
+    echo "==> Stop during a hanging $what"
+    docker_run -d --name "$STALLED" --tmpfs /tmp "${USER_ENV[@]}" "${MOUNTS[@]}" \
+        -v "$STAND_IN:/usr/local/bin/yt-dlp:ro" -v "$markers:/markers" \
+        -e "YTDLP_FAKE_MODE=$mode" -e YTDLP_FAKE_MARKER_DIR=/markers \
+        "$IMAGE" worker >/dev/null
+    wait_until "$STALLED" "hanging $what" test -e "$markers/started"
+
+    local started=$SECONDS
+    docker stop -t 60 "$STALLED" >/dev/null
+    local took=$((SECONDS - started))
+    local code
+    code="$(docker container inspect -f '{{.State.ExitCode}}' "$STALLED")"
+    echo "the worker stopped in ${took}s with exit code $code"
+
+    # 137 means docker stop had to kill it when the grace period ran out.
+    if [[ "$code" != 0 ]]; then
+        echo "the worker exited with $code, not 0" >&2
+        return 1
+    fi
+    if ((took > STOP_LIMIT)); then
+        echo "the worker took ${took}s to stop, more than ${STOP_LIMIT}s" >&2
+        return 1
+    fi
+    if [[ "$(docker logs "$STALLED" 2>&1)" != *'YouTube worker stopped'* ]]; then
+        echo "the worker did not log 'YouTube worker stopped'" >&2
+        return 1
+    fi
+    # A missing marker means that process got no SIGTERM and only ended with the container.
+    local marker
+    for marker in child-stopped parent-stopped; do
+        if [[ ! -e "$markers/$marker" ]]; then
+            echo "no $marker marker: the worker did not end the stand-in's process group" >&2
+            return 1
+        fi
+    done
+    local rows
+    rows="$(job_rows)"
+    if [[ "$rows" != 'queued 0' ]]; then
+        echo "the job should be back in the queue with no retry used, but reads: $rows" >&2
+        return 1
+    fi
+    echo "the worker ended the stand-in and its child, and the job is back in the queue"
+    docker rm "$STALLED" >/dev/null
+}
+
+# One video with a made-up id, queued through the web UI's own form; the stand-in answers for it.
+echo "==> Queue a video"
+docker exec "$WEB" curl -fsS -o /dev/null -H 'Origin: http://127.0.0.1:8080' \
+    --data-urlencode 'url=https://www.youtube.com/watch?v=smoketest01' \
+    --data-urlencode 'request_type=video' http://127.0.0.1:8080/add
+rows="$(job_rows)"
+if [[ "$rows" != 'queued 0' ]]; then
+    echo "the video was not queued; the downloads table reads: $rows" >&2
+    exit 1
+fi
+
+# The same job both times: the lookup stop puts it back in the queue, where the next worker finds
+# it and this time reaches the download.
+stop_during hang-tree-lookup lookup
+stop_during hang-tree-download download
+
+docker stop -t 30 "$WEB" >/dev/null
+echo "web exit code: $(docker container inspect -f '{{.State.ExitCode}}' "$WEB")"
 
 echo "Smoke test passed: $IMAGE ${PLATFORM:-(image platform)}"

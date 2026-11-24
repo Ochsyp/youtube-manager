@@ -23,8 +23,12 @@ from urllib.parse import parse_qs, urlparse
 # 'ignore-sigterm' sleeps through SIGTERM, and 'spawn-child' starts a sleeping child, as yt-dlp
 # starts ffmpeg or deno, and writes its pid to YTDLP_FAKE_CHILD_PID_FILE. 'close-output-hang' applies
 # to a download only: it finishes the file, closes stdout and stderr, and never exits.
+# 'hang-tree-lookup' hangs in every call and 'hang-tree-download' only in a download; both start a
+# child and write marker files to YTDLP_FAKE_MARKER_DIR, so a caller can see that SIGTERM reached
+# each process (see hang_tree). The image smoke test mounts this file as the image's yt-dlp.
 MODES = (
     'complete', 'fragment-then-fail', 'stall', 'ignore-sigterm', 'spawn-child', 'close-output-hang',
+    'hang-tree-lookup', 'hang-tree-download',
 )
 
 # How long a hanging mode sleeps: far longer than any test waits.
@@ -99,6 +103,40 @@ def write_file(path: str, content: str) -> None:
         fh.write(content)
 
 
+# The child hang_tree starts, run as `python -c CHILD_CODE MARKER_DIR`: it writes 'child-ready'
+# once its SIGTERM handler is in place, and 'child-stopped' when SIGTERM arrives, then exits.
+CHILD_CODE = '''
+import os, signal, sys, time
+marker_dir = sys.argv[1]
+def stop(signum, frame):
+    open(os.path.join(marker_dir, 'child-stopped'), 'w').close()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+open(os.path.join(marker_dir, 'child-ready'), 'w').close()
+time.sleep(3600)
+'''
+
+
+# Start a child, as yt-dlp starts ffmpeg, write 'started' once both run, and sleep. On SIGTERM this
+# process waits for the child, then writes 'parent-stopped' and exits 143. The SIGTERM is not passed
+# on: the child stops only if the caller signals the whole process group, and then both markers
+# exist before the caller sees this process end.
+def hang_tree() -> None:
+    marker_dir = os.environ['YTDLP_FAKE_MARKER_DIR']
+    child = subprocess.Popen([sys.executable, '-c', CHILD_CODE, marker_dir])
+
+    def stop(signum, _frame) -> None:
+        child.wait()
+        write_file(os.path.join(marker_dir, 'parent-stopped'), '')
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, stop)
+    while not os.path.exists(os.path.join(marker_dir, 'child-ready')):
+        time.sleep(0.05)
+    write_file(os.path.join(marker_dir, 'started'), '')
+    time.sleep(HANG_SECONDS)
+
+
 # Sleep as hanging `mode` says, printing nothing.
 def hang(mode: str) -> None:
     if mode == 'ignore-sigterm':
@@ -119,6 +157,9 @@ def main(argv: list[str]) -> int:
 
     if mode in ('stall', 'ignore-sigterm', 'spawn-child'):
         hang(mode)
+        return 0
+    if mode == 'hang-tree-lookup':
+        hang_tree()
         return 0
 
     info = video_info(url)
@@ -142,6 +183,11 @@ def main(argv: list[str]) -> int:
     # yt-dlp writes the .info.json into the home path before it fetches a single byte.
     write_file(stem + '.info.json', json.dumps(info))
     print(f'[info] Writing video metadata as JSON to: {stem}.info.json')
+
+    if mode == 'hang-tree-download':
+        sys.stdout.flush()
+        hang_tree()
+        return 0
 
     if mode == 'fragment-then-fail':
         fragment = f'{temp_stem}.f137.{info["ext"]}'

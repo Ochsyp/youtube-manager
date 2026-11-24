@@ -88,6 +88,7 @@ jobs:
         timeout-minutes: 30
         env:
           SMOKE_TIMEOUT: "600"
+          SMOKE_STOP_LIMIT: "45"
         run: bash scripts/smoke-test-image.sh ytm-smoke:arm64 linux/arm64
 
       - name: Log in to ghcr.io

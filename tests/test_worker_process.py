@@ -183,3 +183,78 @@ def test_stop_ends_a_yt_dlp_that_closed_its_output(ytdlp_on_path, db, make_job, 
     row = stored(db, job.id)
     assert row.status == 'completed'
     assert row.filename == str(final)
+
+
+# Ask for a stop once the fake in a hang-tree mode has written 'started' to `marker_dir`, and
+# return the thread doing it; the time of the stop is appended to `stopped_at`.
+def stop_once_started(marker_dir: Path, stopped_at: list) -> threading.Thread:
+    def stop() -> None:
+        deadline = time.monotonic() + 30
+        while not (marker_dir / 'started').exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stopped_at.append(time.monotonic())
+        worker._shutdown.set()
+
+    thread = threading.Thread(target=stop, daemon=True)
+    thread.start()
+    return thread
+
+
+# A stop during a lookup that hangs ends yt-dlp and the child it started, each by its SIGTERM,
+# within seconds. The job goes back in the queue with its retries as they were. The image smoke
+# test repeats this inside the built image.
+@pytest.mark.posix
+def test_stop_during_a_hanging_lookup_ends_the_whole_tree(
+    ytdlp_on_path, db, make_job, library, tmp_path, monkeypatch,
+):
+    job = make_job(youtube_id=VIDEO_ID, auto_retry_attempts=2)
+    marker_dir = tmp_path / 'markers'
+    marker_dir.mkdir()
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'hang-tree-lookup')
+    monkeypatch.setenv('YTDLP_FAKE_MARKER_DIR', str(marker_dir))
+    stopped_at = []
+
+    stopper = stop_once_started(marker_dir, stopped_at)
+    try:
+        with pytest.raises(worker.ShutdownRequested):
+            worker.run_job_guarded(job)
+        ended_at = time.monotonic()
+    finally:
+        stopper.join(35)
+        worker._shutdown.clear()
+
+    assert ended_at - stopped_at[0] < 1 + worker.PROCESS_KILL_TIMEOUT_SECONDS + 3
+    assert (marker_dir / 'child-stopped').exists()
+    assert (marker_dir / 'parent-stopped').exists()
+    row = stored(db, job.id)
+    assert row.status == 'queued'
+    assert row.auto_retry_attempts == 2
+
+
+# A stop during a download that hangs, after the lookups answered, ends yt-dlp and its child the
+# same way, and the job goes back in the queue with its retries as they were.
+@pytest.mark.posix
+def test_stop_during_a_hanging_download_ends_the_whole_tree(
+    ytdlp_on_path, db, make_job, library, tmp_path, monkeypatch,
+):
+    job = make_job(youtube_id=VIDEO_ID, auto_retry_attempts=2)
+    marker_dir = tmp_path / 'markers'
+    marker_dir.mkdir()
+    monkeypatch.setenv('YTDLP_FAKE_MODE', 'hang-tree-download')
+    monkeypatch.setenv('YTDLP_FAKE_MARKER_DIR', str(marker_dir))
+    stopped_at = []
+
+    stopper = stop_once_started(marker_dir, stopped_at)
+    try:
+        worker.run_job_guarded(job)
+        ended_at = time.monotonic()
+    finally:
+        stopper.join(35)
+        worker._shutdown.clear()
+
+    assert ended_at - stopped_at[0] < 1 + worker.PROCESS_KILL_TIMEOUT_SECONDS + 3
+    assert (marker_dir / 'child-stopped').exists()
+    assert (marker_dir / 'parent-stopped').exists()
+    row = stored(db, job.id)
+    assert row.status == 'queued'
+    assert row.auto_retry_attempts == 2
