@@ -24,7 +24,7 @@ charset-normalizer==3.5.2
     # via requests
 click==8.5.1
     # via uvicorn
-fastapi==0.163.1
+fastapi==0.163.2
     # via -r requirements.in
 h11==0.16.0
     # via uvicorn
@@ -54,7 +54,7 @@ requests==2.34.2
     # via
     #   -r requirements.in
     #   yt-dlp
-sqlalchemy==2.1.8
+sqlalchemy==2.1.9
     # via -r requirements.in
 starlette==1.10.0
     # via fastapi
