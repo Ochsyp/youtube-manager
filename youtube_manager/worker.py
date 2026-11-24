@@ -687,6 +687,12 @@ def wait_for_group(process: subprocess.Popen, seconds: float) -> bool:
 # called after yt-dlp exited by itself, which ends a child it left running; with nothing left it
 # signals nothing. Returns once the group is gone or both waits ran out.
 def terminate_process_group(process: subprocess.Popen) -> None:
+    # Only a group of yt-dlp's own, which start_new_session gives every call, is ever signalled.
+    # killpg(0) would hit this worker's own group and killpg(-1) pid 1; a real Popen never has
+    # such a pid, a stand-in in a test can.
+    if process.pid <= 1 or (hasattr(os, 'getpgrp') and process.pid == os.getpgrp()):
+        process.poll()
+        return
     # The group id stays reserved while the group has a live member, so this signals no stranger;
     # once it is empty there is nothing to signal. Checked before the loop names SIGKILL, which
     # Windows, where the tests also call this, lacks.
