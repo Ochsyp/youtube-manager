@@ -9,9 +9,8 @@ describes.
 
 ### Fixed
 
-- The README's install command sets `YTM_VERSION=1.2.0`, the current release, instead of 1.0.0. A
-  test fails when it falls behind the newest release in this file, so each release pull request
-  moves it. The other version examples in the README and `compose.example.yaml` read `X.Y.Z`.
+- The README's install command names the current release instead of 1.0.0. A test fails when it
+  falls behind the newest release in this file, so each release pull request moves it. The other version examples in the README and `compose.example.yaml` read `X.Y.Z`.
   ([#32](https://github.com/Ochsyp/youtube-manager/pull/32))
 
 ## [1.2.0] - 2026-11-23

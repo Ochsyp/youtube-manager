@@ -2,7 +2,8 @@
 # Release check tests
 #
 # scripts/check_release.py, loaded by path because scripts/ is not a package: which tags name a
-# release, which CHANGELOG headings match one, and what main prints and returns.
+# release, which CHANGELOG headings match one, and what main prints and returns. Also that the
+# README's install command names the newest release in the real CHANGELOG.md.
 # -------------------------------------------------------
 
 import importlib.util
