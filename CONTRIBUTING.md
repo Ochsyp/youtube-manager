@@ -95,7 +95,8 @@ To release X.Y.Z:
    ```
 
    vP.Q.R is the previous release. The first release links to its tag instead, as in
-   `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`.
+   `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`. The same pull request sets the
+   README's install command to `YTM_VERSION=X.Y.Z`; a test fails until it does.
 2. After the merge, sign an annotated tag on the commit the merge created on `main`, which the
    `gh pr view` line below prints, so that nothing merged after it ships under this version. The
    tag message is `youtube-manager vX.Y.Z`. Tags are signed with the release signing key: one

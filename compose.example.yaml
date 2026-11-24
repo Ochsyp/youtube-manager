@@ -7,10 +7,10 @@ name: youtube-manager
 services:
   # Keep this service name: the app answers to it, for probes on this network.
   youtube-manager:
-    # YTM_VERSION is a release, such as 1.0.0, or a release with its digest:
-    # 1.0.0@sha256:<digest>. The image runs tini as PID 1, so neither service
+    # YTM_VERSION is a release, such as X.Y.Z, or a release with its digest:
+    # X.Y.Z@sha256:<digest>. The image runs tini as PID 1, so neither service
     # needs init: true.
-    image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as 1.0.0}
+    image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as X.Y.Z}
     restart: unless-stopped
     environment:
       PUID: "1000"
@@ -36,7 +36,7 @@ services:
       start_period: 30s
 
   youtube-worker:
-    image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as 1.0.0}
+    image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as X.Y.Z}
     command: ["worker"]
     restart: unless-stopped
     # Docker's default of 10 s can kill a step mid-write after SIGTERM.

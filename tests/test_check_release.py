@@ -7,13 +7,18 @@
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / 'scripts' / 'check_release.py'
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / 'scripts' / 'check_release.py'
+
+# The README's install command, which writes the release a new user deploys into .env.
+README_INSTALL_LINE = re.compile(r"echo 'YTM_VERSION=(?P<version>[^']*)' > \.env")
 
 # Two releases under [Unreleased], their compare links at the end, as the release PR leaves it.
 CHANGELOG = '''# Changelog
@@ -172,6 +177,21 @@ def test_main_without_tag(changelog_file, capsys, monkeypatch):
     monkeypatch.delenv('TAG', raising=False)
     assert check_release.main(['--changelog', str(changelog_file)]) == 2
     assert capsys.readouterr().out == ''
+
+
+# The README's install command names the newest release in CHANGELOG.md, so a new user starts on
+# it. A release pull request that adds its heading fails here until it moves that line as well.
+def test_readme_install_command_names_the_latest_release():
+    readme = (REPO_ROOT / 'README.md').read_text(encoding='utf-8')
+    changelog = (REPO_ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
+    installs = [m['version'] for m in map(README_INSTALL_LINE.fullmatch, readme.splitlines()) if m]
+    releases = [
+        m['version'] for m in map(check_release.HEADING_PATTERN.fullmatch, changelog.splitlines()) if m
+    ]
+    assert releases, 'CHANGELOG.md has no release heading'
+    assert installs == [releases[0]], (
+        f"README.md's install command should read: echo 'YTM_VERSION={releases[0]}' > .env"
+    )
 
 
 # Run as the workflow runs it, a separate interpreter with the tag in $TAG: the exit code and
