@@ -7,12 +7,28 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-24
+
+A patch release. A process that yt-dlp starts and that ignores SIGTERM, such as a stuck ffmpeg, no
+longer keeps running after a cancel, a timeout or a finished call. The release also brings a
+dependency update. The schema stays at version 3, so going back to 1.2.0 needs no step. Update
+the web UI and the worker together as usual; nothing in the compose file has to change. yt-dlp and
+the bgutil plugin are unchanged, so the PO-token provider stays at 2.0.2.
+
+The longest stop of the worker is unchanged: about 8 seconds for the parts with a fixed limit. A
+stop can take up to 5 seconds longer than on 1.2.0 when a process yt-dlp started is slow to exit,
+because the worker now waits for it.
+
+The new cleanup was tested with a stand-in for yt-dlp, not with a real ffmpeg or deno.
+
 ### Changed
 
 - The image smoke test also stops a worker during a hanging lookup and during a hanging download,
   on amd64 and arm64, with a stand-in for yt-dlp. It fails unless the worker exits 0 in time, ends
   the stand-in and its child itself, and puts the job back in the queue with no retry used.
   ([#33](https://github.com/Ochsyp/youtube-manager/pull/33))
+- The image ships FastAPI 0.163.1 instead of 0.162.7 and python-multipart 0.0.34 instead of
+  0.0.33. ([#31](https://github.com/Ochsyp/youtube-manager/pull/31))
 
 ### Fixed
 
@@ -23,7 +39,8 @@ describes.
   take up to those 5 s longer than before. Killing a group logs one WARN line.
   ([#34](https://github.com/Ochsyp/youtube-manager/pull/34))
 - The README's install command names the current release instead of 1.0.0. A test fails when it
-  falls behind the newest release in this file, so each release pull request moves it. The other version examples in the README and `compose.example.yaml` read `X.Y.Z`.
+  falls behind the newest release in this file, so each release pull request moves it. The other
+  version examples in the README and `compose.example.yaml` read `X.Y.Z`.
   ([#32](https://github.com/Ochsyp/youtube-manager/pull/32))
 
 ## [1.2.0] - 2026-11-23
@@ -459,7 +476,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.2...v1.0.3
