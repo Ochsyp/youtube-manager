@@ -16,6 +16,12 @@ describes.
 
 ### Fixed
 
+- A child of yt-dlp that ignores SIGTERM, such as a wedged ffmpeg, no longer keeps running after a
+  cancel, a timeout or a finished call. The worker waits for yt-dlp's whole process group within
+  the same 5 s as before, then kills what is left, and does so also when yt-dlp has already exited
+  and left a child behind. The longest stop is unchanged; a stop whose child is slow to exit can
+  take up to those 5 s longer than before. Killing a group logs one WARN line.
+  ([#34](https://github.com/Ochsyp/youtube-manager/pull/34))
 - The README's install command names the current release instead of 1.0.0. A test fails when it
   falls behind the newest release in this file, so each release pull request moves it. The other version examples in the README and `compose.example.yaml` read `X.Y.Z`.
   ([#32](https://github.com/Ochsyp/youtube-manager/pull/32))
