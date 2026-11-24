@@ -7,6 +7,13 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- The image smoke test also stops a worker during a hanging lookup and during a hanging download,
+  on amd64 and arm64, with a stand-in for yt-dlp. It fails unless the worker exits 0 in time, ends
+  the stand-in and its child itself, and puts the job back in the queue with no retry used.
+  ([#33](https://github.com/Ochsyp/youtube-manager/pull/33))
+
 ### Fixed
 
 - The README's install command names the current release instead of 1.0.0. A test fails when it
