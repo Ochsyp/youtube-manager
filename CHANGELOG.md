@@ -9,6 +9,7 @@ describes.
 
 ### Changed
 
+- Repository standard 1.2.0: adopted, with the hooks, checks, workflows and blocks.
 - The repository standard's configuration arrives ahead of its adoption, with two privacy
   exemptions: the made-up example host name in the README and the tests, and the made-up user part
   of a test URL. ([#39](https://github.com/Ochsyp/youtube-manager/pull/39))

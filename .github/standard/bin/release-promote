@@ -1,0 +1,121 @@
+#!/bin/bash
+# release-promote of the repository standard: the same file in every repository; never edit it
+# here. The promote job of release.yml, image kind only (spec 3.5). It builds nothing. With
+# docker buildx imagetools create, it tags the digest that a release names.
+#   release-promote --tag vX.Y.Z          after a release is published or edited, and on a
+#                                         dispatch on main that repairs the tags
+#   release-promote --rehearse --dir DIR  the rehearsal: DIR/image.json of the build
+# --tag downloads the release's image.json and checks it with gh release verify-asset. It tags that
+# digest X.Y.Z, and points latest at the image.json digest of the newest published release that is
+# not a pre-release, so ticking "Set as a pre-release" moves latest back. --rehearse tags the digest
+# in DIR/image.json "rehearsal" and nothing else. docker logs in to ghcr.io as GITHUB_ACTOR with
+# GH_TOKEN on stdin. Each tag must resolve to its digest afterwards. The image is ghcr.io/
+# followed by GITHUB_REPOSITORY in lower case.
+# Exit 0; 1 a failed step; 64 usage.
+set -euo pipefail
+here=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+usage() {
+    echo "usage: release-promote --tag vX.Y.Z" >&2
+    echo "       release-promote --rehearse --dir DIR" >&2
+    exit 64
+}
+
+SEMVER='(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})'
+tag=''
+dir=''
+case ${1:-} in
+    --tag)
+        [[ $# -eq 2 && $2 =~ ^v${SEMVER}$ ]] || usage
+        tag=$2
+        ;;
+    --rehearse)
+        [[ $# -eq 3 && $2 == --dir && -n $3 ]] || usage
+        dir=$3
+        ;;
+    *) usage ;;
+esac
+repo=${GITHUB_REPOSITORY:-}
+[[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GITHUB_REPOSITORY is not owner/repo"
+image=ghcr.io/$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
+[[ -n ${GH_TOKEN:-} ]] || die "GH_TOKEN is empty, so docker cannot log in to ghcr.io"
+[[ -n ${GITHUB_ACTOR:-} ]] || die "GITHUB_ACTOR is empty, so docker has no user for ghcr.io"
+
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-promote.XXXXXX") || die "cannot create a temp folder"
+trap 'rm -rf -- "$tmp"' EXIT
+
+# Print the digest that the image.json at $1 names; fail unless it is a sha256 digest.
+digest_of() {
+    local digest
+    digest=$(json_value "$1" digest) || return 1
+    [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$digest"
+}
+
+# Print the digest of the release $1 from its image.json, once the file matches the release's
+# own record of its assets.
+release_digest() {
+    local folder=$tmp/$1
+    mkdir -p "$folder"
+    gh release download "$1" --pattern image.json --dir "$folder" > /dev/null ||
+        die "cannot download image.json of $1"
+    gh release verify-asset "$1" "$folder/image.json" > /dev/null ||
+        die "image.json of $1 does not match the release's record of its assets"
+    digest_of "$folder/image.json" || die "image.json of $1 names no sha256 digest"
+}
+
+login() {
+    printf '%s\n' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null ||
+        die "docker cannot log in to ghcr.io"
+}
+
+# Point the tag $1 of the image at the digest $2, then require that the tag resolves there.
+point() {
+    local resolved
+    docker buildx imagetools create --tag "$image:$1" "$image@$2" > /dev/null ||
+        die "cannot tag $image:$1"
+    resolved=$(docker buildx imagetools inspect "$image:$1" --format '{{.Manifest.Digest}}') ||
+        die "cannot read $image:$1 back"
+    [[ $resolved == "$2" ]] || die "$image:$1 resolves to ${resolved:-nothing}, not $2"
+    say "$image:$1 is $2"
+}
+
+if [[ -n $dir ]]; then
+    [[ -f $dir/image.json ]] || die "$dir holds no image.json"
+    digest=$(digest_of "$dir/image.json") || die "image.json names no sha256 digest"
+    login
+    point rehearsal "$digest"
+    exit 0
+fi
+
+list=$(gh api --paginate "repos/$repo/releases?per_page=100" \
+    --jq '.[] | select(.draft | not) | [.tag_name, .prerelease] | @tsv') || die "cannot list the releases"
+published=0
+newest=''
+while IFS=$'\t' read -r name prerelease; do
+    [[ $name =~ ^v${SEMVER}$ ]] || continue
+    [[ $name != "$tag" ]] || published=1
+    [[ $prerelease == false ]] || continue
+    if [[ -z $newest ]] || version_lt "${newest#v}" "${name#v}"; then
+        newest=$name
+    fi
+done <<< "$list"
+(( published )) || die "$tag is no published release, so it gets no tag"
+
+digest=$(release_digest "$tag") || exit 1
+latest=''
+if [[ $newest == "$tag" ]]; then
+    latest=$digest
+elif [[ -n $newest ]]; then
+    latest=$(release_digest "$newest") || exit 1
+fi
+login
+point "${tag#v}" "$digest"
+if [[ -n $latest ]]; then
+    point latest "$latest"
+else
+    say "no published release is free of the pre-release mark, so latest stays where it is"
+fi

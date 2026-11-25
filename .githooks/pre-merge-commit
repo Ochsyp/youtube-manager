@@ -1,0 +1,5 @@
+#!/bin/sh
+# pre-merge-commit of the repository standard: the same file in every repository; never edit it
+# here. git merge runs this hook instead of pre-commit before it records a merge commit, so it
+# hands over to pre-commit: no merge commit on main, and nothing private in what a merge brings.
+exec "$(dirname -- "$0")/pre-commit"

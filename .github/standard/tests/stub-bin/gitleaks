@@ -1,0 +1,43 @@
+#!/bin/bash
+# stub-bin/gitleaks of the repository standard's tests: the same file in every repository; never
+# edit it here. Stands in for gitleaks in secret-scan.bats. It logs "gitleaks ARGS" to $STUB_LOG,
+# and GITLEAKS_CONFIG when that is set. It reads the history its "git PATH" argument names,
+# within --log-opts when given, and writes a JSON report to --report-path. The report holds one
+# finding of the rule github-pat for each token of that form the history adds, plus one per rule
+# id in $STUB_GITLEAKS_FIND (one per line). STUB_GITLEAKS_BLIND=1 makes it find nothing. It exits
+# 1 with findings, as gitleaks does, and 0 without.
+set -uo pipefail
+printf 'gitleaks %s\n' "$*" >> "${STUB_LOG:?}"
+[[ -z ${GITLEAKS_CONFIG:-} ]] || printf 'GITLEAKS_CONFIG=%s\n' "$GITLEAKS_CONFIG" >> "$STUB_LOG"
+path=.
+report=
+opts=--all
+while (( $# )); do
+    case $1 in
+        git) path=${2:-.}; shift ;;
+        --report-path) report=$2; shift ;;
+        --log-opts=*) opts=${1#--log-opts=} ;;
+    esac
+    shift
+done
+rules=()
+if [[ -z ${STUB_GITLEAKS_BLIND:-} ]]; then
+    # The token form is built from fragments, so this file holds no token.
+    count=$(git -C "$path" log -p "$opts" 2> /dev/null | grep -c -E '^\+.*gh''p_[0-9A-Za-z]{36}')
+    for (( i = 0; i < count; i++ )); do rules+=(github-pat); done
+    while IFS= read -r rule; do
+        [[ -n $rule ]] && rules+=("$rule")
+    done <<< "${STUB_GITLEAKS_FIND:-}"
+fi
+if [[ -n $report ]]; then
+    {
+        printf '['
+        sep=
+        for rule in "${rules[@]}"; do
+            printf '%s\n {"RuleID": "%s", "Secret": "REDACTED"}' "$sep" "$rule"
+            sep=,
+        done
+        printf '\n]\n'
+    } > "$report"
+fi
+(( ${#rules[@]} == 0 ))

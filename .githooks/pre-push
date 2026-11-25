@@ -1,13 +1,75 @@
 #!/bin/sh
-# Refuse pushes to main: it changes only through a merged pull request.
-# git passes one line per ref: <local ref> <local sha> <remote ref> <remote sha>.
+# pre-push of the repository standard: the same file in every repository; never edit it here.
+# Refuses a push to main or master, and every tag push except a release tag v* under
+# RELEASE_KIND=legacy: release tags come from publishing a release, and seal tags only from the
+# seal tool's own mirror. Then it passes every local and remote ref name through privacy-scan
+# --message, and scans what the pushed commits bring in with privacy-scan --range, both with
+# stdin from /dev/null. Last, it runs this repository's ci/pre-push, if there is one.
+# git passes the remote's name and URL, and one line per ref on stdin:
+# <local ref> <local sha> <remote ref> <remote sha>.
+set -eu
+
+std_hook=pre-push
+std_here=$(dirname -- "$0")
+# shellcheck source=.githooks/lib.sh
+. "$std_here/lib.sh"
+
+remote=$1
+url=$2
+std_tmpdir
+cat > "$std_tmp/refs" || std_fail "cannot read the refs to push"
+std_load_config
+
 status=0
-while read -r _ _ remote_ref _; do
-    case "$remote_ref" in
+: > "$std_tmp/names"
+: > "$std_tmp/tips"
+while read -r local_ref local_sha remote_ref _; do
+    printf '%s\n%s\n' "$local_ref" "$remote_ref" >> "$std_tmp/names"
+    case $remote_ref in
         refs/heads/main | refs/heads/master)
-            echo "pre-push: pushing to '${remote_ref#refs/heads/}' is refused. Push a feature branch and open a pull request." >&2
+            std_say "pushing to '${remote_ref#refs/heads/}' is refused. Push a feature branch and" \
+                "open a pull request."
+            status=1
+            ;;
+        refs/tags/seal/*)
+            std_say "a seal tag is refused: only the seal tool pushes one, from its own mirror."
+            status=1
+            ;;
+        refs/tags/v*)
+            if [ "$cfg_release_kind" != legacy ]; then
+                std_say "a release tag is refused: publishing the draft release creates it."
+                status=1
+            fi
+            ;;
+        refs/tags/*)
+            std_say "a tag push is refused: release tags come from publishing a release."
             status=1
             ;;
     esac
-done
-exit $status
+    # A deletion pushes the all-zero object id and brings in nothing to scan.
+    case $local_sha in
+        *[!0]*) printf '%s\n' "$local_sha" >> "$std_tmp/tips" ;;
+    esac
+done < "$std_tmp/refs"
+[ "$status" -eq 0 ] || exit 1
+
+sh "$std_here/privacy-scan" --message "$std_tmp/names" < /dev/null || {
+    status=$?
+    [ "$status" -ne 1 ] ||
+        std_say "a branch or tag name above holds a finding (as a message line); rename it."
+    exit "$status"
+}
+if [ -s "$std_tmp/tips" ]; then
+    set --
+    while read -r sha; do
+        set -- "$@" "$sha"
+    done < "$std_tmp/tips"
+    sh "$std_here/privacy-scan" --range "$@" --not --remotes="$remote" < /dev/null
+fi
+if [ -f ci/pre-push ]; then
+    sh ci/pre-push "$remote" "$url" < /dev/null || {
+        std_say "ci/pre-push refused the push."
+        exit 1
+    }
+fi
+exit 0

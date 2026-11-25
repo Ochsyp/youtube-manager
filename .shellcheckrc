@@ -1,0 +1,5 @@
+# ShellCheck settings of the repository standard, found by walking up from the checked file.
+# external-sources lets ShellCheck follow sourced files as -x does. There is no shell= line: it
+# would override every shebang and check the #!/bin/sh hooks as bash, so a file without a shebang
+# names its shell in a directive of its own.
+external-sources=true

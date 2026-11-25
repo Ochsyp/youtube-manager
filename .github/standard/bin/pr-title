@@ -1,0 +1,31 @@
+#!/bin/bash
+# pr-title of the repository standard: the same file in every repository; never edit it here.
+# In CI on a pull request, reads the pull request's current title and body through the API and
+# checks them with pr-text. Through the API, a run after a rename in the browser sees the new
+# title. Reads GH_TOKEN and GITHUB_REPOSITORY. It never prints the title, the body or the token.
+#   pr-title PR_NUMBER
+# Exit 0 clean; 1 refused; 2 when a check cannot run; 64 usage.
+set -euo pipefail
+here=${BASH_SOURCE[0]%/*}
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+usage() {
+    echo "usage: pr-title PR_NUMBER" >&2
+    exit 64
+}
+
+[[ $# -eq 1 && $1 =~ ^[1-9][0-9]*$ ]] || usage
+[[ -n ${GITHUB_REPOSITORY:-} ]] || { error "GITHUB_REPOSITORY is not set"; exit 2; }
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/pr-title.XXXXXX") || { error "cannot create a temp folder"; exit 2; }
+trap 'rm -rf -- "$tmp"' EXIT
+pull="repos/$GITHUB_REPOSITORY/pulls/$1"
+if ! gh api "$pull" --jq .title > "$tmp/title" 2> /dev/null ||
+    ! gh api "$pull" --jq '.body // ""' > "$tmp/body" 2> /dev/null; then
+    error "cannot read pull request #$1 through the API"
+    exit 2
+fi
+status=0
+bash "$here/pr-text" "$(cat "$tmp/title")" "$tmp/body" || status=$?
+exit "$status"

@@ -1,0 +1,175 @@
+#!/bin/bash
+# install-tools of the repository standard: the same file in every repository; never edit it
+# here. Installs the pinned tools that CI and the tests use, and checks each download before its
+# first use. It prints the folder that holds the tools, so a script can put it on PATH at once:
+# PATH="$(install-tools bats):$PATH". In Actions it also adds the folder to $GITHUB_PATH for the
+# later steps. Tools go below $RUNNER_TEMP/tools in Actions, or ${TMPDIR:-/tmp} elsewhere.
+#   install-tools TOOL...   bats, shellcheck, actionlint, hadolint, gitleaks, pester,
+#                           psscriptanalyzer
+# bats is a clone of its release tag, checked against the tag's commit, and runs wherever bash
+# runs. shellcheck, actionlint, hadolint and gitleaks are the Linux x86_64 release assets,
+# checked by SHA-256. pester and psscriptanalyzer are the PowerShell Gallery packages, for
+# Windows PowerShell 5.1 only. They are checked by SHA-256 and unpacked, without the package
+# metadata, into the folder modules beside the printed one. In Actions that folder goes in front
+# of PSModulePath through $GITHUB_ENV. Installing from the package takes seconds where
+# Install-Module takes minutes. POWERSHELL names the Windows PowerShell that unpacks them
+# (default powershell.exe). Exit 0; 1 when a download or a check fails; 64 usage.
+set -euo pipefail
+
+readonly BATS_VERSION=1.13.0
+readonly BATS_COMMIT=3bca150ec86275d6d9d5a4fd7d48ab8b6c6f3d87
+readonly SHELLCHECK_VERSION=0.11.0
+readonly SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+readonly ACTIONLINT_VERSION=1.7.12
+readonly ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+readonly HADOLINT_VERSION=2.15.1
+readonly HADOLINT_SHA256=c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+readonly GITLEAKS_VERSION=8.30.1
+readonly GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+readonly PESTER_VERSION=6.2.0
+readonly PESTER_SHA256=e6ac7418d4f12500269aaca58ae56cf1caafbbf1afa2cec334e289d1cf50a239
+readonly PSSCRIPTANALYZER_VERSION=1.25.0
+readonly PSSCRIPTANALYZER_SHA256=14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60
+
+usage() {
+    echo "usage: install-tools TOOL... (bats shellcheck actionlint hadolint gitleaks pester psscriptanalyzer)" >&2
+    exit 64
+}
+
+fail() {
+    printf 'install-tools: %s\n' "$1" >&2
+    exit 1
+}
+
+(( $# )) || usage
+base=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+if command -v cygpath > /dev/null 2>&1; then
+    base=$(cygpath -u "$base")
+fi
+root="$base/tools"
+bin="$root/bin"
+modules="$root/modules"
+mkdir -p "$bin"
+
+# Download URL to FILE and check it against SHA256.
+fetch() {
+    curl --fail --silent --show-error --location --retry 3 --output "$2" "$1" ||
+        fail "cannot download $1"
+    printf '%s  %s\n' "$3" "$2" | sha256sum --check --strict --quiet ||
+        fail "$1 does not match its pinned SHA-256"
+}
+
+# Fail unless this is Linux on x86_64, where the pinned binaries run.
+linux_x86_64() {
+    [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] ||
+        fail "$1 is pinned for Linux x86_64 only"
+}
+
+install_bats() {
+    local dir="$root/bats-core-$BATS_VERSION"
+    if [[ ! -d $dir ]]; then
+        git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v$BATS_VERSION" \
+            https://github.com/bats-core/bats-core.git "$dir" || fail "cannot clone bats-core"
+    fi
+    [[ $(git -C "$dir" rev-parse HEAD) == "$BATS_COMMIT" ]] ||
+        fail "bats-core v$BATS_VERSION is not at the pinned commit"
+    # A small launcher, since bats finds its libexec next to its own script.
+    printf '#!/bin/bash\nexec "%s/bin/bats" "$@"\n' "$dir" > "$bin/bats"
+    chmod +x "$bin/bats"
+    [[ $("$bin/bats" --version) == "Bats $BATS_VERSION" ]] || fail "bats reports another version"
+}
+
+install_shellcheck() {
+    local archive="shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+    linux_x86_64 shellcheck
+    fetch "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/$archive" \
+        "$root/$archive" "$SHELLCHECK_SHA256"
+    tar -xJf "$root/$archive" -C "$root"
+    install -m 0755 "$root/shellcheck-v$SHELLCHECK_VERSION/shellcheck" "$bin/shellcheck"
+    "$bin/shellcheck" --version | grep -q -x "version: $SHELLCHECK_VERSION" ||
+        fail "shellcheck reports another version"
+}
+
+install_actionlint() {
+    local archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+    linux_x86_64 actionlint
+    fetch "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$archive" \
+        "$root/$archive" "$ACTIONLINT_SHA256"
+    tar -xzf "$root/$archive" -C "$bin" actionlint
+    [[ $("$bin/actionlint" -version | head -n 1) == "$ACTIONLINT_VERSION" ]] ||
+        fail "actionlint reports another version"
+}
+
+install_hadolint() {
+    linux_x86_64 hadolint
+    fetch "https://github.com/hadolint/hadolint/releases/download/v$HADOLINT_VERSION/hadolint-linux-x86_64" \
+        "$root/hadolint" "$HADOLINT_SHA256"
+    install -m 0755 "$root/hadolint" "$bin/hadolint"
+    "$bin/hadolint" --version | grep -q -F "$HADOLINT_VERSION" ||
+        fail "hadolint reports another version"
+}
+
+install_gitleaks() {
+    local archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+    linux_x86_64 gitleaks
+    fetch "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/$archive" \
+        "$root/$archive" "$GITLEAKS_SHA256"
+    tar -xzf "$root/$archive" -C "$bin" gitleaks
+    "$bin/gitleaks" version | grep -q -F "$GITLEAKS_VERSION" || fail "gitleaks reports another version"
+}
+
+# Fail unless this is Windows: the module $1 runs under Windows PowerShell 5.1 only.
+windows() {
+    case $(uname -s) in
+        MINGW* | MSYS* | CYGWIN*) ;;
+        *) fail "$1 is pinned for Windows PowerShell 5.1 only" ;;
+    esac
+}
+
+# Install the PowerShell module NAME at VERSION from its PowerShell Gallery package, checked
+# against SHA256, into $modules/NAME/VERSION, where Import-Module finds it by name. The package
+# is saved as NAME.VERSION.zip, since Expand-Archive of Windows PowerShell 5.1 takes no other
+# extension. Its metadata (_rels/, package/, [Content_Types].xml, the .nuspec) is deleted.
+install_module() {
+    local tool=$1 name=$2 version=$3 sha=$4 zip dir
+    windows "$tool"
+    zip="$root/$name.$version.zip"
+    dir="$modules/$name/$version"
+    fetch "https://www.powershellgallery.com/api/v2/package/$name/$version" "$zip" "$sha"
+    rm -rf -- "$dir"
+    mkdir -p "$dir"
+    "${POWERSHELL:-powershell.exe}" -NoProfile -NonInteractive -Command \
+        "\$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath '$(cygpath -w "$zip")' -DestinationPath '$(cygpath -w "$dir")' -Force" ||
+        fail "cannot unpack $name $version"
+    rm -rf -- "$dir/_rels" "$dir/package" "$dir/[Content_Types].xml" "$dir/$name.nuspec"
+    [[ -f $dir/$name.psd1 ]] || fail "the $name $version package holds no $name.psd1"
+    if [[ -n ${GITHUB_ENV:-} ]] && [[ -z ${modules_added:-} ]]; then
+        printf 'PSModulePath=%s;%s\n' "$(cygpath -w "$modules")" "${PSModulePath:-}" >> "$GITHUB_ENV"
+        modules_added=1
+    fi
+}
+
+for tool in "$@"; do
+    case $tool in
+        bats) install_bats ;;
+        shellcheck) install_shellcheck ;;
+        actionlint) install_actionlint ;;
+        hadolint) install_hadolint ;;
+        gitleaks) install_gitleaks ;;
+        pester) install_module pester Pester "$PESTER_VERSION" "$PESTER_SHA256" ;;
+        psscriptanalyzer)
+            install_module psscriptanalyzer PSScriptAnalyzer "$PSSCRIPTANALYZER_VERSION" \
+                "$PSSCRIPTANALYZER_SHA256"
+            ;;
+        *) usage ;;
+    esac
+done
+
+if [[ -n ${GITHUB_PATH:-} ]]; then
+    if command -v cygpath > /dev/null 2>&1; then
+        cygpath -w "$bin" >> "$GITHUB_PATH"
+    else
+        printf '%s\n' "$bin" >> "$GITHUB_PATH"
+    fi
+fi
+printf '%s\n' "$bin"

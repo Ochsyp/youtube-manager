@@ -1,4 +1,5 @@
-# Editor defaults; .gitattributes decides what git stores.
+# standard:begin editorconfig
+# Editor defaults of the repository standard; .gitattributes decides what git stores.
 root = true
 
 [*]
@@ -7,13 +8,30 @@ end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-[*.py]
+[*.{sh,bash,bats,zsh,awk,py}]
 indent_style = space
 indent_size = 4
 
-[*.{yml,yaml,json}]
+# The hooks have no file extension.
+[.githooks/*]
+indent_style = space
+indent_size = 4
+
+# No BOM: keep these files ASCII, which Windows PowerShell 5.1 reads the same either way, while
+# cmd.exe misreads a BOM before @echo off.
+[*.{ps1,psm1,psd1,cmd,bat}]
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json,toml}]
 indent_style = space
 indent_size = 2
 
+# Fixtures are replayed verbatim and goldens compared byte for byte, so editors must not trim them.
+[tests/{fixtures,golden}/**]
+trim_trailing_whitespace = false
+
 [*.md]
 trim_trailing_whitespace = false
+# standard:end editorconfig

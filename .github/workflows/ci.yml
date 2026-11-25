@@ -1,34 +1,211 @@
-# Runs the pytest suite on Linux on every push and pull request, including the
-# POSIX-only tests the Windows dev box skips. Pull requests and main also build
-# and smoke-test the image for amd64 and arm64 (image.yml, without pushing).
-# Actions are pinned to commit SHAs; Dependabot proposes updates.
+# CI of the repository standard: the same file in every repository (.github/standard/MANIFEST);
+# change it in repo-standard, never here. standard checks the standard's copies, the privacy rules
+# over the tree, VERSION, CHANGELOG.md and the pull request, and says what the other jobs run.
+# lint, test and system run this repository's ci/<stage>; image builds and smoke-tests the
+# container image; hooks-windows runs the hook tests in Git Bash where minutes are free.
+# all-passed is the check a ruleset requires. Actions are pinned to commit SHAs.
 name: ci
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'      # standard always; the stages too where CI_WEEKLY=yes
+  workflow_dispatch:
+  workflow_call:              # release.yml runs the same checks before it builds
 
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its older run; every other run, a called one included,
+# has a group of its own and is never cancelled. The PR number is unique; a fork's branch name
+# is not.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash               # pipefail; Git Bash on windows runners
+
 jobs:
-  pytest:
-    runs-on: ubuntu-latest
+  standard:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read     # pr-title reads the current title and body
+    outputs:
+      runner: ${{ steps.conf.outputs.runner }}
+      lint: ${{ steps.conf.outputs.lint }}
+      test: ${{ steps.conf.outputs.test }}
+      system: ${{ steps.conf.outputs.system }}
+      python: ${{ steps.conf.outputs.python }}
+      ps-modules: ${{ steps.conf.outputs.ps-modules }}
+      image: ${{ steps.conf.outputs.image }}
+      windows: ${{ steps.conf.outputs.windows }}
+      required: ${{ steps.conf.outputs.required }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: conf
+        env:
+          EVENT: ${{ github.event_name }}
+          WORKFLOW: ${{ github.workflow }}
+          PRIVATE: ${{ github.event.repository.private }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        # Also prints full-suite=true for public and source repositories, schedule and dispatch,
+        # and for a change to any path the MANIFEST lists.
+        run: .github/standard/bin/conf --ci >> "$GITHUB_OUTPUT"
+      - run: .github/standard/bin/install-tools bats shellcheck actionlint
+      - name: The standard's copies, blocks, modes and config
+        env:
+          EVENT: ${{ github.event_name }}
+          PRIVATE: ${{ github.event.repository.private }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .github/standard/bin/standard-check --ci
+      - name: actionlint (1.7.12 does not know the ubuntu-26.04 label yet)
+        run: actionlint -ignore 'label "ubuntu-26\.04" is unknown'
+      - name: Lint of the hooks, the standard's tools and ci/
+        run: bats --tap .github/standard/tests/lint.bats | tee "$RUNNER_TEMP/lint.tap"
+      - name: Behaviour tests of the standard's code
+        if: steps.conf.outputs.full-suite == 'true'
+        run: bats --tap --filter-tags '!lint' .github/standard/tests/ | tee "$RUNNER_TEMP/suite.tap"
+      - run: .github/standard/bin/no-skips "$RUNNER_TEMP"/*.tap
+      - name: Privacy rules over the tree
+        run: sh .githooks/privacy-scan --tracked
+      - name: VERSION, CHANGELOG.md and the release tags
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: git tag --list 'v*' | .github/standard/bin/release-meta check --event "$EVENT"
+      - name: The current title follows Conventional Commits, and title and body pass the packs
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: .github/standard/bin/pr-title "$PR_NUMBER"
+      - name: The pull request adds a CHANGELOG.md entry
+        if: github.event_name == 'pull_request'
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: .github/standard/bin/changelog-entry
+
+  lint:
+    needs: standard
+    if: needs.standard.outputs.lint == 'true'
+    runs-on: ${{ needs.standard.outputs.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - if: needs.standard.outputs.python != ''
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
-      - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: python -m pytest
+          python-version: ${{ needs.standard.outputs.python }}
+      - name: The pinned PowerShell modules
+        if: needs.standard.outputs.ps-modules != ''
+        env:
+          MODULES: ${{ needs.standard.outputs.ps-modules }}
+        run: |
+          read -r -a modules <<< "$MODULES"
+          .github/standard/bin/install-tools "${modules[@]}"
+      - run: .github/standard/bin/run-stage lint
 
-  # Pushes to other branches run pytest only, so a pull request builds the
-  # image once. permissions is set on this job because a called workflow gets
-  # the default token permissions unless its calling job sets them.
+  test:
+    needs: standard
+    if: needs.standard.outputs.test == 'true'
+    runs-on: ${{ needs.standard.outputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A suite that checks the repository's release state, as release-meta.bats does, needs
+          # the tags: without them a published release looks as if it waits.
+          fetch-tags: true
+          persist-credentials: false
+      - if: needs.standard.outputs.python != ''
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ needs.standard.outputs.python }}
+      - name: The pinned PowerShell modules
+        if: needs.standard.outputs.ps-modules != ''
+        env:
+          MODULES: ${{ needs.standard.outputs.ps-modules }}
+        run: |
+          read -r -a modules <<< "$MODULES"
+          .github/standard/bin/install-tools "${modules[@]}"
+      - run: .github/standard/bin/run-stage test
+
+  system:
+    needs: standard
+    if: needs.standard.outputs.system == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/standard/bin/run-stage system
+
   image:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    needs: standard
+    if: needs.standard.outputs.image == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/image.yml
+    with:
+      push: false
+
+  hooks-windows:
+    needs: standard
+    if: needs.standard.outputs.windows == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/standard/bin/install-tools bats
+      - name: The hook and privacy-scan tests in Git Bash
+        run: >-
+          bats --tap .github/standard/tests/hooks.bats .github/standard/tests/privacy-scan.bats
+          | tee "$RUNNER_TEMP/hooks.tap"
+      - run: .github/standard/bin/no-skips "$RUNNER_TEMP/hooks.tap"
+
+  all-passed:
+    if: always()
+    needs: [standard, lint, test, system, image, hooks-windows]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail unless every required job passed and every other job passed or was off
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          REQUIRED: ${{ needs.standard.outputs.required }}
+        run: |
+          jq -r 'to_entries[] | "\(.key)=\(.value.result)"' <<< "$NEEDS" |
+            while IFS='=' read -r job result; do
+              case " standard $REQUIRED " in
+                *" $job "*) [[ $result == success ]] ;;
+                *) [[ $result == success || $result == skipped ]] ;;
+              esac || { echo "::error::$job ended with $result."; exit 1; }
+            done

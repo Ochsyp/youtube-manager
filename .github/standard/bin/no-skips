@@ -1,0 +1,40 @@
+#!/bin/sh
+# no-skips of the repository standard: the same file in every repository; never edit it here.
+# Fails unless every TAP file that bats wrote passed in full: at least one test, as many results
+# as its plan announces, no "not ok", and no skipped test, since CI must run every test. A test
+# may skip only locally, for a missing tool or OS feature.
+#   no-skips FILE...
+# Exit 0; 1 when a file shows a failure, a skip, no test or a short run; 2 when a file cannot be
+# read; 64 usage.
+set -eu
+
+[ "$#" -ge 1 ] || {
+    echo "usage: no-skips FILE..." >&2
+    exit 64
+}
+status=0
+for file in "$@"; do
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+        printf 'no-skips: %s cannot be read\n' "$file" >&2
+        exit 2
+    fi
+    result=0
+    # The name comes through the environment: awk -v would read the backslashes of a Windows
+    # path such as D:\a\_temp as escape sequences.
+    FILE=$file awk '
+        /^1\.\.[0-9]+$/ && !planned { plan = substr($0, 4) + 0; planned = 1; next }
+        /^not ok [0-9]+/ { failed++; next }
+        /^ok [0-9]+/ { ran++; if ($0 ~ /# [Ss][Kk][Ii][Pp]([ \t]|$)/) skipped++; next }
+        END {
+            printf "no-skips: %s: %d test(s), %d skipped, %d failed", ENVIRON["FILE"], ran + failed, skipped, failed
+            bad = 0
+            if (!planned) { printf ", no plan"; bad = 1 }
+            else if (ran + failed != plan) { printf ", but the plan announced %d", plan; bad = 1 }
+            if (ran + failed == 0) { printf ", and no test ran"; bad = 1 }
+            if (skipped || failed) bad = 1
+            printf "\n"
+            exit bad
+        }' "$file" || result=$?
+    [ "$result" -eq 0 ] || status=1
+done
+exit "$status"
