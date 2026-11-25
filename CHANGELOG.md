@@ -14,8 +14,8 @@ changes no behaviour, setting or schema, so nothing has to change on a host and 
 needs no step. yt-dlp-ejs stays at 0.8.0 and the bgutil plugin at 2.0.2, so the PO-token provider
 stays at 2.0.2.
 
-The new yt-dlp passed the test suite and the image smoke test, which use a stand-in for YouTube. It
-was not tried on a live download.
+In the image smoke test the new yt-dlp runs only its version check and the worker's startup; no
+test downloads from YouTube, so it was not tried on a live download.
 
 ### Changed
 
