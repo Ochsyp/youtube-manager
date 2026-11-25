@@ -7,6 +7,22 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-25
+
+A patch release that brings yt-dlp 2026.11.23, so downloads keep working as YouTube changes. It
+changes no behaviour, setting or schema, so nothing has to change on a host and going back to 1.2.1
+needs no step. yt-dlp-ejs stays at 0.8.0 and the bgutil plugin at 2.0.2, so the PO-token provider
+stays at 2.0.2.
+
+In the image smoke test the new yt-dlp runs only its version check and the worker's startup; no
+test downloads from YouTube, so it was not tried on a live download.
+
+### Changed
+
+- The image ships yt-dlp 2026.11.23 instead of 2026.10.26, FastAPI 0.163.2 instead of 0.163.1 and
+  SQLAlchemy 2.1.9 instead of 2.1.8. ([#36](https://github.com/Ochsyp/youtube-manager/pull/36),
+  [#37](https://github.com/Ochsyp/youtube-manager/pull/37))
+
 ## [1.2.1] - 2026-11-24
 
 A patch release. A process that yt-dlp starts and that ignores SIGTERM, such as a stuck ffmpeg, no
@@ -476,7 +492,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.0.3...v1.1.0
