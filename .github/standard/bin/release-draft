@@ -1,0 +1,82 @@
+#!/bin/bash
+# release-draft of the repository standard: the same file in every repository; never edit it
+# here. The draft job of release.yml (spec 3.5): the launcher's draft job, as a tested script.
+# It checks the formats of VERSION and COMMIT, and the assets against SHA256SUMS. It checks that
+# main is still at COMMIT and that no release of the tag vX.Y.Z is published. It also checks that
+# no tag vX.Y.Z exists without a release, so a pushed tag cannot take over the publish. Then it
+# deletes each earlier draft of the tag, after checking once more that it is still a draft. Last,
+# it drafts the release with gh release create vX.Y.Z --draft --target COMMIT, with DIR/notes.md
+# as its notes and DIR/assets/* as its assets. For the image kind (an image.json among the assets)
+# the notes get a section "Container image" with the image reference and its digest. It never
+# publishes anything.
+#   release-draft --dir DIR      reads VERSION, COMMIT and GITHUB_REPOSITORY; gh reads GH_TOKEN
+# Exit 0; 1 a refused or failed draft; 64 usage.
+set -euo pipefail
+shopt -s nullglob
+here=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+usage() {
+    echo "usage: release-draft --dir DIR (reads VERSION X.Y.Z, COMMIT and GITHUB_REPOSITORY)" >&2
+    exit 64
+}
+
+[[ $# -eq 2 && $1 == --dir && -n $2 ]] || usage
+dir=$2
+version=${VERSION:-}
+commit=${COMMIT:-}
+[[ $version =~ ^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || usage
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || usage
+repo=${GITHUB_REPOSITORY:-}
+[[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GITHUB_REPOSITORY is not owner/repo"
+tag=v$version
+[[ -d $dir/assets && -f $dir/notes.md ]] || die "$dir holds no assets/ and notes.md"
+check_sums "$dir/assets" || exit 1
+
+main=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha) || die "cannot read where main is"
+[[ $main == "$commit" ]] ||
+    die "main is at $main now, not at $commit, so this run drafts nothing; the run of the newer commit drafts"
+
+releases=$(gh api --paginate "repos/$repo/releases?per_page=100" --jq '.[] | [.id, .draft, .tag_name] | @tsv') ||
+    die "cannot list the releases"
+drafts=()
+while IFS=$'\t' read -r id draft name; do
+    [[ -n $id && $name == "$tag" ]] || continue
+    [[ $id =~ ^[0-9]+$ ]] || die "the release list holds an id that is no number"
+    if [[ $draft == true ]]; then
+        drafts+=("$id")
+    else
+        die "release $tag is published, and a published release never changes; ship the next version"
+    fi
+done <<< "$releases"
+
+refs=$(gh api "repos/$repo/git/matching-refs/tags/$tag" --jq '.[].ref') || die "cannot read the tags"
+if grep -q -x -F "refs/tags/$tag" <<< "$refs"; then
+    die "tag $tag exists without a release; a publish would take that tag's commit, so remove the tag first"
+fi
+
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-draft.XXXXXX") || die "cannot create a temp folder"
+trap 'rm -rf -- "$tmp"' EXIT
+cp "$dir/notes.md" "$tmp/notes.md"
+if [[ -f $dir/assets/image.json ]]; then
+    image=$(json_value "$dir/assets/image.json" image) || die "image.json names no image"
+    digest=$(json_value "$dir/assets/image.json" digest) || die "image.json names no digest"
+    [[ $image =~ ^ghcr\.io/[a-z0-9._/-]+$ && $digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
+        die "image.json names no ghcr.io image with a sha256 digest"
+    # The backticks are Markdown's, for the notes.
+    # shellcheck disable=SC2016
+    printf '\n## Container image\n\n`%s:%s@%s`\n' "$image" "$version" "$digest" >> "$tmp/notes.md"
+fi
+
+for id in "${drafts[@]}"; do
+    still=$(gh api "repos/$repo/releases/$id" --jq .draft) || die "cannot read release $id"
+    [[ $still == true ]] || die "release $id of $tag is no longer a draft, so it stays"
+    gh api --method DELETE "repos/$repo/releases/$id" > /dev/null || die "cannot delete the earlier draft $id"
+    say "deleted the earlier draft $id of $tag"
+done
+
+gh release create "$tag" --draft --target "$commit" --title "$tag" --notes-file "$tmp/notes.md" \
+    -- "$dir"/assets/* > /dev/null || die "gh release create failed"
+say "drafted $tag at $commit; it waits for the owner to publish it"

@@ -1,44 +1,104 @@
 # Contributing
 
-Every change reaches `main` through a pull request, so that it is reviewed before it is merged.
-This holds for the maintainer too.
+youtube-manager downloads YouTube videos into a media library. One maintainer runs it.
 
+<!-- standard:begin workflow -->
 ## Workflow
 
-1. Start from an up-to-date `main` and create a branch for the change:
-   - `phase/<n>-<slug>` for a phase of a planned redesign, for example
-     `phase/6-stable-episode-numbering`;
-   - `fix/<slug>`, `feat/<slug>`, `docs/<slug>` or `chore/<slug>` for anything else.
-2. Commit on that branch. Commit messages follow
-   [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/), for example
-   `fix: keep filed episode numbers stable`.
-3. Add an entry for the change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), on the
-   same branch.
-4. Run the tests as the README's Running tests section describes.
-5. Push the branch and open a pull request against `main`. CI and the secret scan run on it.
-   Besides the tests, CI's image job builds the image for amd64 and arm64 and smoke-tests each
-   build; it pushes nothing.
-6. Start the next phase only after the pull request is reviewed and merged. Its branch starts from
-   the updated `main`.
+Every change reaches `main` through a pull request that the maintainer reviews and merges. This
+holds for the maintainer too.
+
+1. Branch from an up-to-date `main`: `phase/<n>-<slug>` for a phase of the plan, or `fix/`,
+   `feat/`, `docs/` or `chore/` plus a short slug.
+2. Write commit messages and the pull request title as Conventional Commits (`feat:`, `fix:`,
+   `docs:`, `chore:`, `ci:`, `test:`, `refactor:`).
+3. Add a line under `## [Unreleased]` in `CHANGELOG.md`. Three kinds of pull request add none
+   there: a release pull request (`chore/release-X.Y.Z`), which moves the lines into the new
+   version; the fix of a draft release (`fix/release-X.Y.Z-<slug>`), whose line goes into that
+   version's section; and a Dependabot pull request, whose updates the next release pull request
+   sums up.
+4. Run the checks in Checks below, and fix what they find.
+5. Push the branch and open a pull request against `main`. Before every `gh pr create` and
+   `gh pr edit`, run `.github/standard/bin/pr-text` on the title and the body: it refuses
+   denylist terms and rule pack hits, and never prints them.
+6. Start the next phase only after the pull request is merged.
 
 One pull request holds one phase or one change.
 
+Repository work happens only on a machine with the maintainer's git configuration, never in a
+cloud session. That configuration turns the hooks on and loads the denylists for every clone of
+this repository's GitHub URL. A clone made from a local path gets no hooks, so run
+`git config core.hooksPath .githooks` in it right after cloning.
+
+An outside contributor's pull request is reviewed in the browser and through CI. Hooks run from
+the checked-out tree with the maintainer's credentials, even during a fetch, so:
+- never check out a fork's pull request branch in a clone with the hooks on;
+- clone a fork only with `git clone <fork URL>` or `gh repo clone <fork> <folder> --no-upstream`,
+  into a scratch folder, and never add a remote for this repository there.
+<!-- standard:end workflow -->
+
+<!-- standard:begin guard-rails -->
 ## Guard rails
 
-`main` is never committed to or pushed to directly. A GitHub ruleset blocks force pushes to `main`
-and its deletion, but not a direct push, so two git hooks in `.githooks` enforce it on each clone:
+GitHub's ruleset on `main` blocks direct pushes, force pushes and its deletion, and the merge
+of a pull request whose `all-passed` or `scan` check failed.
 
-- `pre-commit` refuses a commit while `main` or `master` is checked out;
-- `pre-push` refuses a push to `main` or `master`.
+The hooks in `.githooks/` guard every commit and push:
+- `pre-commit` refuses a commit while `main` or `master` is checked out. It also refuses a changed
+  copy of the standard, a staged file above `MAX_BLOB_KB`, and staged content, path names, author
+  or committer that hold a denylist term or a rule pack hit. `pre-merge-commit` does the same for
+  a merge.
+- `commit-msg` refuses such a term or hit in the message.
+- `pre-push` refuses a push to `main` or `master`, and a branch or tag name with a term or hit. It
+  refuses every tag push except a `v*` tag under `RELEASE_KIND=legacy`; otherwise release tags
+  come from publishing a release. It also refuses a term or hit in what the pushed commits bring
+  in, which covers rebase, cherry-pick and `am` too.
 
-Turn them on once after cloning:
+The denylists hold names that must never be committed and never leave the maintainer's machine.
+The rule packs in `.githooks/rules/` hold the patterns: private addresses, local host names, MAC
+addresses, home paths and e-mail addresses, and disk and VM identifiers where the config enables
+them. A refusal names the file, the line and the kind of finding, never the value.
+
+The maintainer's git configuration turns the hooks on for every clone of this repository's GitHub
+URL. Anywhere else, such as a clone made from a local path, turn them on once after cloning:
+`git config core.hooksPath .githooks`. Never use `--no-verify`.
+<!-- standard:end guard-rails -->
+
+<!-- standard:begin standard -->
+## The repository standard
+
+Files listed in `.github/standard/MANIFEST` are copies of the repository standard. Never edit
+them here: change repo-standard, release it, and sync with a `chore/standard-X.Y.Z` pull request.
+CI fails when a copy differs or changes on another branch. Sync summaries and pull request texts
+here name no other repository. An exemption, an accepted finding or a dropped check comes in a
+`chore/privacy-*` pull request of its own.
+
+When a private repository goes public, it does so in this order. A pull request sets
+`VISIBILITY=public`, and `tools/sync` writes the public block texts into it. The maintainer
+switches the repository to public on GitHub and turns on the security settings and the ruleset
+those texts promise. A new commit on that branch reruns its checks; a rerun from the Actions page
+keeps the old private flag. Then that pull request merges before anything else: until it does,
+`main` says private while GitHub says public, and CI on `main` and `tools/status` fail.
+<!-- standard:end standard -->
+
+## Checks
+
+Run the test suite from the repository root, as the README's Running tests section describes:
 
 ```text
-git config core.hooksPath .githooks
+uv run --no-project --python 3.13 --with-requirements requirements.txt --with-requirements requirements-dev.txt python -m pytest -q
 ```
 
-Do not bypass them with `--no-verify`. After a pull request is merged, bring the local `main` up
-to date with `git switch main` and `git pull --ff-only`.
+Tests marked `posix` need `os.killpg` and `SIGKILL`, so they skip on Windows. CI runs `ci/test`
+on Linux, where a skipped test fails the run. CI's `image` job also builds the image for amd64 and
+arm64 and smoke-tests each build with `scripts/smoke-test-image.sh`; it pushes nothing. On Linux
+with Docker, `bash scripts/smoke-test-image.sh youtube-manager` runs the same smoke test locally.
+
+## Test data
+
+Examples and tests use made-up values only: reserved example host names, video ids such as
+`dQw4w9WgXcQ` and `smoketest01`, and the stand-in for yt-dlp in `tests/fakes/yt_dlp_fake.py`. The
+privacy rules are the `base` pack.
 
 ## Schema changes
 
@@ -97,6 +157,7 @@ To release X.Y.Z:
    vP.Q.R is the previous release. The first release links to its tag instead, as in
    `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`. The same pull request sets the
    README's install command to `YTM_VERSION=X.Y.Z`; a test fails until it does.
+   It also sets `VERSION` to `X.Y.Z`, and its title is `chore(release): X.Y.Z`.
 2. After the merge, sign an annotated tag on the commit the merge created on `main`, which the
    `gh pr view` line below prints, so that nothing merged after it ships under this version. The
    tag message is `youtube-manager vX.Y.Z`. Tags are signed with the release signing key: one

@@ -1,0 +1,81 @@
+#!/bin/bash
+# stub-bin/gh of the repository standard's tests: the same file in every repository; never edit
+# it here. Stands in for gh in the release tool tests. It logs "gh ARGS" to $STUB_LOG and answers
+# from the folder $STUB_GH: the reply to a call is the file named after its arguments. The name
+# writes each run of characters other than letters, digits, dots and dashes as one underscore. A
+# name longer than 120 characters becomes its SHA-256, so it fits any file system. gh_key in
+# release-tools.bats builds the same name. The stub prints that file and exits with the number in
+# the file of the same name plus .rc, or 0. A call without a reply prints nothing and exits 0.
+# gh release download TAG [--dir DIR] [--pattern NAME] copies $STUB_GH/assets-TAG/* (or NAME)
+# into DIR. gh release create also logs the file of its --notes-file, after a line "gh notes:".
+# Under STUB_GH_READONLY=1 every call that would change something exits 99: gh api with a method
+# other than GET or with fields, and gh release create, edit, delete and upload.
+set -uo pipefail
+printf 'gh %s\n' "$*" >> "${STUB_LOG:?}"
+if [[ ${1:-} == release && ${2:-} == create ]]; then
+    previous=
+    for arg in "$@"; do
+        if [[ $previous == --notes-file ]]; then
+            { echo 'gh notes:'; cat "$arg"; } >> "$STUB_LOG"
+        fi
+        previous=$arg
+    done
+fi
+if [[ ${STUB_GH_READONLY:-} == 1 ]]; then
+    case "${1:-} ${2:-}" in
+        'release create' | 'release edit' | 'release delete' | 'release upload')
+            echo "gh stub: a change refused under STUB_GH_READONLY" >&2
+            exit 99
+            ;;
+    esac
+    if [[ ${1:-} == api ]]; then
+        previous=
+        for arg in "$@"; do
+            case $previous:$arg in
+                --method:* | -X:*)
+                    if [[ $arg != GET ]]; then
+                        echo "gh stub: a change refused under STUB_GH_READONLY" >&2
+                        exit 99
+                    fi
+                    ;;
+            esac
+            case $arg in
+                -f | -F | --field | --raw-field | --input)
+                    echo "gh stub: a change refused under STUB_GH_READONLY" >&2
+                    exit 99
+                    ;;
+            esac
+            previous=$arg
+        done
+    fi
+fi
+if [[ ${1:-} == release && ${2:-} == download ]]; then
+    tag=${3:?}
+    dir=.
+    pattern=
+    shift 3
+    while (( $# )); do
+        case $1 in
+            --dir | -D) dir=$2; shift ;;
+            --pattern | -p) pattern=$2; shift ;;
+        esac
+        shift
+    done
+    mkdir -p "$dir"
+    if [[ -n $pattern ]]; then
+        cp "${STUB_GH:?}/assets-$tag/$pattern" "$dir/" || exit 1
+    else
+        cp "${STUB_GH:?}/assets-$tag/"* "$dir/" || exit 1
+    fi
+    exit 0
+fi
+key=$(printf '%s ' "$@" | sed 's/[^A-Za-z0-9.-]\{1,\}/_/g')
+if (( ${#key} > 120 )); then
+    key=$(printf '%s' "$key" | sha256sum | cut -c 1-64)
+fi
+reply="${STUB_GH:?}/$key"
+[[ -f $reply ]] && cat "$reply"
+if [[ -f $reply.rc ]]; then
+    exit "$(cat "$reply.rc")"
+fi
+exit 0

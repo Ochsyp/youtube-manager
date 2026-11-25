@@ -1,12 +1,25 @@
 #!/bin/sh
-# Refuse commits on main: every change goes on a feature branch and reaches main through a
-# reviewed pull request. A detached HEAD, as during a rebase, is not refused.
-branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
-case "$branch" in
-    main | master)
-        echo "pre-commit: commits on '$branch' are refused. Create a feature branch first, for example:" >&2
-        echo "    git switch -c fix/short-name" >&2
-        exit 1
-        ;;
+# pre-commit of the repository standard: the same file in every repository; never edit it here.
+# Refuses a commit while main or master is checked out, a staged copy of the standard that
+# differs from .github/standard/MANIFEST, a staged blob above MAX_BLOB_KB, and staged content,
+# path names or identities that privacy-scan refuses. Reads the config from HEAD. Never prints a
+# matched value. A commit in a detached HEAD is scanned too.
+set -eu
+
+std_hook=pre-commit
+std_here=$(dirname -- "$0")
+# shellcheck source=.githooks/lib.sh
+. "$std_here/lib.sh"
+
+# The full ref name: a tag named main, for example, turns the short name into heads/main.
+ref=$(git symbolic-ref --quiet HEAD) || ref=
+# Lower-cased: on a case-insensitive file system, `git switch MAIN` checks out main as MAIN.
+case $(printf "%s" "$ref" | tr "[:upper:]" "[:lower:]") in
+    refs/heads/main | refs/heads/master) refuse_branch "${ref#refs/heads/}" ;;
 esac
-exit 0
+std_load_config
+guard_blob_size_staged
+# privacy-scan before the copy guard: standard-check names paths, and a path name may hold a
+# term that only privacy-scan keeps from being shown.
+sh "$std_here/privacy-scan" --staged || exit $?
+guard_vendored_staged

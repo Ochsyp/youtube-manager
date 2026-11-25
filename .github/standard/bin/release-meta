@@ -1,0 +1,493 @@
+#!/bin/bash
+# release-meta of the repository standard: the same file in every repository; never edit it
+# here. Checks that VERSION, CHANGELOG.md and the release tags agree (spec 3.8 and 3.9), and
+# prints version=, latest= and state= lines for CI. It applies the launcher's version rules and
+# the -dev rule.
+#   release-meta check [--event EVENT] [--release vX.Y.Z] [--root DIR]
+#   release-meta notes X.Y.Z [--root DIR]
+# check reads the vX.Y.Z tags on stdin, one per line; other tags are ignored. The state is
+# unreleased (X.Y.Z-dev above every tag, or 0.0.0 before the first release), pending (a plain
+# VERSION above every tag) or released (VERSION is the newest tag). On --event pull_request, a
+# VERSION that the pull request changes (against BASE, its base commit) must rise, and its tag
+# must not exist. There a pending release is only a notice; elsewhere it needs [Unreleased] empty.
+# --release vX.Y.Z also requires that release: its tag on stdin, VERSION equal to it, an empty
+# [Unreleased] and notes. notes prints the body of a version's section.
+# GITHUB_REPOSITORY, when set, is the owner/repo the links must name. RELEASE_META_TODAY replaces
+# today in tests. DIR defaults to the top of the repository that holds this script.
+# Exit 0; 1 after one stderr line per problem; 64 usage.
+set -uo pipefail
+
+# X.Y.Z without leading zeros, each part at most nine digits so it fits bash's arithmetic.
+SEMVER='(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})'
+# A link reference definition of any label; only one block of them, at the end, is allowed.
+LINK_REF_RE='^\[[^]]+]: '
+# A Markdown heading, which alone makes no release notes.
+HEADING_RE='^#{1,6}([[:space:]]|$)'
+# The subsections of a section, in their order.
+SUBSECTIONS=(Migration Added Changed Deprecated Removed Fixed Security)
+KEEP_A_CHANGELOG='[Keep a Changelog](https://keepachangelog.com/en/1.1.0/)'
+SEMANTIC_VERSIONING='[Semantic Versioning](https://semver.org/spec/v2.0.0.html)'
+NO_RELEASES='There are no releases yet.'
+
+MODE=""
+EVENT=""
+RELEASE=""
+NOTES_VERSION=""
+ROOT=""
+VERSION=""
+DEV=0
+LATEST=""
+STATE=""
+LIMIT=""
+PROBLEMS=0
+TAGS=()
+declare -A TAGGED=()
+SEC_VERSION=()
+SEC_DATE=()
+SEC_LINE=()
+declare -A SECTION_LINE=()
+UNRELEASED_LINE=0
+UNRELEASED_ENTRY=0
+HEADER=""
+declare -A LINK_URL=() LINK_LINE=() LINK_DUP=()
+NOTES=()
+
+# Print "release-meta: " and the text on stderr, as an error annotation in Actions.
+report() {
+    local line="release-meta: $*"
+    line="${line//$'\r'/\\r}"
+    [[ ${GITHUB_ACTIONS:-} == true ]] && line="::error::$line"
+    printf '%s\n' "$line" >&2
+}
+
+problem() {
+    report "$*"
+    PROBLEMS=$((PROBLEMS + 1))
+}
+
+notice() {
+    if [[ ${GITHUB_ACTIONS:-} == true ]]; then
+        printf '::notice::release-meta: %s\n' "$*" >&2
+    else
+        printf 'release-meta: notice: %s\n' "$*" >&2
+    fi
+}
+
+usage() {
+    echo "usage: release-meta check [--event EVENT] [--release vX.Y.Z] [--root DIR]" >&2
+    echo "       release-meta notes X.Y.Z [--root DIR]" >&2
+    exit 64
+}
+
+parse_args() {
+    local self="${BASH_SOURCE[0]}"
+    (( $# )) || usage
+    case $1 in
+        check) MODE=check ;;
+        notes)
+            MODE=notes
+            [[ ${2-} =~ ^${SEMVER}$ ]] || usage
+            NOTES_VERSION=$2
+            shift
+            ;;
+        *) usage ;;
+    esac
+    shift
+    while (( $# )); do
+        case $1 in
+            --root)
+                [[ -n ${2-} ]] || usage
+                ROOT=$2
+                ;;
+            --event)
+                [[ $MODE == check && ${2-} =~ ^[a-z_]+$ ]] || usage
+                EVENT=$2
+                ;;
+            --release)
+                [[ $MODE == check && ${2-} =~ ^v${SEMVER}$ ]] || usage
+                RELEASE=${2#v}
+                ;;
+            *) usage ;;
+        esac
+        shift 2
+    done
+    if [[ -z $ROOT ]]; then
+        [[ $self == */* ]] || self="./$self"
+        ROOT="${self%/*}/../../.."
+    fi
+}
+
+# Record each vX.Y.Z tag on stdin once; a terminal on stdin means no tags.
+read_tags() {
+    local tag
+    [[ -t 0 ]] && return 0
+    while IFS= read -r tag || [[ -n $tag ]]; do
+        [[ $tag =~ ^v${SEMVER}$ ]] || continue
+        tag=${tag#v}
+        [[ -z ${TAGGED[$tag]-} ]] || continue
+        TAGGED[$tag]=1
+        TAGS+=("$tag")
+    done
+}
+
+# Set VERSION and DEV from VERSION: exactly one line X.Y.Z or X.Y.Z-dev and a line feed, with no
+# BOM, no CR and no leading zeros (the launcher's rule).
+read_version() {
+    local file="$ROOT/VERSION" content re
+    if [[ ! -f $file ]]; then
+        problem "VERSION is missing"
+        return
+    fi
+    content=$(LC_ALL=C cat -- "$file"; printf x)
+    content=${content%x}
+    re="^(${SEMVER})(-dev)?"$'\n''$'
+    if [[ ! $content =~ $re ]]; then
+        problem "VERSION is not one line X.Y.Z or X.Y.Z-dev and a line feed, without leading zeros"
+        return
+    fi
+    VERSION=${BASH_REMATCH[1]}
+    [[ -z ${BASH_REMATCH[5]} ]] || DEV=1
+}
+
+# The version as written: X.Y.Z, or X.Y.Z-dev.
+version_text() {
+    if (( DEV )); then printf '%s-dev' "$VERSION"; else printf '%s' "$VERSION"; fi
+}
+
+# Read CHANGELOG.md: the header before the first "## " heading, the sections, the [Unreleased]
+# entry, and the link references of [Unreleased] and [X.Y.Z]. Reports the headings and the
+# subsections that break spec 3.8, and text after the link block. Returns 1 when unreadable.
+read_changelog() {
+    local file="$ROOT/CHANGELOG.md" line label version n=0 in_unreleased=0 first_link=0
+    local in_header=1 section="" last_sub=-1 sub idx i
+    local heading_re="^## \\[(${SEMVER})] - ([0-9]{4}-[0-9]{2}-[0-9]{2})\$"
+    local link_re="^\\[(Unreleased|${SEMVER})]: (.*)\$"
+    local -A seen_sub=()
+    if [[ ! -f $file || ! -r $file ]]; then
+        problem "cannot read CHANGELOG.md"
+        return 1
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        n=$((n + 1))
+        if (( n == 1 )) && [[ $line != '# Changelog' ]]; then
+            problem "CHANGELOG.md:1: the first line must be # Changelog"
+        fi
+        if [[ $line == '## '* ]]; then
+            in_header=0
+        elif (( in_header && n > 1 )); then
+            HEADER+=" $line"
+        fi
+        if [[ $line =~ $LINK_REF_RE ]]; then
+            (( first_link )) || first_link=$n
+        elif (( first_link > 0 )) && [[ $line =~ [^[:space:]] ]]; then
+            problem "CHANGELOG.md:$n: text after the link reference on line $first_link; link references belong in one block at the end"
+            first_link=-1
+        fi
+        if [[ $line == '## '* || $line =~ $LINK_REF_RE ]]; then
+            in_unreleased=0
+        elif (( in_unreleased && UNRELEASED_ENTRY == 0 )) && [[ $line =~ [^[:space:]] ]]; then
+            UNRELEASED_ENTRY=$n
+        fi
+        if [[ $line =~ $link_re ]]; then
+            label=${BASH_REMATCH[1]}
+            if [[ -z ${LINK_LINE[$label]-} ]]; then
+                LINK_URL[$label]=${BASH_REMATCH[5]}
+                LINK_LINE[$label]=$n
+            elif [[ -z ${LINK_DUP[$label]-} ]]; then
+                LINK_DUP[$label]=$n
+            fi
+        elif [[ $line == '## [Unreleased]' ]]; then
+            if (( UNRELEASED_LINE )); then
+                problem "CHANGELOG.md:$n: a second ## [Unreleased] heading; exactly one is allowed"
+            else
+                UNRELEASED_LINE=$n
+                in_unreleased=1
+                if (( ${#SEC_LINE[@]} )); then
+                    problem "CHANGELOG.md:$n: ## [Unreleased] comes after the version section on line ${SEC_LINE[0]}; it must come before every version section"
+                fi
+            fi
+            section="[Unreleased]" last_sub=-1 seen_sub=()
+        elif [[ $line =~ $heading_re ]]; then
+            version=${BASH_REMATCH[1]}
+            SEC_VERSION+=("$version")
+            SEC_DATE+=("${BASH_REMATCH[5]}")
+            SEC_LINE+=("$n")
+            [[ -n ${SECTION_LINE[$version]-} ]] || SECTION_LINE[$version]=$n
+            section="[$version]" last_sub=-1 seen_sub=()
+        elif [[ $line == '## '* ]]; then
+            problem "CHANGELOG.md:$n: a heading other than ## [Unreleased] or ## [X.Y.Z] - YYYY-MM-DD: $line"
+            section="" last_sub=-1 seen_sub=()
+        elif [[ $line == '### '* && -n $section ]]; then
+            sub=${line#'### '}
+            idx=-1
+            for i in "${!SUBSECTIONS[@]}"; do
+                [[ ${SUBSECTIONS[i]} == "$sub" ]] && idx=$i
+            done
+            if (( idx < 0 )); then
+                problem "CHANGELOG.md:$n: ### $sub is not a subsection of Keep a Changelog; use Migration, Added, Changed, Deprecated, Removed, Fixed or Security"
+            elif [[ -n ${seen_sub[$sub]-} ]]; then
+                problem "CHANGELOG.md:$n: a second ### $sub in $section"
+            else
+                if (( idx < last_sub )); then
+                    problem "CHANGELOG.md:$n: ### $sub comes after ### ${SUBSECTIONS[last_sub]} in $section; the order is Migration, Added, Changed, Deprecated, Removed, Fixed, Security"
+                fi
+                seen_sub[$sub]=1
+                (( idx < last_sub )) || last_sub=$idx
+            fi
+        fi
+    done < "$file"
+    (( UNRELEASED_LINE )) || problem "CHANGELOG.md has no ## [Unreleased] heading"
+}
+
+# The header names Keep a Changelog 1.1.0 and Semantic Versioning 2.0.0, and says that there are
+# no releases yet exactly while there is no version section.
+check_header() {
+    if [[ $HEADER != *"$KEEP_A_CHANGELOG"* || $HEADER != *"$SEMANTIC_VERSIONING"* ]]; then
+        problem "CHANGELOG.md: the header must name Keep a Changelog 1.1.0 and Semantic Versioning 2.0.0, as templates/CHANGELOG.md in repo-standard writes them"
+    fi
+    if (( ${#SEC_VERSION[@]} )) && [[ $HEADER == *"$NO_RELEASES"* ]]; then
+        problem "CHANGELOG.md: the header says there are no releases yet, but it holds version sections"
+    elif (( ${#SEC_VERSION[@]} == 0 )) && [[ $HEADER != *"$NO_RELEASES"* ]]; then
+        problem "CHANGELOG.md: the header must say $NO_RELEASES until the first version section"
+    fi
+}
+
+is_calendar_date() {
+    [[ $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+    [[ $(date -u -d "$1" +%F 2> /dev/null) == "$1" ]]
+}
+
+date_after() {
+    (( 10#${1//-/} > 10#${2//-/} ))
+}
+
+# Return 0 if version $1 is lower than version $2, both X.Y.Z.
+version_lt() {
+    local -a a b
+    IFS=. read -r -a a <<< "$1"
+    IFS=. read -r -a b <<< "$2"
+    if (( a[0] != b[0] )); then (( a[0] < b[0] )); return; fi
+    if (( a[1] != b[1] )); then (( a[1] < b[1] )); return; fi
+    (( a[2] < b[2] ))
+}
+
+# Return 0 if $1 is lower than $2, both X.Y.Z or X.Y.Z-dev; X.Y.Z-dev is lower than X.Y.Z.
+written_lt() {
+    local first=${1%-dev} second=${2%-dev}
+    if [[ $first != "$second" ]]; then version_lt "$first" "$second"; return; fi
+    [[ $1 == *-dev && $2 != *-dev ]]
+}
+
+set_limit() {
+    local today=${RELEASE_META_TODAY:-}
+    if [[ -z $today ]]; then
+        today=$(date -u +%F)
+    elif ! is_calendar_date "$today"; then
+        problem "RELEASE_META_TODAY is not a calendar date: $today"
+        return
+    fi
+    LIMIT=$(date -u -d "$today + 1 day" +%F)
+}
+
+check_sections() {
+    local i v d
+    for i in "${!SEC_VERSION[@]}"; do
+        v=${SEC_VERSION[i]}
+        d=${SEC_DATE[i]}
+        if ! is_calendar_date "$d"; then
+            problem "CHANGELOG.md:${SEC_LINE[i]}: [$v] has date $d, which is not a calendar date"
+        elif [[ -n $LIMIT ]] && date_after "$d" "$LIMIT"; then
+            problem "CHANGELOG.md:${SEC_LINE[i]}: [$v] is dated $d, after $LIMIT, the day after today (UTC)"
+        fi
+        (( i > 0 )) || continue
+        if ! version_lt "$v" "${SEC_VERSION[i-1]}"; then
+            problem "CHANGELOG.md:${SEC_LINE[i]}: [$v] is not lower than [${SEC_VERSION[i-1]}] above it; versions must descend from top to bottom"
+        fi
+        if is_calendar_date "$d" && date_after "$d" "${SEC_DATE[i-1]}"; then
+            problem "CHANGELOG.md:${SEC_LINE[i]}: [$v] is dated $d, after [${SEC_VERSION[i-1]}] above it, dated ${SEC_DATE[i-1]}; dates must not increase from top to bottom"
+        fi
+    done
+}
+
+expect_link() {
+    local label=$1 want=$2
+    if [[ -z ${LINK_LINE[$label]-} ]]; then
+        problem "CHANGELOG.md has no link reference [$label]${want:+: $want}"
+    elif [[ -n $want && ${LINK_URL[$label]} != "$want" ]]; then
+        problem "CHANGELOG.md:${LINK_LINE[$label]}: [$label] links to ${LINK_URL[$label]}; expected $want"
+    fi
+}
+
+# The links of [Unreleased] and of every section, under the base that the [Unreleased] link
+# names; with GITHUB_REPOSITORY set, that base must be this repository.
+check_links() {
+    local i label base n=${#SEC_VERSION[@]}
+    local unreleased_re="^(.*)/(commits/main|compare/v${SEMVER}\\.\\.\\.HEAD)\$"
+    for label in Unreleased "${SEC_VERSION[@]}"; do
+        [[ -z ${LINK_DUP[$label]-} ]] || problem "CHANGELOG.md:${LINK_DUP[$label]}: a second link reference for [$label]"
+    done
+    if [[ ! ${LINK_URL[Unreleased]-} =~ $unreleased_re ]]; then
+        if [[ -n ${LINK_LINE[Unreleased]-} ]]; then
+            problem "CHANGELOG.md:${LINK_LINE[Unreleased]}: [Unreleased] links to ${LINK_URL[Unreleased]}, which ends in neither /commits/main nor /compare/vX.Y.Z...HEAD"
+        fi
+        for label in Unreleased "${SEC_VERSION[@]}"; do
+            expect_link "$label" ""
+        done
+        return
+    fi
+    base=${BASH_REMATCH[1]}
+    if [[ -n ${GITHUB_REPOSITORY:-} && $base != "https://github.com/$GITHUB_REPOSITORY" ]]; then
+        problem "CHANGELOG.md:${LINK_LINE[Unreleased]}: the links name $base; this repository is https://github.com/$GITHUB_REPOSITORY"
+    fi
+    if (( n == 0 )); then
+        expect_link Unreleased "$base/commits/main"
+    else
+        expect_link Unreleased "$base/compare/v${SEC_VERSION[0]}...HEAD"
+    fi
+    for i in "${!SEC_VERSION[@]}"; do
+        if (( i == n - 1 )); then
+            expect_link "${SEC_VERSION[i]}" "$base/releases/tag/v${SEC_VERSION[i]}"
+        else
+            expect_link "${SEC_VERSION[i]}" "$base/compare/v${SEC_VERSION[i+1]}...v${SEC_VERSION[i]}"
+        fi
+    done
+}
+
+# Set LATEST and STATE, and check VERSION against the tags and the sections.
+check_state() {
+    local tag i v pending=""
+    for tag in "${TAGS[@]}"; do
+        if [[ -z $LATEST ]] || version_lt "$LATEST" "$tag"; then
+            LATEST=$tag
+        fi
+        [[ -n ${SECTION_LINE[$tag]-} ]] || problem "tag v$tag has no ## [$tag] section in CHANGELOG.md"
+    done
+    if [[ -z $VERSION ]]; then
+        pending=${SEC_VERSION[0]-}
+    elif (( DEV )); then
+        if [[ -n $LATEST ]] && ! version_lt "$LATEST" "$VERSION"; then
+            problem "VERSION $VERSION-dev is not above the newest tag v$LATEST"
+        else
+            STATE=unreleased
+        fi
+    elif [[ -z $LATEST ]]; then
+        if [[ $VERSION == 0.0.0 ]]; then STATE=unreleased; else STATE=pending; fi
+    elif [[ $VERSION == "$LATEST" ]]; then
+        STATE=released
+    elif version_lt "$LATEST" "$VERSION"; then
+        STATE=pending
+    else
+        problem "VERSION $VERSION is lower than the newest tag v$LATEST"
+    fi
+    [[ $STATE == pending ]] && pending=$VERSION
+    if [[ $STATE == pending || $STATE == released ]] && [[ ${SEC_VERSION[0]-} != "$VERSION" ]]; then
+        problem "VERSION is $VERSION, so CHANGELOG.md needs ## [$VERSION] - YYYY-MM-DD as its newest version section"
+    fi
+    for i in "${!SEC_VERSION[@]}"; do
+        v=${SEC_VERSION[i]}
+        if [[ -z ${TAGGED[$v]-} && $v != "$pending" ]]; then
+            problem "CHANGELOG.md:${SEC_LINE[i]}: [$v] has no tag v$v; only the pending VERSION may lack one"
+        fi
+    done
+}
+
+# A pending release waits for its publish: a notice on a pull request, and elsewhere a rule that
+# [Unreleased] holds nothing that the draft would leave out.
+check_pending() {
+    [[ $STATE == pending ]] || return 0
+    if [[ $EVENT == pull_request ]]; then
+        notice "v$VERSION waits to be published; merge nothing else until it is"
+    elif (( UNRELEASED_ENTRY )) && [[ -z $RELEASE ]]; then
+        problem "CHANGELOG.md:$UNRELEASED_ENTRY: [Unreleased] is not empty while v$VERSION waits to be published"
+    fi
+}
+
+# On a pull request: a VERSION that differs from the base's must rise, and a plain one must not
+# be a tag already.
+check_pull_request() {
+    local base_version now
+    [[ $EVENT == pull_request && -n ${BASE:-} && -n $VERSION ]] || return 0
+    base_version=$(git -C "$ROOT" show "$BASE:VERSION" 2> /dev/null) || return 0
+    now=$(version_text)
+    [[ $base_version != "$now" ]] || return 0
+    if [[ $base_version =~ ^${SEMVER}(-dev)?$ ]] && ! written_lt "$base_version" "$now"; then
+        problem "VERSION goes from $base_version to $now, but a change of VERSION must raise it"
+    elif (( ! DEV )) && [[ -n ${TAGGED[$VERSION]-} ]]; then
+        problem "tag v$VERSION exists already; a release raises VERSION to a new version"
+    fi
+}
+
+check_release() {
+    [[ -n $RELEASE ]] || return 0
+    if [[ -n $VERSION && $(version_text) != "$RELEASE" ]]; then
+        problem "VERSION is $(version_text); release v$RELEASE needs VERSION $RELEASE"
+    fi
+    [[ -n ${TAGGED[$RELEASE]-} ]] || problem "tag v$RELEASE is not among the tags read on stdin"
+    if (( UNRELEASED_ENTRY )); then
+        problem "CHANGELOG.md:$UNRELEASED_ENTRY: [Unreleased] is not empty; release v$RELEASE moves every entry under ## [$RELEASE]"
+    fi
+    if [[ -n ${SECTION_LINE[$RELEASE]-} ]]; then
+        read_notes "$RELEASE"
+    fi
+}
+
+# Set NOTES to the body of the section of version $1, less the blank lines at either end.
+read_notes() {
+    local file="$ROOT/CHANGELOG.md" line n=0 heading=0 first=-1 last=-1 entries=0 i
+    local heading_re="^## \\[(${SEMVER})] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$"
+    local -a body=()
+    NOTES=()
+    if [[ ! -f $file || ! -r $file ]]; then
+        problem "cannot read CHANGELOG.md"
+        return 1
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        n=$((n + 1))
+        if (( heading )); then
+            [[ $line == '## '* || $line =~ $LINK_REF_RE ]] && break
+            body+=("$line")
+        elif [[ $line =~ $heading_re && ${BASH_REMATCH[1]} == "$1" ]]; then
+            heading=$n
+        fi
+    done < "$file"
+    if (( heading == 0 )); then
+        problem "CHANGELOG.md has no ## [$1] - YYYY-MM-DD section"
+        return 1
+    fi
+    for i in "${!body[@]}"; do
+        [[ ${body[i]} =~ [^[:space:]] ]] || continue
+        (( first >= 0 )) || first=$i
+        last=$i
+        [[ ${body[i]} =~ $HEADING_RE ]] || entries=$((entries + 1))
+    done
+    if (( entries == 0 )); then
+        problem "CHANGELOG.md:$heading: [$1] has no notes, only blank lines and headings"
+        return 1
+    fi
+    NOTES=("${body[@]:first:last-first+1}")
+}
+
+main() {
+    parse_args "$@"
+    if [[ $MODE == notes ]]; then
+        read_notes "$NOTES_VERSION" || exit 1
+        printf '%s\n' "${NOTES[@]}"
+        return 0
+    fi
+    set_limit
+    read_tags
+    read_version
+    if read_changelog; then
+        check_header
+        check_sections
+        check_links
+        check_state
+        check_pending
+        check_pull_request
+    fi
+    check_release
+    (( PROBLEMS == 0 )) || exit 1
+    printf 'version=%s\nlatest=%s\nstate=%s\n' "$(version_text)" "${LATEST:+v$LATEST}" "$STATE"
+}
+
+main "$@"

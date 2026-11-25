@@ -1,0 +1,51 @@
+#!/bin/bash
+# pr-text of the repository standard: the same file in every repository; never edit it here.
+# Checks the title and the body of a pull request: before every gh pr create and gh pr edit, and
+# in CI through pr-title. The title must be a Conventional Commit with a type the CONTRIBUTING
+# workflow names. Title and body go through the hooks' privacy-scan --message, so the denylists
+# come only from its loader and the rule packs from the committed config. It never prints the
+# title, the body or a term.
+#   pr-text TITLE [BODY-FILE|-]
+# Exit 0 clean; 1 refused; 2 when a check cannot run; 64 usage.
+set -euo pipefail
+here=${BASH_SOURCE[0]%/*}
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+usage() {
+    echo "usage: pr-text TITLE [BODY-FILE|-]" >&2
+    exit 64
+}
+
+[[ $# -ge 1 && $# -le 2 ]] || usage
+title=$1
+body=${2:-}
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/pr-text.XXXXXX") || { error "cannot create a temp folder"; exit 2; }
+trap 'rm -rf -- "$tmp"' EXIT
+# The title is line 1 of the text, a blank line follows, and the body starts on line 3.
+if ! {
+    printf '%s\n\n' "$title"
+    case $body in
+        '') ;;
+        -) cat ;;
+        *) cat -- "$body" ;;
+    esac
+} > "$tmp/text" 2> /dev/null; then
+    error "cannot read the body"
+    exit 2
+fi
+status=0
+if [[ ! $title =~ ^(feat|fix|docs|chore|ci|test|refactor)(\([a-z0-9._/-]+\))?!?:\ [^[:space:]] ]]; then
+    error "the title is not a Conventional Commit: type(scope): summary, with the type feat," \
+        "fix, docs, chore, ci, test or refactor"
+    status=1
+fi
+scan=0
+sh "$here/../../../.githooks/privacy-scan" --message "$tmp/text" < /dev/null || scan=$?
+case $scan in
+    0) ;;
+    1) status=1 ;;
+    *) exit 2 ;;
+esac
+exit "$status"

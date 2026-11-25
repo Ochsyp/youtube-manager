@@ -1,0 +1,179 @@
+#!/bin/bash
+# release-verify of the repository standard: the same file in every repository; never edit it
+# here. The verify job of release.yml (spec 3.5): it checks a published release and changes
+# nothing, neither on GitHub nor in the registry.
+#   release-verify --tag vX.Y.Z [--public]
+# The release must be published, not a draft, immutable, and drafted by github-actions[bot].
+# SHA256SUMS must list exactly the assets and match them. Archive kinds: the RELEASE_MANIFEST in
+# the archive has schema 1 and names the name, version, tag and the tag's commit, and every
+# RELEASE_ASSETS file equals its archive member. Image kind: image.json names the same, and the
+# tag X.Y.Z resolves to its digest. GitHub's checks follow: gh release verify, and gh release
+# verify-asset for each asset. --public, for a public repository, adds gh attestation verify of
+# each asset, or of the image digest. The attestation must come from this repository's
+# release.yml on refs/heads/main, from the tag's commit, on a GitHub-hosted runner. Last,
+# ci/release-verify runs, when present, with --tag and --assets DIR.
+# It reads the config of the checkout and GITHUB_REPOSITORY; gh reads GH_TOKEN.
+# Exit 0; 1 after one error per problem; 64 usage.
+set -euo pipefail
+shopt -s nullglob
+here=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+usage() {
+    echo "usage: release-verify --tag vX.Y.Z [--public]" >&2
+    exit 64
+}
+
+tag=''
+public=0
+while (( $# )); do
+    case $1 in
+        --tag) [[ -n ${2:-} ]] || usage; tag=$2; shift ;;
+        --public) public=1 ;;
+        *) usage ;;
+    esac
+    shift
+done
+[[ $tag =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || usage
+version=${tag#v}
+repo=${GITHUB_REPOSITORY:-}
+[[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "GITHUB_REPOSITORY is not owner/repo"
+image=ghcr.io/$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
+top=$(git rev-parse --show-toplevel 2> /dev/null) || die "not in a git work tree"
+cd "$top"
+conf_get() {
+    sh "$here/conf" --get "$1" .github/standard.conf || die "cannot read $1 from .github/standard.conf"
+}
+name=$(conf_get NAME)
+kind=$(conf_get RELEASE_KIND)
+case $kind in
+    zip) ext=zip ;;
+    tar | stack) ext=tar.gz ;;
+    image) ext='' ;;
+    *) die "RELEASE_KIND=$kind has no release of the standard to verify" ;;
+esac
+
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-verify.XXXXXX") || die "cannot create a temp folder"
+trap 'rm -rf -- "$tmp"' EXIT
+problems=0
+problem() {
+    error "$@"
+    problems=$((problems + 1))
+}
+
+# Check that the JSON file $1 (named $2 in messages) has schema 1 and names this release and the
+# tag's commit.
+check_record() {
+    local key want got
+    for key in schema name version tag commit; do
+        case $key in
+            schema) want=1 ;;
+            name) want=$name ;;
+            version) want=$version ;;
+            tag) want=$tag ;;
+            commit) want=$commit ;;
+        esac
+        if ! got=$(json_value "$1" "$key"); then
+            problem "$2 has no single $key"
+        elif [[ $got != "$want" ]]; then
+            if [[ $key == commit ]]; then
+                problem "$2 names commit $got, not the tag's $commit"
+            else
+                problem "$2 names $key $got, not $want"
+            fi
+        fi
+    done
+}
+
+info=$(gh api "repos/$repo/releases/tags/$tag" --jq '[.draft, .immutable, .author.login] | @tsv') ||
+    die "cannot read release $tag"
+IFS=$'\t' read -r draft immutable author <<< "$info"
+[[ $draft == false ]] || problem "$tag is a draft, not a published release"
+[[ $immutable == true ]] || problem "$tag is not immutable"
+[[ $author == 'github-actions[bot]' ]] || problem "$tag was drafted by ${author:-nobody}, not github-actions[bot]"
+commit=$(gh api "repos/$repo/commits/$tag" --jq .sha) || die "cannot read the commit of $tag"
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || die "the commit of $tag is no commit id"
+
+mkdir "$tmp/assets"
+gh release download "$tag" --dir "$tmp/assets" > /dev/null || die "cannot download the assets of $tag"
+check_sums "$tmp/assets" || problems=$((problems + 1))
+
+if [[ $kind == image ]]; then
+    digest=''
+    if [[ ! -f $tmp/assets/image.json ]]; then
+        problem "$tag has no asset image.json"
+    else
+        check_record "$tmp/assets/image.json" image.json
+        digest=$(json_value "$tmp/assets/image.json" digest) || digest=''
+        if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            problem "image.json names no sha256 digest"
+            digest=''
+        else
+            if [[ -n ${GH_TOKEN:-} && -n ${GITHUB_ACTOR:-} ]]; then
+                printf '%s\n' "$GH_TOKEN" |
+                    docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null ||
+                    problem "docker cannot log in to ghcr.io"
+            fi
+            resolved=$(docker buildx imagetools inspect "$image:$version" --format '{{.Manifest.Digest}}') ||
+                resolved=''
+            [[ $resolved == "$digest" ]] ||
+                problem "$image:$version resolves to ${resolved:-nothing}, not $digest"
+        fi
+    fi
+else
+    archive_name=$name-$version.$ext
+    archive=$tmp/assets/$archive_name
+    manifest=$(conf_get RELEASE_MANIFEST)
+    read -r -a assets <<< "$(conf_get RELEASE_ASSETS)"
+    if [[ ! -f $archive ]]; then
+        problem "$tag has no asset $archive_name"
+    else
+        if extract "$archive" "$name-$version/$manifest" > "$tmp/manifest.json" 2> /dev/null; then
+            check_record "$tmp/manifest.json" "$manifest"
+        else
+            problem "the archive holds no $name-$version/$manifest"
+        fi
+        for asset in "${assets[@]}"; do
+            base=${asset##*/}
+            if [[ ! -f $tmp/assets/$base ]]; then
+                problem "$tag has no asset $base (RELEASE_ASSETS)"
+            elif ! extract "$archive" "$name-$version/$asset" > "$tmp/member" 2> /dev/null; then
+                problem "the archive holds no $name-$version/$asset (RELEASE_ASSETS)"
+            elif ! cmp -s "$tmp/member" "$tmp/assets/$base"; then
+                problem "the asset $base differs from $asset in the archive"
+            fi
+        done
+    fi
+fi
+
+gh release verify "$tag" > /dev/null || problem "gh release verify does not confirm $tag"
+for file in "$tmp"/assets/*; do
+    gh release verify-asset "$tag" "$file" > /dev/null ||
+        problem "gh release verify-asset does not confirm ${file##*/} of $tag"
+done
+
+if (( public )); then
+    subjects=()
+    if [[ $kind == image ]]; then
+        [[ -z $digest ]] || subjects=("oci://$image@$digest")
+    else
+        subjects=("$tmp"/assets/*)
+    fi
+    (( ${#subjects[@]} )) || problem "there is nothing to check an attestation for"
+    for subject in "${subjects[@]}"; do
+        gh attestation verify "$subject" --repo "$repo" \
+            --signer-workflow "$repo/.github/workflows/release.yml" --source-ref refs/heads/main \
+            --source-digest "$commit" --deny-self-hosted-runners > /dev/null ||
+            problem "gh attestation verify does not confirm ${subject##*/}"
+    done
+fi
+
+if has_hook release-verify; then
+    run_hook release-verify --tag "$tag" --assets "$(mixed_path "$tmp/assets")" ||
+        problem "ci/release-verify failed"
+fi
+
+(( problems == 0 )) || die "$tag failed $problems check(s)"
+say "$tag is verified"

@@ -1,0 +1,21 @@
+# Rule pack "disk" of the repository standard: the same file in every repository; never edit it
+# here. Data in the format that rules/base describes. Disk and partition identifiers, which name
+# a machine's hardware, except the synthetic 5ca1ab1e range.
+#
+# Filesystem and LUKS UUIDs.
+uuid|\b[0-9A-Fa-f]{8,9}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|^5ca1ab1e
+# UUIDs written without dashes.
+uuid-dashless|\b[0-9A-Fa-f]{32}\b|^5ca1ab1e
+# NTFS volume serials.
+ntfs-serial|\b[0-9A-Fa-f]{16}\b|^5ca1ab1e
+# FAT volume serials, in fstab, blkid or GRUB form. Only option words, each starting with -
+# (quoted or parenthesised hints included), may stand between --fs-uuid and the serial, so a hit
+# ends at the first serial that is no option, and the exemption covers that serial alone.
+fat-serial|(UUID=.?|--fs-uuid([[:blank:]]+-[^[:space:]]+)*[[:blank:]]+)[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}\b|5ca1-ab1e$
+# LVM physical and logical volume UUIDs.
+lvm-uuid|\b[0-9A-Za-z]{6}(-[0-9A-Za-z]{4}){5}-[0-9A-Za-z]{6}\b|^5ca1ab
+# MBR PARTUUIDs and PTUUIDs, which carry the disk signature.
+partuuid|\b[Pp]([Aa][Rr])?[Tt][Uu][Uu][Ii][Dd][^0-9A-Za-z]{0,3}[0-9A-Fa-f]{8}|5ca1ab1e
+# /dev/disk/by-id/ names, which carry a model and a serial. The leading letter or digit keeps
+# globs and prose about the folder itself out. The exemption covers the synthetic names only.
+disk-by-id|/dev/disk/by-id/[0-9A-Za-z][0-9A-Za-z#+.:=@_-]*|^/dev/disk/by-id/[a-z]+-Synthetic(_Stick)?(_5CA1AB1E[0-9A-F]{8})?(-[0-9]+:[0-9]+)?(-part[0-9]+)?$

@@ -1,0 +1,43 @@
+#!/bin/bash
+# stub-bin/docker of the repository standard's tests: the same file in every repository; never
+# edit it here. Stands in for docker in the release tool tests. It logs "docker ARGS" to $STUB_LOG,
+# never its stdin. docker login --password-stdin reads stdin and logs only whether it held
+# something. docker buildx imagetools create --tag REF SOURCE records REF with the digest of
+# SOURCE (REPOSITORY@sha256:...) in $STUB_DOCKER_TAGS, one "REF DIGEST" line each. docker buildx
+# imagetools inspect REF prints the digest recorded for REF, or the one REF names after @.
+set -uo pipefail
+printf 'docker %s\n' "$*" >> "${STUB_LOG:?}"
+case "$*" in
+    login*--password-stdin*)
+        if [[ -n $(cat) ]]; then
+            echo 'docker login: a password came on stdin' >> "$STUB_LOG"
+        fi
+        exit 0
+        ;;
+    'buildx imagetools create'*)
+        shift 3
+        tags=()
+        while (( $# )); do
+            case $1 in
+                --tag | -t) tags+=("$2"); shift ;;
+                *) source=$1 ;;
+            esac
+            shift
+        done
+        digest=${source#*@}
+        for tag in "${tags[@]}"; do
+            printf '%s %s\n' "$tag" "$digest" >> "${STUB_DOCKER_TAGS:?}"
+        done
+        exit 0
+        ;;
+    'buildx imagetools inspect'*)
+        ref=$4
+        if [[ $ref == *@sha256:* ]]; then
+            printf '%s\n' "${ref#*@}"
+            exit 0
+        fi
+        awk -v r="$ref" '$1 == r { d = $2 } END { if (d == "") exit 1; print d }' "${STUB_DOCKER_TAGS:?}"
+        exit
+        ;;
+esac
+exit 0

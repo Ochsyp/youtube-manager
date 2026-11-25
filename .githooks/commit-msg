@@ -1,0 +1,81 @@
+#!/bin/sh
+# commit-msg of the repository standard: the same file in every repository; never edit it here.
+# Refuses a commit message that privacy-scan refuses: a denylist term or a rule pack hit. git
+# passes the message file as $1 before its own cleanup, so the hook drops only what git's own
+# rules say git drops, and scans the rest:
+# - The cut line is "C ------------------------ >8 ------------------------", where C is the
+#   comment string git uses. git cuts the message at it under the scissors mode or for a verbose
+#   commit, whose diff it puts below the line. The hook cuts at the first such line when
+#   commit.cleanup is scissors and an editor ran, when commit.verbose is set, or when the first
+#   line below it that is neither blank nor a comment starts git's diff ("diff --git "). It
+#   never reads the notice lines under the cut line, which git translates.
+# - git drops comment lines only in the strip mode: commit.cleanup=strip, or no commit.cleanup
+#   and an editor ran. For its hooks git sets GIT_EDITOR=: when no editor runs (-m, -F,
+#   --no-edit). The default mode is then whitespace, which keeps comment lines, as scissors and
+#   verbatim do.
+# - Under core.commentChar=auto, or when git does not show its comment string, the hook keeps
+#   every line: fail closed.
+# A hook cannot see --cleanup, -v or -c options of the command. Where they make git drop more,
+# the hook scans more than the commit records. Where they make git keep lines that the hook
+# drops (--cleanup=whitespace, scissors or verbatim with an editor), pre-push's range scan of the
+# recorded commit is the backstop. pre-push also checks the branch names.
+set -eu
+here=$(dirname -- "$0")
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/commit-msg.XXXXXX") || exit 2
+trap 'rm -rf -- "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# The comment string, as git itself writes a comment line; empty under auto.
+comment=
+last=$(git config --get-regexp '^core\.comment(char|string)$' 2> /dev/null | tail -n 1) || last=
+case $(printf '%s' "${last#* }" | tr '[:upper:]' '[:lower:]') in
+    auto) ;;
+    *)
+        if shown=$(printf 'x\n' | git stripspace --comment-lines 2> /dev/null); then
+            case $shown in
+                ?*' x') comment=${shown% x} ;;
+            esac
+        fi
+        ;;
+esac
+
+editor=1
+[ "${GIT_EDITOR-}" != : ] || editor=0
+cleanup=$(git config --get commit.cleanup 2> /dev/null) || cleanup=
+case $cleanup in
+    '' | default) if [ "$editor" -eq 1 ]; then mode="strip"; else mode="whitespace"; fi ;;
+    scissors) if [ "$editor" -eq 1 ]; then mode="scissors"; else mode="whitespace"; fi ;;
+    strip | whitespace) mode=$cleanup ;;
+    *) mode="verbatim" ;;
+esac
+verbose=$(git config --type=bool-or-int --get commit.verbose 2> /dev/null) || verbose=false
+case $verbose in
+    false | 0 | -*) cutnow=0 ;;
+    *) cutnow=1 ;;
+esac
+[ "$mode" != scissors ] || cutnow=1
+
+if [ -n "$comment" ]; then
+    CUT="$comment ------------------------ >8 ------------------------" COMMENT=$comment \
+        CUTNOW=$cutnow LC_ALL=C awk '
+        { line[NR] = $0 }
+        END {
+            cut = 0
+            for (i = 1; i <= NR; i++) if (line[i] == ENVIRON["CUT"]) { cut = i; break }
+            if (cut && ENVIRON["CUTNOW"] != 1) {
+                for (j = cut + 1; j <= NR; j++)
+                    if (line[j] != "" && index(line[j], ENVIRON["COMMENT"]) != 1) break
+                if (j > NR || substr(line[j], 1, 11) != "diff --git ") cut = 0
+            }
+            last = cut ? cut - 1 : NR
+            for (i = 1; i <= last; i++) print line[i]
+        }' "$1" > "$tmp/message" || exit 2
+else
+    cat -- "$1" > "$tmp/message" || exit 2
+fi
+if [ "$mode" = strip ] && [ -n "$comment" ]; then
+    git stripspace --strip-comments < "$tmp/message" > "$tmp/stripped" || exit 2
+    mv -f -- "$tmp/stripped" "$tmp/message" || exit 2
+fi
+sh "$here/privacy-scan" --message "$tmp/message"

@@ -1,0 +1,86 @@
+#!/bin/bash
+# changelog-entry of the repository standard: the same file in every repository; never edit it
+# here. In CI it checks the lines that a pull request adds to CHANGELOG.md (spec 3.8). It passes
+# when they add a line under ## [Unreleased]; or a version heading, as a release pull request
+# does; or, from a branch fix/release-X.Y.Z-<slug>, a line in the section of X.Y.Z, as the fix of
+# a draft release does. A Dependabot pull request, by dependabot[bot] from a dependabot/ branch,
+# needs no line (D5). Each added line inside a section must keep to 100 columns and may name a
+# phase only as a trailing "(phase N)". Lines that were there before are never checked.
+# Reads BASE (the pull request's base commit), HEAD_REF (its branch) and AUTHOR (its author).
+# Exit 0; 1 when the pull request breaks a rule; 2 when the check cannot run; 64 usage.
+set -euo pipefail
+export LC_ALL=C.UTF-8
+here=${BASH_SOURCE[0]%/*}
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+[[ $# -eq 0 ]] || { echo "usage: changelog-entry (reads BASE, HEAD_REF and AUTHOR)" >&2; exit 64; }
+top=$(git rev-parse --show-toplevel 2> /dev/null) || { error "not in a git work tree"; exit 2; }
+cd "$top"
+if [[ ${AUTHOR:-} == 'dependabot[bot]' && ${HEAD_REF:-} == dependabot/* ]]; then
+    exit 0
+fi
+if [[ -z ${BASE:-} ]] || ! git cat-file -e "$BASE^{commit}" 2> /dev/null; then
+    error "BASE names no commit of this clone, so the added lines cannot be told"
+    exit 2
+fi
+fix=
+if [[ ${HEAD_REF:-} =~ ^fix/release-([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
+    fix=${BASH_REMATCH[1]}
+fi
+
+# Map each line number of CHANGELOG.md to its section: Unreleased, a version, or empty in the
+# header and the link block.
+declare -A section=()
+n=0
+current=
+if [[ -f CHANGELOG.md ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+        n=$((n + 1))
+        if [[ $line == '## [Unreleased]' ]]; then
+            current=Unreleased
+        elif [[ $line =~ ^'## ['([0-9]+\.[0-9]+\.[0-9]+)'] - ' ]]; then
+            current=${BASH_REMATCH[1]}
+        elif [[ $line =~ ^\[[^]]+\]:\  ]]; then
+            current=
+        fi
+        section[$n]=$current
+    done < CHANGELOG.md
+fi
+
+entry=0
+status=0
+line_no=0
+while IFS= read -r diff_line; do
+    if [[ $diff_line =~ ^'@@ -'[0-9,]+' +'([0-9]+) ]]; then
+        line_no=${BASH_REMATCH[1]}
+        continue
+    fi
+    [[ $diff_line == '+'* && $diff_line != '+++ '* ]] || continue
+    text=${diff_line#+}
+    where=${section[$line_no]-}
+    if [[ $text =~ ^'## ['[0-9]+\.[0-9]+\.[0-9]+'] - ' ]]; then
+        entry=1
+    elif [[ -n $where && $text =~ [^[:space:]] && ! $text =~ ^'#' ]]; then
+        if [[ $where == Unreleased || ( -n $fix && $where == "$fix" ) ]]; then
+            entry=1
+        fi
+    fi
+    if [[ -n $where ]]; then
+        if (( ${#text} > 100 )); then
+            error "CHANGELOG.md:$line_no: a line the pull request adds is longer than 100 columns"
+            status=1
+        fi
+        rest=${text% (phase [0-9]*)}
+        if [[ $rest =~ [Pp]hase\ [0-9] ]]; then
+            error "CHANGELOG.md:$line_no: name a phase only as a trailing \"(phase N)\""
+            status=1
+        fi
+    fi
+    line_no=$((line_no + 1))
+done < <(git -c core.quotePath=false diff --unified=0 --no-renames "$BASE" HEAD -- CHANGELOG.md)
+if (( ! entry )); then
+    error "the pull request adds no line under ## [Unreleased] in CHANGELOG.md"
+    status=1
+fi
+exit "$status"

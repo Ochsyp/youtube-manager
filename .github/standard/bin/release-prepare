@@ -1,0 +1,157 @@
+#!/bin/bash
+# release-prepare of the repository standard: the same file in every repository; never edit it
+# here. A session runs it on a release branch chore/release-X.Y.Z from an up-to-date main
+# (spec 3.5). It writes VERSION and the VERSION_COPY files. It moves the lines under
+# ## [Unreleased] into a new ## [X.Y.Z] - YYYY-MM-DD section (today, UTC) under an empty
+# [Unreleased]. At the first release it replaces the header's "There are no releases yet.", and
+# it fixes the link block. Where ROLE=source it rebuilds the MANIFEST with tools/manifest. It
+# checks the result with release-meta (state pending). It prints a pull request body that names
+# the Dependabot updates since the last tag. The session makes any edits that a repository's own
+# contract asks for.
+#   release-prepare X.Y.Z
+# Exit 0; 1 when it cannot prepare that release; 64 usage.
+set -euo pipefail
+here=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+[[ $# -eq 1 && $1 =~ ^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] ||
+    { echo "usage: release-prepare X.Y.Z" >&2; exit 64; }
+new=$1
+top=$(git rev-parse --show-toplevel 2> /dev/null) || die "not in a git work tree"
+cd "$top"
+[[ -f CHANGELOG.md ]] || die "CHANGELOG.md is missing"
+
+latest=$(git tag --list 'v*' | sed -n 's/^v\([0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' |
+    sort -t . -k 1,1n -k 2,2n -k 3,3n | tail -n 1)
+if [[ -n $latest ]] && ! version_lt "$latest" "$new"; then
+    die "$new is not above the newest tag v$latest"
+fi
+# The version of the newest section before this one, for the compare link.
+previous=$(sed -n 's/^## \[\([0-9]*\.[0-9]*\.[0-9]*\)\] - .*/\1/p' CHANGELOG.md | head -n 1)
+awk '$0 == "## [Unreleased]" { in_u = 1; next }
+    in_u && (/^## / || /^\[[^]]+\]: /) { exit }
+    in_u && /[^[:space:]]/ { found = 1; exit }
+    END { exit !found }' CHANGELOG.md || die "[Unreleased] holds nothing to release"
+grep -q '^\[Unreleased\]: ' CHANGELOG.md || die "CHANGELOG.md has no [Unreleased] link"
+
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-prepare.XXXXXX") || die "cannot create a temp folder"
+trap 'rm -rf -- "$tmp"' EXIT
+NEW=$new PREVIOUS=$previous TODAY=$(date -u +%F) awk '
+    BEGIN { header = 1 }
+    header && /^## / { header = 0 }
+    header && index($0, "There are no releases yet.") {
+        line = $0
+        sub(/ ?There are no releases yet\./, "", line)
+        if (line != "") print line
+        print "Each version is the GitHub release `vX.Y.Z`."
+        next
+    }
+    $0 == "## [Unreleased]" && !moved {
+        print
+        print ""
+        print "## [" ENVIRON["NEW"] "] - " ENVIRON["TODAY"]
+        moved = 1
+        next
+    }
+    /^\[Unreleased\]: / {
+        base = substr($0, 15)
+        sub(/\/(commits\/main|compare\/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.HEAD)$/, "", base)
+        print "[Unreleased]: " base "/compare/v" ENVIRON["NEW"] "...HEAD"
+        if (ENVIRON["PREVIOUS"] != "")
+            print "[" ENVIRON["NEW"] "]: " base "/compare/v" ENVIRON["PREVIOUS"] "...v" ENVIRON["NEW"]
+        else
+            print "[" ENVIRON["NEW"] "]: " base "/releases/tag/v" ENVIRON["NEW"]
+        next
+    }
+    { print }' CHANGELOG.md > "$tmp/CHANGELOG.md" || die "cannot rewrite CHANGELOG.md"
+cp "$tmp/CHANGELOG.md" CHANGELOG.md
+printf '%s\n' "$new" > VERSION
+
+# Each VERSION_COPY file holds its line with the new version in place of X.Y.Z.
+entry=0
+while IFS= read -r copy; do
+    [[ -n $copy ]] || continue
+    entry=$((entry + 1))
+    path=${copy%%|*}
+    template=${copy#*|}
+    [[ -f $path ]] || die "VERSION_COPY entry $entry: its file is missing"
+    PREFIX=${template%%X.Y.Z*} SUFFIX=${template#*X.Y.Z} NEW=$new awk '
+        {
+            p = ENVIRON["PREFIX"]; s = ENVIRON["SUFFIX"]
+            if (substr($0, 1, length(p)) == p && length($0) >= length(p) + length(s) &&
+                substr($0, length($0) - length(s) + 1) == s) {
+                mid = substr($0, length(p) + 1, length($0) - length(p) - length(s))
+                if (mid ~ /^[0-9]+\.[0-9]+\.[0-9]+(-dev)?$/) { print p ENVIRON["NEW"] s; done = 1; next }
+            }
+            print
+        }
+        END { exit !done }' "$path" > "$tmp/copy" ||
+        die "VERSION_COPY entry $entry: its file holds no line to update"
+    cp "$tmp/copy" "$path"
+done < <(sh "$here/conf" --get VERSION_COPY .github/standard.conf)
+
+if [[ $(sh "$here/conf" --get ROLE .github/standard.conf) == source ]]; then
+    [[ -f tools/manifest ]] || die "ROLE=source, but tools/manifest is missing"
+    # tools/manifest reads the index, so the MANIFEST names the new version only once VERSION is
+    # staged.
+    git add -- VERSION || die "cannot stage VERSION"
+    sh tools/manifest || die "tools/manifest failed"
+fi
+
+state=$(git tag --list 'v*' | bash "$here/release-meta" check | sed -n 's/^state=//p') ||
+    die "release-meta refuses the prepared release (above)"
+[[ $state == pending ]] || die "release-meta calls the prepared release $state, not pending"
+
+if [[ -z $latest ]]; then
+    impact="major: the first release"
+    range=HEAD
+else
+    IFS=. read -r -a old_parts <<< "$latest"
+    IFS=. read -r -a new_parts <<< "$new"
+    if (( new_parts[0] != old_parts[0] )); then
+        impact="major"
+    elif (( new_parts[1] != old_parts[1] )); then
+        impact="minor"
+    else
+        impact="patch"
+    fi
+    range="v$latest..HEAD"
+fi
+updates=$(git log --format='- %s' --author='dependabot\[bot\]' "$range")
+since=${latest:+v$latest}
+since=${since:-the start}
+cat << EOF
+## What and why
+
+Release $new. Its notes are the [$new] section of CHANGELOG.md.
+
+Dependency updates since $since:
+${updates:-- none}
+
+## Phase
+
+none
+
+## Release impact
+
+$impact
+
+## Checks on the target
+
+none
+
+## Checklist
+
+- [x] One phase or one change in this pull request
+- [x] \`CHANGELOG.md\` has an entry under Unreleased, unless this is a release pull request or
+      the fix of a draft release
+- [ ] The checks in CONTRIBUTING.md, Checks, pass, and no test was skipped (no-skips reads bats
+      output only, so check the log of any other test stage)
+- [ ] No private data in the change, the title, this text or the branch name: no personal names,
+      paths, host names, addresses, hardware or VM identifiers, real logs or secrets; examples
+      use the synthetic values in CONTRIBUTING.md, Test data
+
+CONTRIBUTING.md describes the workflow.
+EOF

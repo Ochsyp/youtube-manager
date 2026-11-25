@@ -1,0 +1,584 @@
+#!/bin/sh
+# standard-check of the repository standard: the same file in every repository; never edit it
+# here. Checks that this repository holds the standard as .github/standard/MANIFEST lists it, and
+# the form of the files it owns (rules 1 to 10 of the standard, section 2.5). It prints paths and
+# reasons, never content.
+#   --ci      checks HEAD. On a pull request (EVENT=pull_request, with BASE) it also checks the
+#             change: a copy of the standard changes only on a chore/standard-* branch of this
+#             repository (rule 7), and loosening comes in a chore/privacy-* pull request of its
+#             own (rule 10). Reads EVENT, PRIVATE, BASE, HEAD_REF, HEAD_REPO and REPO.
+#   --staged  checks the index; the pre-commit hook runs it where the standard is adopted.
+#   --local   as --staged, plus: whether the hooks are on; what the denylist loader finds (counts
+#             only); remotes of another owner, as in a fork clone; and a notice for each tracked
+#             blob above the MAX_BLOB_KB of HEAD, which is the limit the hooks apply.
+# Exit 0; 1 when a rule fails; 2 when a check cannot run; 64 usage.
+set -eu
+
+usage() {
+    echo "usage: standard-check --ci | --staged | --local" >&2
+    exit 64
+}
+
+[ "$#" -eq 1 ] || usage
+mode=$1
+case $mode in
+    --ci | --staged | --local) ;;
+    *) usage ;;
+esac
+
+top=$(git rev-parse --show-toplevel 2> /dev/null) || {
+    echo "standard-check: not in a git work tree" >&2
+    exit 2
+}
+# A relative $PRIVACY_DENYLIST is read from where the command started, as in privacy-scan.
+case ${PRIVACY_DENYLIST:-} in
+    '' | /* | [A-Za-z]:*) ;;
+    *) PRIVACY_DENYLIST=$(pwd)/$PRIVACY_DENYLIST && export PRIVACY_DENYLIST ;;
+esac
+cd "$top"
+bin=.github/standard/bin
+std_hook=standard-check
+std_here=.githooks
+[ -f "$std_here/lib.sh" ] || {
+    echo "standard-check: .githooks/lib.sh is missing" >&2
+    exit 2
+}
+# shellcheck source=.githooks/lib.sh
+. "$std_here/lib.sh"
+std_tmpdir
+t=$std_tmp
+errors=0
+
+problem() {
+    printf 'standard-check: %s\n' "$*" >&2
+    errors=$((errors + 1))
+}
+
+notice() {
+    printf 'standard-check: notice: %s\n' "$*" >&2
+}
+
+finish() {
+    if [ "$errors" -gt 0 ]; then
+        printf 'standard-check: %s problem(s); see the standard, section 2.5.\n' "$errors" >&2
+        exit 1
+    fi
+    [ "$mode" = --staged ] || echo "standard-check: ok"
+    exit 0
+}
+
+# The tree to check, as "mode oid TAB path" lines: HEAD for --ci, the index otherwise.
+if [ "$mode" = --ci ]; then
+    git -c core.quotePath=false ls-tree -r HEAD > "$t/ls" 2> /dev/null ||
+        std_fail "cannot list HEAD"
+    awk -F '\t' '{ split($1, m, " "); print m[1] " " m[3] "\t" $2 }' "$t/ls" > "$t/tree"
+else
+    git -c core.quotePath=false ls-files -s > "$t/ls" || std_fail "cannot list the index"
+    awk -F '\t' '{ split($1, m, " "); if (m[3] == "0") print m[1] " " m[2] "\t" $2 }' "$t/ls" \
+        > "$t/tree"
+fi
+
+# Print the object id of PATH in the tree, or nothing.
+oid_of() {
+    P=$1 awk -F '\t' '$2 == ENVIRON["P"] { split($1, m, " "); print m[2]; exit }' "$t/tree"
+}
+
+# Write the lines strictly between the markers of block NAME in the blob OID to OUT. TARGET's
+# extension picks the marker form. Returns 3 when the markers are missing, 4 when they appear
+# more than once or out of order.
+block_of() {
+    git cat-file blob "$1" > "$t/target" || std_fail "cannot read $2"
+    case $2 in
+        *.md) style=md ;;
+        *) style="hash" ;;
+    esac
+    NAME=$3 STYLE=$style awk '
+        BEGIN {
+            if (ENVIRON["STYLE"] == "md") {
+                b = "<!-- standard:begin " ENVIRON["NAME"] " -->"
+                e = "<!-- standard:end " ENVIRON["NAME"] " -->"
+            } else {
+                b = "# standard:begin " ENVIRON["NAME"]
+                e = "# standard:end " ENVIRON["NAME"]
+            }
+        }
+        $0 == b { if (inb) bad = 1; inb = 1; begins++; next }
+        $0 == e { if (!inb) bad = 1; inb = 0; ends++; next }
+        inb { print }
+        END {
+            if (begins == 0 && ends == 0) exit 3
+            if (begins != 1 || ends != 1 || inb || bad) exit 4
+        }' "$t/target" > "$4"
+}
+
+# Rule 1: the config parses; on a pull request or push, VISIBILITY agrees with GitHub.
+cfg=$(oid_of .github/standard.conf)
+if [ -z "$cfg" ]; then
+    problem ".github/standard.conf: missing"
+    finish
+fi
+git cat-file blob "$cfg" > "$t/conf" || std_fail "cannot read .github/standard.conf"
+if ! sh "$bin/conf" --check "$t/conf"; then
+    problem ".github/standard.conf: does not parse (the lines above)"
+    finish
+fi
+sh "$bin/conf" --print "$t/conf" > "$t/conf.out" || std_fail "cannot read .github/standard.conf"
+: > "$t/version-copy"
+while IFS= read -r line; do
+    case $line in
+        NAME=*) name=${line#*=} ;;
+        VISIBILITY=*) visibility=${line#*=} ;;
+        ROLE=*) role=${line#*=} ;;
+        LICENSE=*) license=${line#*=} ;;
+        CI_STAGES=*) stages=${line#*=} ;;
+        RELEASE_KIND=*) kind=${line#*=} ;;
+        SEAL=*) seal=${line#*=} ;;
+        VERSION_COPY=*) printf '%s\n' "${line#*=}" >> "$t/version-copy" ;;
+    esac
+done < "$t/conf.out"
+if [ "$mode" = --ci ]; then
+    case ${PRIVATE:-}:$visibility in
+        true:public) problem ".github/standard.conf: VISIBILITY=public, but GitHub says private" ;;
+        false:private) problem ".github/standard.conf: VISIBILITY=private, but GitHub says public" ;;
+        :*)
+            case ${EVENT:-} in
+                pull_request | push)
+                    notice "GitHub did not say whether this repository is private, so VISIBILITY was not compared"
+                    ;;
+            esac
+            ;;
+    esac
+fi
+
+# The config the change starts from: the merge base's on a pull request, HEAD's for --staged
+# and --local. Which checks run follows it too, so that a change cannot switch checks off on
+# its own: where the previous config says ROLE=consumer, the consumer checks run.
+prev=
+if [ "$mode" != --ci ]; then
+    git rev-parse -q --verify HEAD > /dev/null 2>&1 && prev=HEAD
+elif [ "${EVENT:-}" = pull_request ] && [ -n "${BASE:-}" ]; then
+    prev=$(git merge-base "$BASE" HEAD) || std_fail "cannot find the merge base"
+fi
+prev_state=none
+prev_role=
+if [ -n "$prev" ] && git cat-file -e "$prev:.github/standard.conf" 2> /dev/null; then
+    git cat-file blob "$prev:.github/standard.conf" > "$t/prev.conf" ||
+        std_fail "cannot read the previous .github/standard.conf"
+    if sh "$bin/conf" --print "$t/prev.conf" > "$t/prev.out" 2> /dev/null; then
+        prev_state=ok
+        prev_role=$(sed -n 's/^ROLE=//p' "$t/prev.out")
+    else
+        prev_state=broken
+    fi
+fi
+consumer=0
+if [ "$role" = consumer ] || [ "$prev_role" = consumer ]; then
+    consumer=1
+fi
+
+# Rules 2 to 4 against the MANIFEST file $1. With SCOPE all (a repository that uses the
+# standard): every copy and block of the selected profiles, and no file of the standard's folders
+# beyond it. With SCOPE blocks (repo-standard): the blocks only. Prints the problems it finds in
+# the copies and writes the selected blocks to $3 as "blob-id entry" lines, "-" for a block that
+# must be absent. A block's seal variant (profile seal) replaces the block of its name where
+# SEAL=yes. A block that exists only as a seal variant must be absent elsewhere.
+manifest_rules() {
+    SCOPE=$2 VIS=$visibility LIC=$license KIND=$kind SEAL=$seal awk -v tree="$t/tree" -v blocks="$3" '
+        BEGIN {
+            while ((getline line < tree) > 0) {
+                split(line, f, "\t"); split(f[1], m, " ")
+                mode[f[2]] = m[1]; oid[f[2]] = m[2]
+            }
+            printf "" > blocks
+            all = ENVIRON["SCOPE"] == "all"
+        }
+        /^#/ || /^[ \t]*$/ { next }
+        $1 == "standard" && NF == 2 { version = 1; next }
+        ($1 != "file" && $1 != "block") || NF != 5 {
+            print "standard-check: .github/standard/MANIFEST: line " NR " does not parse"; bad++; next
+        }
+        {
+            p = $2
+            if (p == "all" || p == "release") sel = 1
+            else if (p == "mit") sel = ENVIRON["LIC"] == "MIT"
+            else if (p == "public" || p == "private") sel = ENVIRON["VIS"] == p
+            else if (p == "seal") sel = ENVIRON["SEAL"] == "yes"
+            else { print "standard-check: .github/standard/MANIFEST: line " NR ": unknown profile " p; bad++; next }
+            if ($1 == "file") { listed[$5] = 1; if (!all) next }
+            if ($1 == "block") {
+                name = $5; sub(/@.*/, "", name)
+                if (p == "seal") sealed[name] = 1; else plain[name] = 1
+                if (!sel) { if (p == "seal") unsel[$5] = name; next }
+                if (p == "release" && ENVIRON["KIND"] == "legacy") next
+                nb++; bwant[nb] = $3; bentry[nb] = $5; bname[nb] = name; bprof[nb] = p
+                next
+            }
+            if (!sel) next
+            if (!($5 in oid)) { print "standard-check: " $5 ": missing (the MANIFEST lists it)"; bad++; next }
+            if (p == "release" && ENVIRON["KIND"] == "legacy") next
+            if (oid[$5] != $3) { print "standard-check: " $5 ": differs from the MANIFEST"; bad++ }
+            if (mode[$5] != $4) { print "standard-check: " $5 ": mode " mode[$5] ", the MANIFEST says " $4; bad++ }
+        }
+        END {
+            for (i = 1; i <= nb; i++)
+                if (bprof[i] == "seal" || !(bname[i] in sealed) || ENVIRON["SEAL"] != "yes")
+                    print bwant[i], bentry[i] > blocks
+            for (e in unsel) if (!(unsel[e] in plain)) print "-", e > blocks
+            if (!all) exit bad > 0
+            if (!version) { print "standard-check: .github/standard/MANIFEST: no standard version line"; bad++ }
+            for (path in oid) {
+                if (path == ".github/standard/MANIFEST" || (path in listed)) continue
+                if (path ~ /^\.githooks\// || path ~ /^\.github\/standard\// || path ~ /^\.github\/workflows\//)
+                    { print "standard-check: " path ": not in the MANIFEST"; bad++ }
+            }
+            exit bad > 0
+        }' "$1" > "$t/rules" || true
+    if [ -s "$t/rules" ]; then
+        sort "$t/rules" >&2
+        errors=$((errors + $(awk 'END { print NR }' "$t/rules")))
+    fi
+}
+
+# Each block of the list $1, as manifest_rules writes it, against the tree. With $2 consumer a
+# block must be there and equal the MANIFEST. With $2 source a document may leave a block's markers
+# out, as repo-standard does with the standard block, whose text speaks to a consumer. Markers
+# that are there must hold the body in blocks/ that the config selects, once and in order.
+check_blocks() {
+    while read -r want entry; do
+        target=${entry%%#*}
+        block=${entry#*#}
+        block=${block%%@*}
+        toid=$(oid_of "$target")
+        if [ "$want" = - ]; then
+            [ -n "$toid" ] || continue
+            status=0
+            block_of "$toid" "$target" "$block" "$t/block" || status=$?
+            [ "$status" -eq 3 ] ||
+                problem "$entry: the block is here, but the config does not set SEAL=yes"
+            continue
+        fi
+        if [ -z "$toid" ]; then
+            [ "$2" = source ] || problem "$entry: $target is missing"
+            continue
+        fi
+        status=0
+        block_of "$toid" "$target" "$block" "$t/block" || status=$?
+        case $status in
+            0)
+                have=$(git hash-object --stdin < "$t/block") || std_fail "cannot hash a block"
+                [ "$have" = "$want" ] && continue
+                if [ "$2" = source ]; then
+                    problem "$entry: the block differs from blocks/; run sh tools/manifest"
+                else
+                    problem "$entry: the block differs from the MANIFEST"
+                fi
+                ;;
+            3) [ "$2" = source ] || problem "$entry: the block's markers are missing" ;;
+            *) problem "$entry: the block's markers appear more than once or out of order" ;;
+        esac
+    done < "$1"
+}
+
+# Rules 2 to 4 for a repository that uses the standard, against its MANIFEST.
+man=$(oid_of .github/standard/MANIFEST)
+if [ "$consumer" -eq 1 ]; then
+    if [ -z "$man" ]; then
+        problem ".github/standard/MANIFEST: missing"
+    else
+        git cat-file blob "$man" > "$t/manifest" || std_fail "cannot read the MANIFEST"
+        manifest_rules "$t/manifest" all "$t/blocks"
+        check_blocks "$t/blocks" consumer
+    fi
+fi
+
+# Rule 5: LICENSE exists exactly when LICENSE=MIT.
+if [ -n "$(oid_of LICENSE)" ]; then
+    [ "$license" = MIT ] || problem "LICENSE: exists, but the config says LICENSE=none"
+else
+    [ "$license" = none ] || problem "LICENSE: missing, and the config says LICENSE=MIT"
+fi
+
+# Rule 6: the form of the files the repository owns.
+vo=$(oid_of VERSION)
+version=
+if [ -z "$vo" ]; then
+    problem "VERSION: missing"
+else
+    git cat-file blob "$vo" > "$t/version" || std_fail "cannot read VERSION"
+    version=$(cat "$t/version")
+    if [ "$(awk 'END { print NR }' "$t/version")" -ne 1 ] ||
+        ! printf '%s\n' "$version" | cmp -s - "$t/version" ||
+        ! printf '%s\n' "$version" |
+        grep -q -x -E '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev)?'; then
+        problem "VERSION: not one line X.Y.Z or X.Y.Z-dev with LF, without leading zeros"
+        version=
+    fi
+fi
+# Each entry is named by its place among the VERSION_COPY lines, never by its path: a config
+# committed with the hooks off could name a path that holds a term.
+entry=0
+while IFS= read -r copy; do
+    [ -n "$version" ] || break
+    entry=$((entry + 1))
+    path=${copy%%|*}
+    line=${copy#*|}
+    want=$(printf '%s\n' "$line" | sed "s/X\.Y\.Z/$version/")
+    po=$(oid_of "$path")
+    if [ -z "$po" ]; then
+        problem "VERSION_COPY entry $entry: its file is missing"
+    elif ! git cat-file blob "$po" | grep -q -x -F -e "$want"; then
+        problem "VERSION_COPY entry $entry: its file does not hold the line for $version"
+    fi
+done < "$t/version-copy"
+do=$(oid_of .github/dependabot.yml)
+if [ -z "$do" ]; then
+    problem ".github/dependabot.yml: missing"
+else
+    git cat-file blob "$do" > "$t/dependabot" || std_fail "cannot read .github/dependabot.yml"
+    limit=$(awk '
+        function value(s) { sub(/^[^:]*:[ \t]*/, "", s); sub(/[ \t]+#.*$/, "", s); gsub(/["\047]/, "", s); return s }
+        function flush() { if (eco == "github-actions" && dir == "/") { found = 1; out = (lim == "") ? "none" : lim } }
+        /^[ \t]*-[ \t]+package-ecosystem:/ { flush(); eco = value($0); dir = ""; lim = ""; next }
+        /^[ \t]+directory:/ { dir = value($0) }
+        /^[ \t]+open-pull-requests-limit:/ { lim = value($0) }
+        END { flush(); print found ? out : "absent" }' "$t/dependabot")
+    case $role:$limit in
+        consumer:0 | source:none) ;;
+        *:absent) problem ".github/dependabot.yml: no github-actions entry for /" ;;
+        consumer:*) problem ".github/dependabot.yml: the github-actions entry needs open-pull-requests-limit: 0" ;;
+        source:*) problem ".github/dependabot.yml: repo-standard's github-actions entry has no limit" ;;
+    esac
+fi
+for stage in $stages; do
+    if [ -z "$(oid_of "ci/$stage")" ] && [ -z "$(oid_of "ci/$stage.ps1")" ]; then
+        problem "ci/$stage or ci/$stage.ps1: missing (CI_STAGES lists $stage)"
+    fi
+done
+ho=$(oid_of tests/helpers.bash)
+if [ -n "$ho" ] && ! git cat-file blob "$ho" | grep -q -F '/../.github/standard/tests/lib.bash'; then
+    problem "tests/helpers.bash: does not source .github/standard/tests/lib.bash"
+fi
+# gitleaks' inline allow marker would hide its line from the secret scan. The marker is built
+# from fragments, so this file does not hold it.
+marker="gitleaks"":allow"
+if [ "$mode" = --ci ]; then
+    git -c core.quotePath=false grep -I -l -F -e "$marker" HEAD > "$t/marked" 2> /dev/null || true
+else
+    git -c core.quotePath=false grep -I -l --cached -F -e "$marker" > "$t/marked" 2> /dev/null || true
+fi
+while IFS= read -r path; do
+    problem "${path#HEAD:}: holds gitleaks' inline allow marker"
+done < "$t/marked"
+
+# Rule 8: a removed path is back.
+for path in .github/workflows/tests.yml .github/workflows/validate.yml .githooks/denylist.sh \
+    .gitleaks.toml; do
+    [ -z "$(oid_of "$path")" ] || problem "$path: removed by the standard; delete it"
+done
+
+# Rule 9, in repo-standard. The MANIFEST rebuilt from the tree and blocks/ equals the committed
+# one: an error on the release pull request, a notice otherwise. The blocks in repo-standard's own
+# documents are the variants its config selects. No copy or block names a repository of
+# config/private-names.
+if [ "$role" = source ]; then
+    if [ "$mode" = --ci ]; then set -- --print --rev HEAD; else set -- --print; fi
+    if [ ! -f tools/manifest ]; then
+        problem "tools/manifest: missing"
+    elif ! sh tools/manifest "$@" > "$t/rebuilt"; then
+        problem "tools/manifest: cannot rebuild the MANIFEST"
+    else
+        : > "$t/manifest"
+        [ -z "$man" ] || git cat-file blob "$man" > "$t/manifest"
+        if ! cmp -s "$t/rebuilt" "$t/manifest"; then
+            release=0
+            if [ "$mode" = --ci ] && [ "${EVENT:-}" = pull_request ] && [ -n "${BASE:-}" ]; then
+                mb=$(git merge-base "$BASE" HEAD) || std_fail "cannot find the merge base"
+                git diff --quiet "$mb" HEAD -- VERSION || release=1
+            fi
+            if [ "$release" -eq 1 ]; then
+                problem ".github/standard/MANIFEST: differs from the tree; run tools/manifest"
+            else
+                notice ".github/standard/MANIFEST differs from the tree; run sh tools/manifest"
+            fi
+        fi
+        # Rules 3 and 4 for repo-standard's own documents, over the MANIFEST rebuilt from blocks/:
+        # no sync writes them here, and tools/manifest rewrites them.
+        manifest_rules "$t/rebuilt" blocks "$t/own-blocks"
+        check_blocks "$t/own-blocks" source
+        names=$(oid_of config/private-names)
+        if [ -n "$names" ]; then
+            git cat-file blob "$names" | sed -e '/^#/d' -e '/^[[:space:]]*$/d' > "$t/names"
+            awk '$1 == "file" || $1 == "block" { p = $5; sub(/#.*/, "", p); print p }' \
+                "$t/rebuilt" > "$t/vendored"
+            # The block bodies, and the templates that tools/sync --init copies into a consumer.
+            awk -F '\t' 'index($2, "blocks/") == 1 || index($2, "templates/") == 1 { print $2 }' \
+                "$t/tree" >> "$t/vendored"
+            while IFS= read -r path; do
+                po=$(oid_of "$path")
+                [ -n "$po" ] || continue
+                if git cat-file blob "$po" | grep -q -i -F -f "$t/names"; then
+                    problem "$path: names a private repository (config/private-names)"
+                fi
+            done < "$t/vendored"
+        fi
+    fi
+fi
+
+# Rules 7 and 10, on a pull request: what the change does to the copies and to the checks.
+if [ "$mode" = --ci ] && [ "${EVENT:-}" = pull_request ] && [ -n "${BASE:-}" ]; then
+    mb=$(git merge-base "$BASE" HEAD) || std_fail "cannot find the merge base"
+    git -c core.quotePath=false diff --name-only --no-renames "$mb" HEAD > "$t/changed" ||
+        std_fail "cannot list the changed files"
+    same_repo=0
+    [ -n "${HEAD_REPO:-}" ] && [ "${HEAD_REPO:-}" = "${REPO:-}" ] && same_repo=1
+    if [ "$consumer" -eq 1 ] && [ -n "$man" ]; then
+        copy=0
+        if grep -q -x -F -e .github/standard/MANIFEST "$t/changed"; then
+            copy=1
+        elif awk -v changed="$t/changed" '
+            BEGIN { while ((getline line < changed) > 0) ch[line] = 1 }
+            $1 == "file" && ($5 in ch) { found = 1 }
+            END { exit !found }' "$t/manifest"; then
+            copy=1
+        else
+            while read -r _ entry; do
+                target=${entry%%#*}
+                block=${entry#*#}
+                block=${block%%@*}
+                grep -q -x -F -e "$target" "$t/changed" || continue
+                old=$(git rev-parse -q --verify "$mb:$target" 2> /dev/null) || {
+                    copy=1
+                    break
+                }
+                s1=0
+                block_of "$old" "$target" "$block" "$t/old" || s1=$?
+                s2=0
+                block_of "$(oid_of "$target")" "$target" "$block" "$t/new" || s2=$?
+                if [ "$s1" != "$s2" ] || ! cmp -s "$t/old" "$t/new"; then
+                    copy=1
+                    break
+                fi
+            done < "$t/blocks"
+        fi
+        if [ "$copy" -eq 1 ]; then
+            case ${HEAD_REF:-} in
+                chore/standard-*) [ "$same_repo" -eq 1 ] ||
+                    problem "a copy of the standard changes on a branch of another repository" ;;
+                *) problem "a copy of the standard changes outside a chore/standard-* branch" ;;
+            esac
+        fi
+    fi
+    if [ "$prev_state" != none ]; then
+        loosen=
+        if [ "$prev_state" = broken ]; then
+            # Without a base config to compare with, every change counts as loosening.
+            loosen="a base config that does not parse"
+        else
+            loosen=$(awk '
+                function words(s, set,    n, w, i) { n = split(s, w, " "); for (i = 1; i <= n; i++) set[w[i]] = 1 }
+                FNR == NR {
+                    base[$0] = 1
+                    if ($0 ~ /^PRIVACY_RULES=/) words(substr($0, 15), bp)
+                    if ($0 ~ /^CI_STAGES=/) words(substr($0, 11), bs)
+                    if ($0 ~ /^ROLE=/) brole = substr($0, 6)
+                    if ($0 ~ /^MAX_BLOB_KB=/) bmax = substr($0, 13) + 0
+                    if ($0 ~ /^RELEASE_KIND=/) bkind = substr($0, 14)
+                    next
+                }
+                /^PRIVACY_(ALLOW|HISTORY_ACCEPT)=/ && !($0 in base) { print "an exemption or accept record"; next }
+                /^PRIVACY_RULES=/ { words(substr($0, 15), hp) }
+                /^CI_STAGES=/ { words(substr($0, 11), hs) }
+                /^ROLE=/ && substr($0, 6) != brole { print "a changed ROLE" }
+                /^MAX_BLOB_KB=/ && substr($0, 13) + 0 > bmax { print "a raised MAX_BLOB_KB" }
+                /^RELEASE_KIND=legacy$/ && bkind != "legacy" { print "RELEASE_KIND=legacy" }
+                END {
+                    for (w in bp) if (!(w in hp)) print "a dropped rule pack"
+                    for (w in bs) if (!(w in hs)) print "a dropped CI stage"
+                }' "$t/prev.out" "$t/conf.out" | sort -u)
+        fi
+        if grep -q -x -F -e .gitleaksignore "$t/changed"; then
+            loosen="$loosen .gitleaksignore"
+        fi
+        if [ -n "$loosen" ]; then
+            others=$(grep -v -x -e .github/standard.conf -e .gitleaksignore -e CHANGELOG.md \
+                "$t/changed" || true)
+            case ${HEAD_REF:-} in
+                chore/privacy-*)
+                    [ "$same_repo" -eq 1 ] || problem "loosening comes from another repository"
+                    [ -z "$others" ] ||
+                        problem "a chore/privacy-* pull request may change only .github/standard.conf, .gitleaksignore and CHANGELOG.md"
+                    ;;
+                *)
+                    problem "this pull request loosens a check ($(printf '%s' "$loosen" | tr '\n' ' '));" \
+                        "that needs a chore/privacy-* pull request of its own"
+                    ;;
+            esac
+        fi
+    fi
+fi
+
+# --local: are the hooks on here, and what does the denylist loader find (counts only)?
+if [ "$mode" = --local ]; then
+    hooks=$(git rev-parse --path-format=absolute --git-path hooks)
+    # shellcheck disable=SC3013 # dash, bash and busybox sh all have -ef.
+    if [ "$hooks" = "$top/.githooks" ] || [ "$hooks" -ef "$top/.githooks" ]; then
+        echo "standard-check: hooks: on"
+    else
+        problem "core.hooksPath does not lead to this work tree's .githooks: the hooks are off here"
+    fi
+    deny_load
+    printf 'standard-check: denylists: %s source(s), %s term(s), %s missing, %s with NUL bytes\n' \
+        "$deny_sources" "$deny_terms" "$deny_missing" "$deny_nul"
+    if [ "$deny_terms" -eq 0 ] || [ "$deny_missing" -gt 0 ] || [ "$deny_nul" -gt 0 ]; then
+        problem "the denylists need at least one term, and no list may be missing or hold NUL bytes"
+    fi
+    git config --get-regexp '^remote\..*\.url$' > "$t/remotes" 2> /dev/null || true
+    REPO_NAME=$name awk '
+        {
+            r = $1; sub(/^remote\./, "", r); sub(/\.url$/, "", r)
+            u = $2; sub(/\.git$/, "", u); sub(/\/$/, "", u)
+            if (!match(u, /github\.com[:\/][^\/]+\/[^\/]+$/)) next
+            s = substr(u, RSTART + 11); split(s, p, "/")
+            owner[r] = p[1]; repo[r] = p[2]
+        }
+        END {
+            for (r in repo) if (r != "origin" && repo[r] == ENVIRON["REPO_NAME"] &&
+                (!("origin" in repo) || owner[r] != owner["origin"]))
+                printf "standard-check: warning: remote %s is %s of another owner than origin. In a fork clone, never check out a fork branch with the hooks on (CONTRIBUTING.md, Workflow).\n", r, repo[r] > "/dev/stderr"
+        }' "$t/remotes"
+    # A notice only, so a repository with a large file stays green. Blobs are named by id, since a
+    # path may hold a term. Without a readable config in HEAD, the hooks use 1024.
+    limit=1024
+    if [ "$prev_state" = ok ]; then
+        limit=$(sed -n 's/^MAX_BLOB_KB=//p' "$t/prev.out")
+    fi
+    awk -F '\t' '{ split($1, m, " "); if (m[1] != "160000") print m[2] }' "$t/tree" |
+        LC_ALL=C sort -u > "$t/blobs"
+    if git cat-file --batch-check='%(objectname) %(objectsize)' < "$t/blobs" > "$t/sizes"; then
+        awk -v limit="$limit" '
+            $2 == "missing" { print substr($1, 1, 12), "missing"; next }
+            $2 > limit * 1024 { print substr($1, 1, 12), int(($2 + 1023) / 1024) }' "$t/sizes" \
+            > "$t/big"
+        big=0
+        while read -r short kb; do
+            if [ "$kb" = missing ]; then
+                notice "blob $short could not be read, so its size was not compared." \
+                    "Find its file with: git ls-files -s | grep $short"
+                continue
+            fi
+            big=1
+            notice "blob $short is $kb KB, above MAX_BLOB_KB=$limit." \
+                "A commit that edits its file and leaves it this large is refused." \
+                "Find its file with: git ls-files -s | grep $short"
+        done < "$t/big"
+        if [ "$big" -eq 1 ]; then
+            notice "Raise MAX_BLOB_KB in .github/standard.conf first, in a commit of its own:" \
+                "the hooks read the limit from HEAD. Once the config is on main, that commit needs" \
+                "its own chore/privacy-* pull request."
+        fi
+    else
+        notice "the sizes of the tracked files could not be read, so MAX_BLOB_KB was not compared"
+    fi
+fi
+
+finish

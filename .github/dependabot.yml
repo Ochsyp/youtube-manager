@@ -1,10 +1,17 @@
-# Update pull requests, grouped so each group has at most one open at a time.
-# requirements.txt pins every runtime dependency exactly, so their updates
-# arrive as pull requests rather than only as security alerts.
+# standard:begin dependabot
+# Dependabot. The workflows here are copies from the repository standard, so their actions move
+# only with a standard release: the github-actions entry below opens no version updates
+# (open-pull-requests-limit: 0), and repo-standard takes them.
+# Every other entry is this repository's own. It is grouped, so it has at most one pull request
+# open, and commits as chore(deps), or as ci for what only CI uses. Its cooldown is at least 7 days;
+# security updates skip it, and an image the owner publishes may be excluded, since the owner's
+# publish is its gate.
 version: 2
 updates:
+# standard:end dependabot
   - package-ecosystem: github-actions
     directory: /
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
     commit-message:
@@ -13,6 +20,8 @@ updates:
       github-actions:
         patterns: ["*"]
 
+  # requirements.txt pins every runtime dependency exactly, so their updates
+  # arrive as pull requests rather than only as security alerts.
   # uv rather than pip: it recompiles requirements.txt with the uv command in
   # its header, for every platform and Python 3.13, and also updates the pins
   # in requirements-dev.txt. Checked daily, with each release held back seven

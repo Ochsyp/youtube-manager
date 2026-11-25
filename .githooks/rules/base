@@ -1,0 +1,32 @@
+# Rule pack "base" of the repository standard: the same file in every repository; never edit it
+# here. Data, read by .githooks/lib.sh and .github/standard/bin/conf; nothing runs it.
+#
+# One rule per line: kind|ERE|exempt-ERE. A line splits at the two "|" outside parentheses, so an
+# alternation always sits in parentheses, and no bracket expression holds "|", "(" or ")". The
+# ERE runs through grep -E -o over the scanned text. The exempt ERE, which may be empty, is
+# matched without regard to case against each hit alone, so ^ and $ anchor it to the whole hit.
+# No line may hold a value a rule matches: brackets and escapes keep the patterns from matching
+# themselves.
+#
+# Private IPv4 addresses (RFC 1918) and the shared address space of RFC 6598, which also holds
+# tailnet addresses.
+ipv4-private|\b(10(\.[0-9]{1,3}){3}|192\.168(\.[0-9]{1,3}){2}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2}|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(\.[0-9]{1,3}){2})\b|
+# Unique local (fc00 to fdff) and link-local (fe80 to febf) IPv6 addresses.
+ipv6-private|\b([Ff][CcDd][0-9A-Fa-f]{2}|[Ff][Ee][89ABab][0-9A-Fa-f]):[0-9A-Fa-f:]*|
+# Host names under .lan, .home.arpa (RFC 8375), .local, .internal and .ts.net, except names
+# whose first label starts with example-. A .local that goes on with a hyphen and a letter, such
+# as local-tools in a folder name x.local-tools-old, is no host name: the hit takes it in, and it
+# is exempt. That holds for .local only; a hyphen and a digit, as in a dated file name, still
+# leaves the host name a hit, and so does any hyphen after the other suffixes.
+host-name|\b[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.([Ll][Aa][Nn]|[Hh][Oo][Mm][Ee]\.[Aa][Rr][Pp][Aa]|[Ii][Nn][Tt][Ee][Rr][Nn][Aa][Ll]|[Tt][Ss]\.[Nn][Ee][Tt]|[Ll][Oo][Cc][Aa][Ll](-[A-Za-z][A-Za-z0-9-]*)?)\b|(^example-|\.local-[a-z][a-z0-9-]*$)
+# MAC addresses with ":" or "-" separators, except the documentation range 00-00-5E-00-53-xx
+# (RFC 7042) and the synthetic 5c-a1-ab-1e prefix.
+mac-address|\b[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}\b|^(00[:-]00[:-]5e[:-]00[:-]53|5c[:-]a1[:-]ab[:-]1e)[:-]
+# Home paths of Linux, macOS, Windows and Git Bash. Each form takes the user segment into the
+# hit, so a PRIVACY_ALLOW exemption can name a synthetic user and no other.
+home-path|(/home/[A-Za-z0-9._-]+|[A-Za-z]:[\\/]+[Uu][Ss][Ee][Rr][Ss][\\/]+[^\\/:*?"<>[:space:]]+|/[A-Za-z]/[Uu]sers/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+)|
+# E-mail addresses, except noreply@ and no-reply@ senders, GitHub's users.noreply.github.com,
+# the reserved names .invalid, .test, .example and .localhost (RFC 2606), example.com, .org and
+# .net, git@github.com of SSH remotes, GitHub's support address in every Dependabot sign-off, and
+# the standard's block bodies, such as reporting@private.md.
+e-mail|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|^((noreply|no-reply)@.*|[^@]*@users\.noreply\.github\.com|[^@]*@([a-z0-9-]+\.)*example\.(com|org|net)|[^@]*@([a-z0-9-]+\.)*(invalid|test|example|localhost)|git@github\.com|support@github\.com|[a-z0-9-]+@(public|private|seal)\.(md|yml))$

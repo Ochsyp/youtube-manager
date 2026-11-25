@@ -1,0 +1,216 @@
+#!/bin/bash
+# release-build of the repository standard: the same file in every repository; never edit it
+# here. The build and dry-run jobs of release.yml, and the last step of image.yml (spec 3.5).
+# Archive kinds (zip, tar, stack): ci/release-build builds the archive when the repository has
+# one. Otherwise the build is the generic archive: git archive of HEAD under TZ=UTC, with the
+# RELEASE_MANIFEST added through --add-file. Then ci/release-check, when present, runs with
+# --archive FILE --version X.Y.Z. Then each RELEASE_ASSETS file comes out of the archive as an
+# asset of its own. An asset that a hook already wrote must equal its archive member byte for
+# byte. When a hook wrote SHA256SUMS, it must list exactly the assets; otherwise the build writes
+# it. Last, notes.md gets the version's CHANGELOG section.
+# --dry-run builds twice and compares every file. A real build refuses any ref but main.
+# The image kind (--image, in image.yml) writes image.json (schema 1) for the pushed digest,
+# SHA256SUMS and notes.md.
+#   release-build --out DIR [--dry-run]
+#   release-build --image --digest sha256:HEX --out DIR
+# DIR must be empty or absent; it gets assets/ and notes.md. GITHUB_REF names the ref of a real
+# archive build, GITHUB_REPOSITORY the image's repository. Exit 0; 1 a failed build or check;
+# 64 usage.
+set -euo pipefail
+shopt -s nullglob
+here=$(CDPATH='' cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+# shellcheck source=SCRIPTDIR/lib.bash
+. "$here/lib.bash"
+
+usage() {
+    echo "usage: release-build --out DIR [--dry-run]" >&2
+    echo "       release-build --image --digest sha256:HEX --out DIR" >&2
+    exit 64
+}
+
+out=''
+dry=0
+image=0
+digest=''
+while (( $# )); do
+    case $1 in
+        --out) [[ -n ${2:-} ]] || usage; out=$2; shift ;;
+        --dry-run) dry=1 ;;
+        --image) image=1 ;;
+        --digest) [[ ${2:-} =~ ^sha256:[0-9a-f]{64}$ ]] || usage; digest=$2; shift ;;
+        *) usage ;;
+    esac
+    shift
+done
+[[ -n $out ]] || usage
+if (( image )); then
+    if [[ -z $digest ]] || (( dry )); then usage; fi
+else
+    [[ -z $digest ]] || usage
+fi
+if command -v cygpath > /dev/null 2>&1; then
+    out=$(cygpath -u "$out")
+fi
+[[ $out == /* ]] || out=$PWD/$out
+
+top=$(git rev-parse --show-toplevel 2> /dev/null) || die "not in a git work tree"
+cd "$top"
+conf_get() {
+    sh "$here/conf" --get "$1" .github/standard.conf || die "cannot read $1 from .github/standard.conf"
+}
+name=$(conf_get NAME)
+kind=$(conf_get RELEASE_KIND)
+case $kind in
+    zip) ext=zip ;;
+    tar | stack) ext=tar.gz ;;
+    image) ext='' ;;
+    *) die "RELEASE_KIND=$kind has no build here: legacy keeps the repository's own release workflow" ;;
+esac
+if (( image )) && [[ $kind != image ]]; then
+    die "release-build --image needs RELEASE_KIND=image, not $kind"
+fi
+if (( ! image )) && [[ $kind == image ]]; then
+    die "RELEASE_KIND=image is built by image.yml, which runs release-build --image"
+fi
+if (( ! dry && ! image )) && [[ ${GITHUB_REF:-} != refs/heads/main ]]; then
+    die "a release is built from refs/heads/main only; GITHUB_REF is ${GITHUB_REF:-unset}"
+fi
+if [[ -e $out ]]; then
+    [[ -d $out && -z $(ls -A "$out") ]] || die "the output folder $out is not empty"
+fi
+
+commit=$(git rev-parse --verify 'HEAD^{commit}')
+version=$(git show HEAD:VERSION 2> /dev/null | tr -d '\r') || die "HEAD has no VERSION"
+[[ $version =~ ^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-dev)?$ ]] ||
+    die "VERSION holds no X.Y.Z or X.Y.Z-dev"
+if [[ $version == *-dev ]] && (( ! dry && ! image )); then
+    die "VERSION is $version, which is no release"
+fi
+
+umask 077
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-build.XXXXXX") || die "cannot create a temp folder"
+trap 'rm -rf -- "$tmp"' EXIT
+
+# Write SHA256SUMS in the folder $1 over every other file there, two spaces before each name.
+write_sums() {
+    local -a names=()
+    local file
+    for file in "$1"/*; do
+        [[ -f $file && ${file##*/} != SHA256SUMS ]] || continue
+        names+=("${file##*/}")
+    done
+    (( ${#names[@]} )) || die "there are no assets to sum"
+    (cd "$1" && sha256sum -- "${names[@]}") | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' > "$1/SHA256SUMS"
+}
+
+# Write notes.md into $1 from the version's CHANGELOG section; a -dev version has none.
+write_notes() {
+    if [[ $version == *-dev ]]; then
+        say "VERSION is $version, so there are no release notes to write"
+        return 0
+    fi
+    bash "$here/release-meta" notes "$version" --root . > "$1/notes.md" ||
+        die "release-meta found no notes for $version"
+}
+
+if (( image )); then
+    [[ -n ${GITHUB_REPOSITORY:-} ]] || die "GITHUB_REPOSITORY is not set, so the image has no name"
+    image_name=ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+    platforms=''
+    read -r -a platform_list <<< "$(conf_get IMAGE_PLATFORMS)"
+    for platform in "${platform_list[@]}"; do
+        platforms+="${platforms:+, }\"$platform\""
+    done
+    [[ -n $platforms ]] || die "IMAGE_PLATFORMS is empty, so the image has no platform"
+    mkdir -p "$out/assets"
+    printf '{\n  "schema": 1,\n  "name": "%s",\n  "version": "%s",\n  "tag": "v%s",\n  "commit": "%s",\n  "image": "%s",\n  "digest": "%s",\n  "platforms": [%s]\n}\n' \
+        "$name" "$version" "$version" "$commit" "$image_name" "$digest" "$platforms" \
+        > "$out/assets/image.json"
+    write_sums "$out/assets"
+    write_notes "$out"
+    say "wrote image.json for $image_name@$digest"
+    exit 0
+fi
+
+manifest=$(conf_get RELEASE_MANIFEST)
+read -r -a assets <<< "$(conf_get RELEASE_ASSETS)"
+archive_name=$name-$version.$ext
+declare -A seen=()
+for asset in "${assets[@]}"; do
+    base=${asset##*/}
+    [[ $base != SHA256SUMS && $base != "$archive_name" ]] ||
+        die "RELEASE_ASSETS names $asset, whose name an asset of the build already has"
+    [[ -z ${seen[$base]:-} ]] || die "RELEASE_ASSETS names two files $base; each asset needs a name of its own"
+    seen[$base]=1
+done
+
+# Write the generic archive of HEAD into the folder $1, with the release manifest added under
+# the prefix.
+generic_archive() {
+    local format=tar.gz
+    [[ $kind != zip ]] || format=zip
+    if git cat-file -e "$commit:$manifest" 2> /dev/null; then
+        die "the tree holds $manifest already, and the build adds that file"
+    fi
+    mkdir -p "$tmp/manifest"
+    printf '{\n  "schema": 1,\n  "name": "%s",\n  "version": "%s",\n  "tag": "v%s",\n  "commit": "%s"\n}\n' \
+        "$name" "$version" "$version" "$commit" > "$tmp/manifest/$manifest"
+    TZ=UTC git archive --format="$format" --prefix="$name-$version/" \
+        --add-file="$tmp/manifest/$manifest" "$commit" > "$1/$archive_name" ||
+        die "git archive failed"
+}
+
+# Build the release into the folder $1: $1/assets/* and $1/notes.md.
+build() {
+    local dir=$1 asset base file
+    local -a extra=()
+    mkdir -p "$dir/assets"
+    if has_hook release-build; then
+        (( ! dry )) || extra=(--dry-run)
+        run_hook release-build --version "$version" --commit "$commit" --out "$(mixed_path "$dir")" \
+            "${extra[@]}" || die "ci/release-build failed"
+    else
+        generic_archive "$dir/assets"
+    fi
+    for file in "$dir"/*; do
+        [[ $file == "$dir/assets" ]] || die "the build wrote ${file##*/} beside assets/, where it writes nothing"
+    done
+    for file in "$dir"/assets/*; do
+        [[ -f $file ]] || die "the build wrote ${file#"$dir"/}, but assets/ holds files only"
+    done
+    [[ -f $dir/assets/$archive_name ]] || die "the build wrote no $archive_name"
+    if has_hook release-check; then
+        run_hook release-check --archive "$(mixed_path "$dir/assets/$archive_name")" \
+            --version "$version" || die "ci/release-check failed"
+    fi
+    for asset in "${assets[@]}"; do
+        base=${asset##*/}
+        extract "$dir/assets/$archive_name" "$name-$version/$asset" > "$tmp/member" 2> /dev/null ||
+            die "the archive holds no $name-$version/$asset (RELEASE_ASSETS)"
+        if [[ -e $dir/assets/$base ]]; then
+            cmp -s "$tmp/member" "$dir/assets/$base" ||
+                die "the asset $base differs from $asset in the archive"
+        else
+            cp "$tmp/member" "$dir/assets/$base"
+        fi
+    done
+    if [[ -f $dir/assets/SHA256SUMS ]]; then
+        check_sums "$dir/assets" || exit 1
+    else
+        write_sums "$dir/assets"
+    fi
+    write_notes "$dir"
+}
+
+build "$out"
+if (( dry )); then
+    build "$tmp/second"
+    files_one=$(cd "$out" && find . -type f | LC_ALL=C sort)
+    files_two=$(cd "$tmp/second" && find . -type f | LC_ALL=C sort)
+    [[ $files_one == "$files_two" ]] || die "the two builds wrote different files"
+    while IFS= read -r file; do
+        cmp -s "$out/$file" "$tmp/second/$file" || die "the two builds differ in ${file#./}"
+    done <<< "$files_one"
+    say "the two builds are the same, byte for byte"
+fi
+say "built $archive_name at $commit"

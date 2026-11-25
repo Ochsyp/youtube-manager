@@ -1,0 +1,28 @@
+#!/bin/bash
+# run-stage of the repository standard: the same file in every repository; never edit it here.
+# Runs one CI stage of this repository through the fixed ci/ interface (spec 2.6): ci/STAGE,
+# then ci/STAGE.ps1 under Windows PowerShell 5.1, from the top of the repository. The jobs
+# lint, test and system of ci.yml call it.
+#   run-stage lint|test|system
+# Exit: the stage's own status; 1 when the repository has no script for the stage, or holds a
+# .ps1 off Windows; 64 usage.
+set -euo pipefail
+# shellcheck source=SCRIPTDIR/lib.bash
+. "${BASH_SOURCE[0]%/*}/lib.bash"
+
+usage() {
+    echo "usage: run-stage lint|test|system" >&2
+    exit 64
+}
+
+[[ $# -eq 1 ]] || usage
+case $1 in
+    lint | test | system) ;;
+    *) usage ;;
+esac
+top=$(git rev-parse --show-toplevel 2> /dev/null) || die "not in a git work tree"
+cd "$top"
+has_hook "$1" || die "this repository has no ci/$1 or ci/$1.ps1"
+status=0
+run_hook "$1" || status=$?
+exit "$status"

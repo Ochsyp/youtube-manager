@@ -1,0 +1,10 @@
+# Rule pack "vm" of the repository standard: the same file in every repository; never edit it
+# here. Data in the format that rules/base describes. Virtual machine identifiers, except the
+# synthetic 5ca1ab1e range. The MAC rule with separators is in base.
+#
+# UUIDs, such as a VM's uuid.bios.
+uuid|\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|^5ca1ab1e
+# VMware UUIDs: 16 hex pairs separated by spaces and one dash.
+vmware-uuid|\b[0-9A-Fa-f]{2}( [0-9A-Fa-f]{2}){7}-[0-9A-Fa-f]{2}( [0-9A-Fa-f]{2}){7}\b|^5c a1 ab 1e
+# VirtualBox MAC addresses: 12 hex digits without separators.
+vbox-mac|[Mm][Aa][Cc][Aa][Dd][Dd][Rr][Ee][Ss][Ss]="?[0-9A-Fa-f]{12}|^macaddress="?5ca1ab1e
