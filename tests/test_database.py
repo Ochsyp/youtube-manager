@@ -74,10 +74,9 @@ def test_synchronous_unchanged_without_wal(caplog, tmp_path, url, journal_mode):
     )
 
 
-# The engine hands the sqlite3 driver its legacy transaction control and its busy timeout
-# explicitly, the timeout as a connect argument so that it already covers the WAL switch, and
-# sets no pool pre-ping or recycling. On a connection, a read begins no transaction and a write
-# begins one.
+# The engine passes the sqlite3 driver legacy transaction control and its busy timeout, the timeout
+# as a connect argument so it covers the WAL switch, and no pool pre-ping or recycling. A read
+# begins no transaction and a write begins one.
 def test_legacy_transaction_control_explicit(monkeypatch, db):
     captured = {}
     real_create_engine = database.create_engine

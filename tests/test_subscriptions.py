@@ -1,11 +1,10 @@
 # -------------------------------------------------------
 # Subscription scan tests
 #
-# Pins how the worker checks subscriptions: only a successful scan of video ids records a baseline,
-# no yt-dlp call runs inside a write transaction, a periodic channel scan reads only the newest
-# uploads unless 50 or more of them are new, a change the web app makes during a check is kept,
-# rows that are no video are retired at startup, background repairs never fail a parent, and
-# "Download existing now" queues a back catalogue in scan order. Nothing runs yt-dlp.
+# Pins subscription checks: only a successful id scan records a baseline, no yt-dlp call runs in a
+# write transaction, a periodic channel scan reads only the newest uploads unless 50 or more
+# are new, web edits during a check survive, non-video rows retire at startup, repairs never fail
+# a parent, and "Download existing now" queues a back catalogue in scan order. Nothing runs yt-dlp.
 # -------------------------------------------------------
 
 import json
@@ -240,10 +239,9 @@ LOOP_TASKS = (
 )
 
 
-# Run worker() for one pass of its loop per entry of `pass_times`, each pass's clock reading in
-# seconds after start, with no job to take, no signal handler installed, and every LOOP_TASKS
-# entry and the daily snapshot check recording (name, pass time) instead of running. Returns the
-# records in call order; `snapshots`, if given, also gets the DailySnapshot of each check.
+# Run worker() one loop pass per `pass_times` entry (seconds after start), with no job, no signal
+# handler, and each LOOP_TASKS entry and daily snapshot check recording (name, pass time) instead of
+# running. Returns the records in call order; `snapshots`, if given, gets each DailySnapshot.
 def run_worker_passes(
     monkeypatch: pytest.MonkeyPatch, pass_times: list[float], snapshots: list | None = None,
 ) -> list[tuple[str, float]]:
@@ -415,11 +413,10 @@ def test_all_lines_rejected_counts_as_failure(caplog, monkeypatch, db):
     assert worker._subscription_failures == {}
 
 
-# Retiring maps rows to subscriptions as their scans file them: a channel subscription owns the
-# rows grouped under its channel, a playlist subscription those of its playlist, here one with no
-# channel. Scan-built rows whose id is no video id in a retirable status become deleted, each owner
-# is re-baselined record-only with one WARN naming it, and the count is logged, 0 included. A clip
-# a user asked for and every other row stay, and so does a subscription that owned none.
+# Rows map to the subscription that files them: a channel's to its channel, a playlist's (here with
+# no channel) to its playlist. Scan-built non-video rows in a retirable status become deleted; each
+# owner is re-baselined record-only with one WARN, and the count is logged, 0 included. User clips,
+# other rows and a subscription that owned none stay.
 def test_retire_invalid_rows_maps_channel_and_playlist_subscriptions(caplog, db, make_job):
     caplog.set_level(logging.INFO)
 
@@ -499,10 +496,9 @@ def test_rebaseline_records_without_queueing(monkeypatch, db, make_job):
     assert stored_subscription(db, subscription_id).last_checked is not None
 
 
-# Children of a channel download are retired too and their parent re-synced: one with a finished
-# video left is completed, one with nothing but retired rows deleted, and one whose other children
-# are all skipped keeps its status rather than vanish as deleted. The channel's subscription is
-# re-baselined record-only, since a download of its channel adopts the rows it recorded.
+# Channel-download children are retired too and their parent re-synced: completed with a finished
+# video left, deleted with only retired rows, unchanged when the rest are skipped. The channel's
+# subscription is re-baselined record-only, since a download of its channel adopts its rows.
 def test_retired_children_resettle_parent(db, make_job):
     channel_id = make_channel(db)
     subscription_id = make_subscription(db, channel_id=channel_id, last_checked=CHECKED_AT)
@@ -754,10 +750,9 @@ def test_subscription_deleted_during_its_own_scan_is_dropped(caplog, monkeypatch
     assert dropped in messages_at(caplog, logging.INFO)
 
 
-# "Download existing now" on an enabled, resolved subscription sets it to "All existing" and
-# clears last_checked, so its next check is a full first scan, and queues nothing itself. A
-# disabled subscription is left as it was with a flash to enable it first, and an unresolved one
-# keeps its message.
+# "Download existing now" on an enabled, resolved subscription sets "All existing" and clears
+# last_checked, so the next check is a full first scan; it queues nothing itself. A disabled one
+# stays as it was with a flash to enable it first; an unresolved one keeps its message.
 def test_download_existing_now_asks_for_full_rescan(client, db, make_job):
     channel_id = make_channel(db)
     enabled = make_subscription(db, channel_id=channel_id, backfill_existing=False,
@@ -831,10 +826,9 @@ def test_download_existing_now_undoes_a_stamp_committed_meanwhile(client, empty_
     assert (subscription.backfill_existing, subscription.last_checked) == (True, None)
 
 
-# A "Download existing now" committed while a check runs is kept. Pressed during an earlier
-# subscription's scan, it is read before this subscription's scan, which is then the full backfill
-# scan; pressed during this subscription's own scan, the check leaves it unstamped and the next
-# check runs the backfill scan. Either way the skipped video is queued.
+# A "Download existing now" committed mid-check is kept. Pressed during an earlier subscription's
+# scan, it makes this one's scan the full backfill; pressed during this one's own scan, the check
+# leaves it unstamped and the next check backfills. Either way the skipped video is queued.
 @pytest.mark.parametrize('pressed_during, expected_scans', [
     ('earlier scan', [(OTHER_CHANNEL_URL, None), (OTHER_CHANNEL_URL, '1:50')]),
     ('own scan', [(OTHER_CHANNEL_URL, '1:50'), (OTHER_CHANNEL_URL, None)]),
@@ -870,10 +864,9 @@ def test_download_existing_now_during_check_is_kept(
     assert subscription.backfill_existing is True and subscription.last_checked is not None
 
 
-# The first scan after "Download existing now" reads the whole listing and queues the skipped rows
-# it lists, and a new video between them, in scan order: a channel's listing of one kind oldest
-# first, even from rows recorded newest first, and a playlist's in playlist order. The worker takes
-# them in that order.
+# The first scan after "Download existing now" reads the whole listing and queues its skipped rows
+# and a new video between them in scan order: a channel's one-kind listing oldest first, even from
+# rows recorded newest first, and a playlist's in playlist order. The worker takes that order.
 @pytest.mark.parametrize('kind', ['channel', 'playlist'])
 def test_backfill_scan_requeues_skipped_rows_in_scan_order(client, monkeypatch, db, make_job, kind):
     channel_id = make_channel(db)
@@ -931,10 +924,9 @@ def test_only_first_backfill_scan_requeues_skipped(monkeypatch, db, make_job):
     assert stored(db, adopted.id).status == SKIPPED_STATUS
 
 
-# A resolved subscription to a channel's root URL is scanned through the channel's uploads
-# playlist, one listing of every kind: in full at its first scan, then its 50 newest uploads.
-# Resolving it reads its own URL. A subscription to one tab keeps reading that tab, and an id that
-# is no channel's has no uploads playlist.
+# A resolved subscription to a channel's root URL scans the uploads playlist, every kind in one
+# listing: in full first, then its 50 newest uploads. Resolving reads its own URL. A one-tab
+# subscription keeps reading that tab, and an id that is no channel's has no uploads playlist.
 def test_channel_subscription_scans_uploads_playlist(monkeypatch, db):
     assert worker.uploads_playlist_url(UPLOADS_CHANNEL_ID) == UPLOADS_URL
     for no_channel in (None, '', CHANNEL_YOUTUBE_ID, 'PL' + UPLOADS_CHANNEL_ID[2:]):
@@ -969,10 +961,9 @@ def test_channel_subscription_scans_uploads_playlist(monkeypatch, db):
     assert row_states(db) == [(V1, SKIPPED_STATUS), (V2, 'queued'), (V3, 'queued')]
 
 
-# When the uploads playlist cannot be scanned, the check reads the subscription's own URL with the
-# same limit. A fallback whose listing has uploads logs WARN the first time and INFO later, until
-# the uploads playlist works again; an empty one, a channel with no upload, logs INFO only. When
-# both scans fail, the check is one failure, unstamped, logged once with both reasons.
+# When the uploads playlist fails, the check reads the subscription's own URL with the same limit.
+# A fallback listing with uploads logs WARN first, then INFO until the uploads playlist works; an
+# empty one logs INFO only. Both scans failing is one unstamped failure, logged once with both.
 def test_uploads_playlist_failure_falls_back_to_channel_url(caplog, monkeypatch, db):
     caplog.set_level(logging.INFO)
     subscription_id = make_subscription(

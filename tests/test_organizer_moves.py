@@ -1,10 +1,9 @@
 # -------------------------------------------------------
 # Organizer move tests
 #
-# Pins how the organizer writes into the library: safe_move's copy-then-rename across disks, the
-# rules for a destination that already exists, atomic NFO and artwork writes, the library sentinel
-# and the artwork URL checks. Nothing reaches the network: an autouse fixture fails any request a
-# test did not arrange.
+# Pins how the organizer writes into the library: safe_move's copy-then-rename across disks,
+# existing destinations, atomic NFO and artwork writes, the library sentinel and the artwork URL
+# checks. An autouse fixture fails any request a test did not arrange.
 # -------------------------------------------------------
 
 import errno

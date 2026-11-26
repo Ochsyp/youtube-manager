@@ -1,10 +1,9 @@
 # -------------------------------------------------------
 # Worker shutdown tests
 #
-# What the worker does when a stop is asked for in the middle of its work: a job goes back in the
-# queue, long passes stop between items and touch the heartbeat as they go, the main loop ends,
-# and the process exits with a status that says whether it stopped or failed. The tests that run
-# yt-dlp as a real process are in test_worker_process.py.
+# What the worker does on a stop mid-work: a job returns to the queue, long passes stop between
+# items and touch the heartbeat, the main loop ends, and the exit status says stopped or failed.
+# Tests that run yt-dlp as a real process are in test_worker_process.py.
 # -------------------------------------------------------
 
 import io
