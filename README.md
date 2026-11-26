@@ -98,7 +98,7 @@ docker compose -f compose.example.yaml up -d
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
 | `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
 | `YTM_DB_SNAPSHOT_TIME` | `00:30` | Worker only: the time of day, as HH:MM in UTC whatever `TZ` says, from which the worker writes the day's database snapshot (Backups and restore). Any other value is logged at ERROR and the default is used |
-| `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name the reverse proxy serves the UI under, such as `ytdl.home.arpa`; any other `Host` gets 400 |
+| `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name the reverse proxy serves the UI under, such as `ytdl.example.test`; any other `Host` gets 400 |
 | `PUID`, `PGID` | `1000` | User and group the containers run as |
 | `TZ` | | Timezone of the log timestamps |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | | Egress proxy; `NO_PROXY` must cover Jellyfin and the bgutil provider |
@@ -128,8 +128,8 @@ Volumes: `/app/data` (SQLite and its backups), `/downloads` (staging) and `/medi
     `X-Content-Type-Options: nosniff`, and same-origin Referrer and
     Cross-Origin-Resource policies.
 - A manual POST must therefore send the UI's origin:
-  `curl -X POST -H 'Origin: http://ytdl.home.arpa' http://ytdl.home.arpa/retry-all`,
-  with your UI's name in place of `ytdl.home.arpa`.
+  `curl -X POST -H 'Origin: http://ytdl.example.test' http://ytdl.example.test/retry-all`,
+  with your UI's name in place of `ytdl.example.test`.
 - A client that reaches the published port directly, not through the proxy, needs the
   address it uses in `YTM_ALLOWED_HOSTS`, or it gets 400.
 - The Jellyfin refresh call does not verify TLS, so that a self-signed Jellyfin
@@ -267,7 +267,7 @@ VERSION             the current release
 .github/workflows/  CI (tests, image build and smoke test), release and secret scan
 .github/standard/   the repository standard's tools and tests (copies; never edited here)
 .github/            Dependabot and the pull request template
-.githooks/          hooks that keep commits and pushes off main
+.githooks/          hooks that keep commits off main and private data out (CONTRIBUTING.md, Guard rails)
 CHANGELOG.md        changes, newest first
 CONTRIBUTING.md     branch, pull request and release workflow
 SECURITY.md         security policy

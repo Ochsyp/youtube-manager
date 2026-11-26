@@ -1355,8 +1355,8 @@ def post_jellyfin_refresh(url: str, token: str) -> requests.Response:
     return requests.post(
         f"{url.rstrip('/')}/Library/Refresh",
         headers={'X-Emby-Token': token},
-        # Jellyfin serves a self-signed cert from jellyfin-cert and this call never leaves the
-        # internal docker network, the same trust boundary Seerr uses against it.
+        # Jellyfin often serves a self-signed certificate on an internal network; README,
+        # Security notes, explains the trade-off.
         verify=False,
         timeout=10,
     )

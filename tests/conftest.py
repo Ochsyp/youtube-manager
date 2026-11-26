@@ -21,7 +21,7 @@ SESSION_ROOT: Path | None = None
 # The name the UI is served under, allowed through YTM_ALLOWED_HOSTS as in a deployment. The
 # client fixture sends it as both Host and Origin, which is what a browser sends for a form on the
 # UI's own pages.
-APP_HOST = 'ytdl.home.arpa'
+APP_HOST = 'ytdl.example.test'
 APP_ORIGIN = f'http://{APP_HOST}'
 
 
