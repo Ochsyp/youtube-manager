@@ -6,6 +6,9 @@
 !entrypoint.sh
 !LICENSE
 !youtube_manager/
-# Bytecode and caches inside the package stay out too.
+# Bytecode, and any database or log written inside the package, stay out too.
 **/__pycache__/
 **/*.py[cod]
+**/*.db
+**/*.db-*
+**/*.log
