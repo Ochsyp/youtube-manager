@@ -320,3 +320,20 @@ def test_component_versions_marks_missing_components(monkeypatch):
 def test_dockerfile_maps_the_version_build_argument():
     assert 'VERSION=dev' in dockerfile_arguments('ARG')
     assert 'YTM_VERSION=${VERSION}' in dockerfile_arguments('ENV')
+
+
+# .dockerignore is an allowlist: it ignores everything, then lets in exactly the files the
+# Dockerfile copies from the build context, so the context cannot drift from the COPY lines.
+def test_dockerignore_admits_exactly_what_the_dockerfile_copies():
+    lines = [line.strip() for line in repo_text('.dockerignore').splitlines()]
+    rules = [line for line in lines if line and not line.startswith('#')]
+    assert rules[0] == '*'
+    admitted = {rule[1:].rstrip('/') for rule in rules if rule.startswith('!')}
+    copied = set()
+    for arguments in dockerfile_arguments('COPY'):
+        # A COPY --from takes files from another image, not from the build context.
+        if '--from=' in arguments:
+            continue
+        tokens = [token for token in arguments.split() if not token.startswith('--')]
+        copied.update(token.rstrip('/') for token in tokens[:-1])
+    assert admitted == copied

@@ -1,26 +1,14 @@
-# Keep runtime state, caches, secrets and VCS metadata out of the build context.
-# The image copies only requirements.txt, entrypoint.sh, LICENSE and
-# youtube_manager/, and creates /app/data itself, so nothing in data/ is sent.
-.git
-.github
-.env*
-data/*
-.cache/
-.pytest_cache/
-# A pattern matches from the context root; **/ reaches into youtube_manager/.
+# An allowlist: the build context holds only what the Dockerfile copies, so runtime state, caches,
+# secrets, the tests and the docs never reach the image. tests/test_build.py checks that the
+# exceptions below match the Dockerfile's COPY lines.
+*
+!requirements.txt
+!entrypoint.sh
+!LICENSE
+!youtube_manager/
+# Bytecode, and any database or log written inside the package, stay out too.
 **/__pycache__/
 **/*.py[cod]
 **/*.db
 **/*.db-*
 **/*.log
-# The test suite, its tooling and the CI and release scripts run from the
-# checkout, never inside the image.
-tests/
-scripts/
-requirements-dev.txt
-pytest.ini
-# For people, not the image: the unpinned list requirements.txt is compiled
-# from, the example deployment and the docs.
-requirements.in
-compose.example.yaml
-*.md

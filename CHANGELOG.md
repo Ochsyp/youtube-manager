@@ -9,6 +9,10 @@ describes.
 
 ### Changed
 
+- Small cleanups: `.dockerignore` is an allowlist of the files the Dockerfile copies, which a test
+  checks; the compose example no longer sets `MEDIA_PATH` and `DOWNLOAD_PATH` to their defaults;
+  and a wrapper, a dead import fallback and a repeated pytest flag are gone.
+  ([#48](https://github.com/Ochsyp/youtube-manager/pull/48))
 - `release-prepare` writes the README's install command through `VERSION_COPY`, and
   `standard-check` fails until it matches, so `tests/test_readme.py` is gone.
   ([#46](https://github.com/Ochsyp/youtube-manager/pull/46))

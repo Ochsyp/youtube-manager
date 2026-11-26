@@ -10,6 +10,8 @@ import logging
 import sys
 import warnings
 
+from urllib3.exceptions import InsecureRequestWarning
+
 # The short tags WARN and CRIT, not Python's longer WARNING/CRITICAL, which would
 # break the padded-tag alignment.
 logging.addLevelName(logging.WARNING, 'WARN')
@@ -68,13 +70,7 @@ def configure(level: int = logging.INFO) -> None:
 
     # The Jellyfin certificate is self-signed and trusted deliberately, so
     # urllib3 warns on every single request. Expected, and pure noise.
-    # Only the import is optional; a failure in the filter itself must surface.
-    try:
-        from urllib3.exceptions import InsecureRequestWarning
-    except ImportError:
-        pass
-    else:
-        warnings.filterwarnings('ignore', category=InsecureRequestWarning)
+    warnings.filterwarnings('ignore', category=InsecureRequestWarning)
 
     # Let uvicorn's own loggers propagate to the root handler above instead of
     # writing their own differently-formatted lines.
