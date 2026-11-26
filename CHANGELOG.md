@@ -7,20 +7,31 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-11-26
+
+A patch release, and the first built, drafted and sealed by the repository standard's release
+flow. In the image only FastAPI and annotated-doc change, so nothing has to change on a host and
+going back to 1.2.2 needs no step. yt-dlp stays at 2026.11.23 and the bgutil plugin at 2.0.2.
+
+From this release on, each release has a seal, the signed tag `seal/vX.Y.Z`, and hosts take only
+sealed releases (CONTRIBUTING.md, Release contract). The release notes name the image as
+`ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...` in their "Container image" section.
+
 ### Changed
 
-- Repository standard 1.2.0: adopted, with the hooks, checks, workflows and blocks.
-- The repository standard's configuration arrives ahead of its adoption, with two privacy
-  exemptions: the made-up example host name in the README and the tests, and the made-up user part
-  of a test URL. ([#39](https://github.com/Ochsyp/youtube-manager/pull/39))
-- The README follows the writing rule's order, with new "Who it is for", "Checking that it works"
-  and "What can go wrong" sections, and comments in the code and tests are shorter. No code
-  changes. ([#42](https://github.com/Ochsyp/youtube-manager/pull/42))
-- Repository standard 1.2.0: the copies and blocks of this release.
+- The image ships FastAPI 0.165.0 instead of 0.163.2 and annotated-doc 0.0.7 instead of 0.0.6.
+  ([#40](https://github.com/Ochsyp/youtube-manager/pull/40))
+- Repository standard 1.2.0: adopted, with the hooks, checks, workflows and blocks, after two
+  made-up placeholder values were exempted from its privacy scan.
+  ([#39](https://github.com/Ochsyp/youtube-manager/pull/39),
+  [#41](https://github.com/Ochsyp/youtube-manager/pull/41))
 - Releases use the standard's image flow with a seal: a merged release pull request builds,
   attests and drafts the release; Publish sets the image tags; the maintainer then seals it. The
   image build argument is `VERSION`, and `scripts/check_release.py` is gone.
   ([#43](https://github.com/Ochsyp/youtube-manager/pull/43))
+- The README follows the writing rule's order, with new "Who it is for", "Checking that it works"
+  and "What can go wrong" sections, and comments in the code and tests are shorter. No code
+  changes. ([#42](https://github.com/Ochsyp/youtube-manager/pull/42))
 
 ## [1.2.2] - 2026-11-25
 
@@ -507,7 +518,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Ochsyp/youtube-manager/compare/v1.1.0...v1.2.0
