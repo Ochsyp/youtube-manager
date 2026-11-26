@@ -40,10 +40,10 @@ RUN mkdir -p data
 
 EXPOSE 8080
 
-# The release, read as youtube_manager.VERSION. Set last, so a new release
-# changes no layer above it.
-ARG YTM_VERSION=dev
-ENV YTM_VERSION=${YTM_VERSION}
+# The release, from the VERSION build argument the release build passes; the
+# app reads it as YTM_VERSION. Set last, so a new release changes no layer above it.
+ARG VERSION=dev
+ENV YTM_VERSION=${VERSION}
 
 # The web UI and the worker share this image and differ only in the command.
 # entrypoint.sh maps `web` or `worker` to its process and execs it as

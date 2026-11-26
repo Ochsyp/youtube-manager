@@ -43,14 +43,36 @@ let the proxy admit only the clients and probes that should reach it. A client t
 reaches the port directly needs the address it uses in `YTM_ALLOWED_HOSTS`, or it gets
 400.
 
+<!-- standard:begin sealed-releases -->
+## Sealed releases
+
+Hosts install a release of this repository only when the maintainer has sealed it. A seal is an
+annotated tag `seal/vX.Y.Z` with the message `<repository> vX.Y.Z`, signed with the
+maintainer's offline SSH key, on the commit of the published release `vX.Y.Z`. The maintainer
+seals after the publish, with a seal tool that first checks the release: published, immutable,
+neither a draft nor a pre-release, drafted by GitHub Actions, its commit on `main`, its `verify`
+run green, and `SEAL=yes` set once in `.github/standard.conf` at that commit. The tool refuses a
+release made before the repository set `SEAL=yes`.
+
+A host checks the seal with `git verify-tag` against its own root-owned list of allowed signers.
+It also checks the seal's message, that the seal and `vX.Y.Z` name the same commit, that this
+commit is on `main`, that no tag it has seen has moved, and that the version is newer. It needs
+no GitHub token for this and calls no API. A stolen GitHub token or session can publish a
+release but cannot seal it, so no host installs that release. A seal never moves and is never
+deleted. A release that must not be installed stays unsealed, or is held on the hosts as the
+Release contract in `CONTRIBUTING.md` says.
+<!-- standard:end sealed-releases -->
+
 ## Image and release checks
 
 - CI builds the image for amd64 and arm64 on every pull request and on main, and smoke-tests each
-  build (`.github/workflows/image.yml`).
-- This repository keeps its own release workflow for now (`RELEASE_KIND=legacy`). Publishing a
-  release builds the image without the layer cache, so it has the Debian updates of that day,
-  pushes it only after both builds pass the same smoke test, attaches provenance and SBOM
-  attestations, and writes the image digest into the release notes.
+  build with `ci/image-smoke`.
+- A merged release pull request builds the release image without the layer cache, so it has the
+  Debian updates of that day. It is pushed by digest only, after both builds pass the smoke test,
+  with provenance and an SBOM, and attested by digest. The draft release names that digest.
+- GitHub creates the tag `vX.Y.Z` when the maintainer publishes the release, and only then do
+  the tags `X.Y.Z` and `latest` point at the digest. The maintainer's signature is the seal
+  `seal/vX.Y.Z`, not the release tag.
 - Dependabot checks the exact pins in `requirements.txt` daily. yt-dlp, its solver and its
   PO-token plugin skip the seven-day wait the other packages get, because their releases follow
   YouTube's changes. It also keeps the base image digest and deno current.

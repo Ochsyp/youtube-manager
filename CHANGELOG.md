@@ -16,6 +16,11 @@ describes.
 - The README follows the writing rule's order, with new "Who it is for", "Checking that it works"
   and "What can go wrong" sections, and comments in the code and tests are shorter. No code
   changes. ([#42](https://github.com/Ochsyp/youtube-manager/pull/42))
+- Repository standard 1.2.0: the copies and blocks of this release.
+- Releases use the standard's image flow with a seal: a merged release pull request builds,
+  attests and drafts the release; Publish sets the image tags; the maintainer then seals it. The
+  image build argument is `VERSION`, and `scripts/check_release.py` is gone.
+  ([#43](https://github.com/Ochsyp/youtube-manager/pull/43))
 
 ## [1.2.2] - 2026-11-25
 
