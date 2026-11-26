@@ -7,8 +7,22 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-11-26
+
+A patch release with the fixes from a final audit. yt-dlp stays at 2026.11.23 and the bgutil
+plugin at 2.0.2, and the database is unchanged, so going back to 1.2.3 needs no step.
+
+A host with a proxy sets `HTTPS_PROXY` as well as `HTTP_PROXY` and lists the bgutil provider in
+`NO_PROXY`. Downloads no longer pass `HTTP_PROXY` to yt-dlp as `--proxy`, so they reach the
+provider directly, as the lookups already did, and the proxy need not let the worker reach it.
+
 ### Changed
 
+- yt-dlp takes its proxy from `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` instead of a `--proxy`
+  the worker passed on, so hosts that `NO_PROXY` names, such as the bgutil provider, are reached
+  directly. A host with a proxy sets `HTTPS_PROXY` as well. Every yt-dlp call puts `--` before its
+  URL, so a stored URL is never read as an option.
+  ([#47](https://github.com/Ochsyp/youtube-manager/pull/47))
 - Small cleanups: `.dockerignore` is an allowlist of the files the Dockerfile copies, which a test
   checks; the compose example no longer sets `MEDIA_PATH` and `DOWNLOAD_PATH` to their defaults;
   and a wrapper, a dead import fallback and a repeated pytest flag are gone.
@@ -16,11 +30,6 @@ describes.
 - `release-prepare` writes the README's install command through `VERSION_COPY`, and
   `standard-check` fails until it matches, so `tests/test_readme.py` is gone.
   ([#46](https://github.com/Ochsyp/youtube-manager/pull/46))
-- yt-dlp takes its proxy from `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` instead of a `--proxy`
-  the worker passed on, so hosts that `NO_PROXY` names, such as the bgutil provider, are reached
-  directly. A host with a proxy sets `HTTPS_PROXY` as well. Every yt-dlp call puts `--` before its
-  URL, so a stored URL is never read as an option.
-  ([#47](https://github.com/Ochsyp/youtube-manager/pull/47))
 - The docs and comments describe the host deployment and the log pipeline in neutral terms, and
   the example UI name is `ytdl.example.test` in the README and the tests. SECURITY.md states
   exactly what a release build takes from that day's Debian archive.
@@ -537,7 +546,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.3...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.4...HEAD
+[1.2.4]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.0...v1.2.1
