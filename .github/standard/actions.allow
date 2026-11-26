@@ -1,4 +1,4 @@
-# The actions the standard's workflows may use (spec 3.15), as GitHub's allow-list writes them;
+# The actions the standard's workflows may use, as GitHub's allow-list writes them;
 # workflows.bats holds the workflows to it, and tools/status compares it with each repository's.
 actions/checkout@*
 actions/setup-python@*

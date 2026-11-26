@@ -1,6 +1,6 @@
 #!/bin/bash
 # release-promote of the repository standard: the same file in every repository; never edit it
-# here. The promote job of release.yml, image kind only (spec 3.5). It builds nothing. With
+# here. The promote job of release.yml, image kind only. It builds nothing. With
 # docker buildx imagetools create, it tags the digest that a release names.
 #   release-promote --tag vX.Y.Z          after a release is published or edited, and on a
 #                                         dispatch on main that repairs the tags

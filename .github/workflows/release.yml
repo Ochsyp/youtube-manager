@@ -1,4 +1,4 @@
-# Releases of the repository standard (spec 3.5): the same file in every repository of the release
+# Releases of the repository standard: the same file in every repository of the release
 # profile (.github/standard/MANIFEST); change it in repo-standard, never here. A merged release
 # pull request changes VERSION on main: meta checks that the release is pending, checks runs ci.yml
 # on that commit, build (zip, tar, stack) or build-image (image) builds it, attest attests it in a

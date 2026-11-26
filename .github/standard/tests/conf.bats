@@ -162,7 +162,9 @@ MAX_BLOB_KB=1024" ]
     for bad in "home-path ^tests/ ^$HOME_PREFIX.*$" 'home-path ^tests/ ^[a-z]:[\\/]+users[\\/]+.*$' \
         'ipv4-private ^ ^192\.168\..*$' 'e-mail ^ ^.*@gmail\.com$' \
         'uuid ^ ^[0-9a-f-]+$' 'disk-by-id ^ ^/dev/disk/by-id/.*$' \
-        'mac-address ^ ^..:..:..:..:..:..$' 'host-name ^ ^.*\.lan$'; do
+        'mac-address ^ ^..:..:..:..:..:..$' 'host-name ^ ^.*\.lan$' \
+        'disk-by-id ^ ^usb-.*$' 'ntfs-serial ^ ^_[0-9a-f]+$' 'uuid-dashless ^ ^_.*$' \
+        'udev-serial ^ ^ID_SERIAL.*$'; do
         write_config "PRIVACY_ALLOW=$bad"
         run_conf --check "$FILE"
         if [[ $status -ne 1 || $stderr != *"the value ERE matches a realistic"* ]]; then
@@ -403,4 +405,12 @@ out() {
     [ "$status" -eq 1 ]
     run_conf --samples
     [ "$status" -eq 64 ]
+}
+
+@test "--samples knows every kind of every rule pack, so no PRIVACY_ALLOW kind goes unchecked" {
+    local kind
+    while IFS= read -r kind; do
+        run_conf --samples "$kind"
+        [ "$status" -eq 0 ] || { printf 'no samples: %s\n' "$kind" >&2; return 1; }
+    done < <(awk -F '|' '!/^#/ && NF { print $1 }' "$REPO_ROOT"/.githooks/rules/*)
 }

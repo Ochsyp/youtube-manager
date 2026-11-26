@@ -72,8 +72,14 @@ samples() {
             printf '%s-%s-%s-%s-%s\n' d00dfeed cafe 4abc 8def 0123456789ab
             printf '%s-%s-%s-%s-%s\n' 123e4567 e89b 12d3 a456 426614174000
             ;;
-        uuid-dashless) printf '%s%s%s%s\n' d00dfeed cafe4abc 8def0123 456789ab ;;
-        ntfs-serial) printf '%s%s\n' D00DFEED CAFEF00D ;;
+        uuid-dashless)
+            printf '%s%s%s%s\n' d00dfeed cafe4abc 8def0123 456789ab
+            printf '_%s%s%s%s\n' d00dfeed cafe4abc 8def0123 456789ab
+            ;;
+        ntfs-serial)
+            printf '%s%s\n' D00DFEED CAFEF00D
+            printf '_%s%s\n' 4C530001 23045601
+            ;;
         fat-serial)
             printf '%s="%s-%s\n' UUID 1A2B 3C4D
             printf '%s --set=root %s-%s\n' --fs-uuid 1a2b 3c4d
@@ -83,6 +89,13 @@ samples() {
         disk-by-id)
             printf '/dev/disk/%s/%s-%s_%s%s-%s\n' by-id usb SanDisk_Cruzer 4C5300 01230456 0:0
             printf '/dev/disk/%s/%s-%s_%s%s-%s\n' by-id ata Samsung_SSD S3Z1NB0K 123456X part1
+            printf '%s-%s_%s%s-%s\n' usb SanDisk_Cruzer 4C5300 01230456 0:0
+            printf '%s-%s_%s%s\n' nvme Samsung_SSD_970 S4EWNX0N 123456
+            ;;
+        udev-serial)
+            printf '%s=%s_%s%s\n' ID_SERIAL SanDisk_Cruzer 4C5300 01230456
+            printf '%s}=="%s%s\n' ID_SERIAL_SHORT S3Z1NB0K 123456X
+            printf '%s=%s%s\n' ID_WWN 0x5000c500 a1b2c3d4
             ;;
         vmware-uuid)
             printf '%s %s %s %s %s %s %s %s-%s %s %s %s %s %s %s %s\n' \

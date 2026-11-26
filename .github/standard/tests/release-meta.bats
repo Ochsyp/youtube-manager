@@ -1,10 +1,10 @@
 #!/usr/bin/env bats
 # release-meta.bats of the repository standard: the same file in every repository; never edit it
 # here. release-meta check and notes against synthetic VERSION files, CHANGELOG.md files and
-# tags: the states, the version and changelog rules of spec 3.8 and 3.9, the pull request rules,
+# tags: the states, the version and changelog rules, the pull request rules,
 # and its output. Then changelog-entry on synthetic pull requests: the CHANGELOG line a pull
 # request adds, its form, and the exceptions for a release, a draft fix and Dependabot. Last,
-# it tests the launcher's version rules and the -dev rule.
+# it tests the version rules and the -dev rule.
 
 # The sh -c scripts are single-quoted, and bats runs each test in a subshell, both on purpose.
 # shellcheck disable=SC2016,SC2030,SC2031
@@ -232,7 +232,7 @@ assert_problem() {
     assert_problem "VERSION 0.9.0 is lower than the newest tag v1.0.0"
 }
 
-@test "the header, the headings and the subsections follow spec 3.8" {
+@test "the header, the headings and the subsections follow the changelog rules" {
     write_version 1.0.0
     changelog_first
     sed -i '1s/.*/# Change log/' "$FAKE/CHANGELOG.md"

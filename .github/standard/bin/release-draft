@@ -1,6 +1,6 @@
 #!/bin/bash
 # release-draft of the repository standard: the same file in every repository; never edit it
-# here. The draft job of release.yml (spec 3.5): the launcher's draft job, as a tested script.
+# here. The draft job of release.yml, as a tested script.
 # It checks the formats of VERSION and COMMIT, and the assets against SHA256SUMS. It checks that
 # main is still at COMMIT and that no release of the tag vX.Y.Z is published. It also checks that
 # no tag vX.Y.Z exists without a release, so a pushed tag cannot take over the publish. Then it

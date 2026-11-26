@@ -1,6 +1,6 @@
 #!/bin/bash
 # release-verify of the repository standard: the same file in every repository; never edit it
-# here. The verify job of release.yml (spec 3.5): it checks a published release and changes
+# here. The verify job of release.yml: it checks a published release and changes
 # nothing, neither on GitHub nor in the registry.
 #   release-verify --tag vX.Y.Z [--public]
 # The release must be published, not a draft, immutable, and drafted by github-actions[bot].

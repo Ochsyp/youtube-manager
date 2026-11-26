@@ -7,6 +7,11 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- Repository standard 1.3.1: the copies and blocks of this release, which also bring 1.3.0's.
+  ([#51](https://github.com/Ochsyp/youtube-manager/pull/51))
+
 ## [1.2.4] - 2026-11-26
 
 A patch release with the fixes from a final audit. yt-dlp stays at 2026.11.23 and the bgutil

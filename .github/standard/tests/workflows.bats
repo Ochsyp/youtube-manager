@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # workflows.bats of the repository standard: the same file in every repository; never edit it
-# here. The workflow rules of spec 3.7: pins with their version comments, actions.allow,
+# here. The workflow rules: pins with their version comments, actions.allow,
 # persist-credentials, triggers, expressions in scripts, top-level permissions, timeouts, GH_TOKEN,
 # image digests, and the contracts of ci.yml, secret-scan.yml and release.yml. Each rule runs over
 # this repository's workflows, and over a fixture that breaks it.
