@@ -476,8 +476,8 @@ def get_or_create_playlist(db, youtube_id: str, title: Optional[str], channel: O
 
 
 # Resolve and store a subscription's channel/playlist id, which the web process leaves NULL.
-# Flushes without committing: the caller commits before any further network call (or holds the
-# SQLite write lock across it) and rolls back on False, which record_subscription_failure() counts.
+# Flushes without committing: the caller must commit before any further network call, or the SQLite
+# write lock is held across it. It rolls back on False, which record_subscription_failure() counts.
 def resolve_subscription_target(db, subscription: Subscription) -> bool:
     command = [
         'yt-dlp', '--dump-single-json', '--skip-download',
@@ -2344,8 +2344,8 @@ INERT_STATUSES = frozenset({'deleted', 'cancelled', 'failed', SKIPPED_STATUS})
 
 
 # True when `filename` is filed as channel episode `index` by plan_channel_video's pattern
-# "<show>/Season 01/<show> - S01E0005 - <title>" (four digits), under any extension.
-# The path is not checked on disk.
+# "<show>/Season 01/<show> - S01E0005 - <title>", under any extension. Four digits tell it from
+# plan_episode's two, so a movie or another show's episode never matches. Not checked on disk.
 def filed_under_number(filename: Optional[str], index: Optional[int]) -> bool:
     if not filename or index is None:
         return False

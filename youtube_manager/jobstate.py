@@ -236,7 +236,8 @@ def is_in_progress(job) -> bool:
     return compute_effective_status(job) in CANCELABLE_EFFECTIVE_STATUSES
 
 
-# Settle a parent's stored status as compute_effective_status() shows it; both processes use this.
+# Settle a parent's stored status by resolve_parent_status()'s rule, as compute_effective_status()
+# shows it; both processes use this.
 # A stored 'cancelled' or 'deleted' stands, a pending cancel on a parent in flight settles it as
 # 'cancelled' once nothing runs, and one left in flight with only skipped children fails. Mutates
 # the row in the caller's session and never commits. True once settled into a terminal state with

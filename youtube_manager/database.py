@@ -202,7 +202,8 @@ class Playlist(Base):
 
 
 # A channel or playlist watched for new uploads; worker.check_subscriptions rescans each enabled
-# row on a schedule and queues what it has not recorded (see backfill_existing for a first scan).
+# row on a schedule and queues what it has not recorded. With backfill_existing set, a first scan
+# also queues the skipped rows it lists.
 # channel_id/playlist_id stay empty until the first scan resolves the URL to a Channel or Playlist.
 class Subscription(Base):
 
