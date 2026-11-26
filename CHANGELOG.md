@@ -10,7 +10,7 @@ describes.
 ### Changed
 
 - The docs and comments describe the host deployment and the log pipeline in neutral terms, and
-  the example UI name is `ytdl.example.test` everywhere. SECURITY.md states exactly what a release
+  the example UI name is `ytdl.example.test` in the README and the tests. SECURITY.md states exactly what a release
   build takes from that day's Debian archive.
   ([#45](https://github.com/Ochsyp/youtube-manager/pull/45))
 

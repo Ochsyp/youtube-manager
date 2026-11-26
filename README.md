@@ -267,7 +267,7 @@ VERSION             the current release
 .github/workflows/  CI (tests, image build and smoke test), release and secret scan
 .github/standard/   the repository standard's tools and tests (copies; never edited here)
 .github/            Dependabot and the pull request template
-.githooks/          hooks that keep commits off main and private data out (CONTRIBUTING.md, Guard rails)
+.githooks/          hooks: no commit to main, no private data (CONTRIBUTING.md, Guard rails)
 CHANGELOG.md        changes, newest first
 CONTRIBUTING.md     branch, pull request and release workflow
 SECURITY.md         security policy
