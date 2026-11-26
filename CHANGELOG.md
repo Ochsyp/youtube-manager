@@ -7,6 +7,12 @@ describes.
 
 ## [Unreleased]
 
+### Changed
+
+- `release-prepare` writes the README's install command through `VERSION_COPY`, and
+  `standard-check` fails until it matches, so `tests/test_readme.py` is gone.
+  ([#46](https://github.com/Ochsyp/youtube-manager/pull/46))
+
 ## [1.2.3] - 2026-11-26
 
 A patch release, and the first built, drafted and sealed by the repository standard's release
