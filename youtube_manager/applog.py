@@ -1,9 +1,8 @@
 # -------------------------------------------------------
 # Shared logging setup
 #
-# Shared logging setup for the YouTube Manager services. Every record starts with a
-# "[LEVEL]  [timestamp] message" line and its continuation lines are indented, so a
-# log collector that opens a new entry at each tag (a Promtail multiline stage, say)
+# Every record starts with a "[LEVEL]  [timestamp] message" line and its continuation lines are
+# indented, so a log collector that opens a new entry at each tag (a Promtail multiline stage, say)
 # keeps a traceback whole.
 # -------------------------------------------------------
 

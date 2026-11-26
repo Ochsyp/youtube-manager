@@ -26,10 +26,9 @@ STAGING_TEMP = DOWNLOAD_PATH / '.incomplete'
 # re-downloads something already sitting on disk.
 SEARCH_PATHS = (DOWNLOAD_PATH, MEDIA_PATH)
 
-# Extensions treated as playable media. Sidecar files (.info.json, .description, .jpg) are
-# deliberately excluded: a job must never be marked "completed" because its metadata file exists.
-# A container missing here makes a finished download look unrecognisable, which fails the job and
-# sends it into permanent retry, so the list errs towards including anything playable.
+# Extensions treated as playable media; sidecars (.info.json, .description, .jpg) never count.
+# A container missing here fails a finished download and sends it into permanent retry, so the
+# list errs towards including anything playable.
 MEDIA_EXTENSIONS = frozenset({
     '.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.aac', '.opus', '.flac',
     '.wav', '.avi', '.mov', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv',
@@ -164,7 +163,7 @@ def _search_roots(roots: Iterable[Path], fragment: str) -> Optional[Path]:
     if not fragment:
         return None
 
-    # glob metacharacters in titles (e.g. "[Official Video]") would otherwise silently fail to match.
+    # Escaped, as glob metacharacters in titles (e.g. "[Official Video]") would never match.
     escaped = glob.escape(fragment)
     # rglob reads a "/" in a title as a path separator and then matches nothing; yt-dlp writes a
     # lookalike character in the filename, so match any single character in its place.
@@ -195,10 +194,9 @@ def find_recorded_media(job, search_paths: Optional[Iterable[Path]] = None) -> O
     return None
 
 
-# Locate a job's media file: by recorded filename, then by its '[<id>]' tag; None when neither
-# matches, however close a title is. search_paths scopes the search -- the worker passes staging
-# only, so an already-organized file doesn't count as "already downloaded"; the app's retry/sweep
-# flows include the library.
+# Locate a job's media file by recorded filename, then by its '[<id>]' tag; None when neither
+# matches, however close a title is. The worker passes staging only as search_paths, so an
+# organized file does not count as "already downloaded"; the app's retry/sweep include the library.
 def find_existing_media(job, search_paths: Optional[Iterable[Path]] = None) -> Optional[Path]:
     roots = list(search_paths) if search_paths is not None else list(SEARCH_PATHS)
 
