@@ -1,10 +1,10 @@
 # -------------------------------------------------------
 # YouTube Manager web app
 #
-# FastAPI routes and UI helpers: page rendering, flash messages, job and subscription actions, and
-# the polling APIs the pages refresh themselves from. Every route is a plain `def`, which FastAPI
-# runs in a worker thread -- that is what keeps the blocking SQLite and filesystem work here off
-# the event loop, so no route may become `async def`; the ASGI middlewares are async but do no I/O.
+# FastAPI routes and UI helpers: pages, flash messages, job and subscription actions, polling APIs.
+# Every route is a plain `def` that FastAPI runs in a worker thread, which keeps the blocking SQLite
+# and filesystem work off the event loop, so no route may become `async def`. The ASGI middlewares
+# are async but do no I/O.
 # -------------------------------------------------------
 
 import logging
@@ -74,10 +74,9 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / 'templates'
 
 
-# Only this process creates the schema; the worker blocks until it appears
-# (database.wait_for_schema), so it has to land before the first request.
-# The release and the SQLite library are logged first, so every start names
-# the build that served it and the SQLite it ran on.
+# Only this process creates the schema, and the worker blocks in database.wait_for_schema until it
+# appears, so it lands before the first request. The release and the SQLite library are logged
+# first, so every start names the build that served it and the SQLite it ran on.
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logging.info('YouTube Manager %s web UI starting, SQLite %s', VERSION, sqlite3.sqlite_version)
@@ -364,11 +363,9 @@ def path_video_id(domain: Optional[str], path: str) -> Optional[str]:
     return segment
 
 
-# Canonicalise a URL so the same target pasted in different forms compares equal
-# against stored rows. `kind` is the type the URL was validated as (see
-# validate_url_type): a URL carrying both a video id and `list=` is the video for
-# 'video' and the playlist for 'playlist', a youtu.be share link included. Without
-# a kind, a watch+list URL normalises to the playlist it was opened from.
+# Canonicalise a URL so the same target pasted in different forms compares equal against stored
+# rows. `kind` is the type validate_url_type accepted: a URL with a video id and `list=` (youtu.be
+# included) is the video for 'video', and the playlist for 'playlist' or without a kind.
 def normalize_url(url: str, kind: Optional[str] = None) -> str:
     url = with_scheme(url)
     parsed = urlparse(url)
@@ -421,12 +418,10 @@ def detect_youtube_type(url: str) -> Optional[str]:
     path = parsed.path.rstrip('/')
     qs = parse_qs(parsed.query)
 
-    # Every shape that names one video is checked before `list=`: YouTube appends a
-    # channel's auto-generated Uploads playlist id to any video opened from its
-    # Videos tab, a share link carries the playlist it was shared from, and reading
-    # either as a playlist records the single video as a playlist of its own.
-    # validate_url_type still accepts such a URL for a playlist request. The
-    # playlist embed names no video, so its `list=` decides.
+    # Shapes naming one video are checked before `list=`: a video opened from a channel's Videos tab
+    # carries its Uploads playlist id, a share link its source playlist, and neither is a playlist.
+    # validate_url_type still accepts such a URL for a playlist request. The playlist embed names no
+    # video, so its `list=` decides.
     names_video = path == '/watch' and 'v' in qs
     if names_video or path_video_id(domain, parsed.path):
         return 'video'
@@ -513,17 +508,15 @@ def load_jobs(db, job_ids: list[int]) -> list[Download]:
 # Retry, cancel and delete come in pairs: a helper that acts inside the caller's transaction, and
 # an entry point taking an id that opens its own session and commits.
 
-# Statuses /add is willing to requeue rather than reject as a duplicate. 'deleted' is
-# included because pasting the URL again after removing the file is a request to fetch
-# it again, and nothing else on that row offers to; SKIPPED_STATUS because a video a
-# subscription only recorded has never been fetched at all.
+# Statuses /add requeues rather than rejects as a duplicate. 'deleted' counts: pasting the URL again
+# after removing the file asks to fetch it again, and nothing else on that row offers to.
+# SKIPPED_STATUS counts because a video a subscription only recorded has never been fetched.
 REQUEUEABLE_STATUSES = FAILED_OR_CANCELLED | {'deleted', SKIPPED_STATUS}
 
 
-# Requeues a job's failed/cancelled work in the caller's transaction, and reports whether
-# anything changed. Shares reset_job_for_retry with the worker's auto-retry (jobstate.py) so
-# both reset the same fields and both reuse a file already on disk; search_library=False
-# finds that file by a stat of its recorded name alone, walking no tree.
+# Requeues failed/cancelled work in the caller's transaction; returns whether anything changed.
+# Shares reset_job_for_retry with the worker's auto-retry (jobstate.py): same fields, same reuse of
+# a file on disk. search_library=False finds that file by a stat of its recorded name, no tree walk.
 def requeue_job(job: Download, statuses=FAILED_OR_CANCELLED, search_library: bool = True) -> bool:
     # Reset one row and, when it was reset, give it its automatic-retry count back.
     def reset(target) -> bool:
@@ -616,21 +609,19 @@ def apply_cancel(target: Download) -> bool:
     return False
 
 
-# Settle `parent` in the caller's transaction through jobstate.settle_parent once none of its
-# children is in flight, as after the app cancels or deletes the last child that kept it active.
-# While one is, the parent is left alone: the worker owns in-flight states and settles the parent
-# when that child stops. None is a no-op.
+# Settle `parent` (None is a no-op) in the caller's transaction via jobstate.settle_parent once no
+# child is in flight, e.g. after the app cancels or deletes its last active child. Otherwise it is
+# left alone: the worker owns in-flight states and settles the parent when that child stops.
 def settle_idle_parent(parent: Optional[Download]) -> None:
     if parent is None or any(child.status in ACTIVE_STATUS_SET for child in parent.children):
         return
     settle_parent(parent)
 
 
-# Cancels a job in progress (jobstate.is_in_progress) in the caller's transaction and reports
-# whether it was one; a job that has stopped is left alone. Not apply_status_update_to_hierarchy:
-# that only touches the parent when a child changed, so a parent whose children are all
-# mid-download would never get its own flag set. A parent with nothing left in flight is settled
-# here, as is a cancelled child's parent, in the same transaction.
+# Cancels a job in progress (jobstate.is_in_progress) in the caller's transaction; returns whether
+# it was one. Not apply_status_update_to_hierarchy: it touches the parent only when a child changed,
+# so it never flags a parent whose children are all mid-download. The parent, own or a cancelled
+# child's, is settled here once nothing is left in flight, in the same transaction.
 def request_job_cancel(job: Download) -> bool:
     if not is_in_progress(job):
         return False
@@ -668,10 +659,9 @@ def cancel_job(job_id: int) -> None:
         db.commit()
 
 
-# Removes the files but keeps the row, marked 'deleted', so history still lists the entry, and
-# reports (deleted, skipped) counts. A playlist/channel parent delegates to each child and then
-# follows suit. Anything still active is skipped: the worker may be writing to those files.
-# Touches the filesystem but never the database, so the caller's write lock stays unheld.
+# Removes the files but keeps the row, marked 'deleted', for history; returns (deleted, skipped). A
+# playlist/channel parent delegates to each child first. Active jobs are skipped: the worker may be
+# writing those files. Never touches the database, so the caller's write lock stays unheld.
 def delete_job_files(job: Download) -> tuple[int, int]:
     targets = job.children if (job.parent_id is None and job.children) else [job]
     deleted = 0
@@ -762,10 +752,9 @@ def query_downloads(statuses: tuple[str, ...], hide_stale_endings: bool = False)
     with Session() as db:
         query = apply_eager_loads(db.query(Download)).filter(Download.parent_id.is_(None))
 
-        # Narrow in SQL first, against idx_download_parent_status: the dashboard polls this
-        # every few seconds, and scanning every row ever downloaded to reject most of them in
-        # Python grows with the table. Empty only if a caller asks purely for display-only
-        # statuses, which no stored row can match anyway.
+        # Narrow in SQL first, against idx_download_parent_status: the dashboard polls this every
+        # few seconds, and filtering every row ever downloaded in Python grows with the table. Empty
+        # only if a caller asks purely for display-only statuses, which no stored row can match.
         if raw_statuses:
             child = aliased(Download)
             has_matching_child = (
@@ -858,11 +847,9 @@ def cancel(job_id: int):
     return redirect_with_flash('/')
 
 
-# Cancels every top-level job in progress, and each of its children still in flight, in one
-# session, and reports how many hierarchies were cancelled. Selection mirrors query_downloads():
-# a parent whose own status lags behind an active child still shows as active on the dashboard,
-# so matching only the stored parent status would skip a hierarchy the user can see running. A
-# parent stored as active whose children have all stopped is not in progress, and is left alone.
+# Cancels every top-level job in progress and its children in flight, in one session; returns how
+# many hierarchies were cancelled. Selection mirrors query_downloads(), so a parent whose status
+# lags behind an active child counts, and a parent stored active with all children stopped does not.
 def cancel_all_jobs() -> int:
     with Session() as db:
         child = aliased(Download)
@@ -893,10 +880,9 @@ def cancel_all_jobs() -> int:
     return count
 
 
-# Requeues every failed/cancelled item, child rows included, and reports how many hierarchies it
-# reached. Routed as one Retry is, through requeue_job(), so a row whose recorded file is on disk
-# goes to 'redownload' -- but with search_library=False: this acts on the whole table, and a
-# tree walk of staging and the library per row is too much for one request.
+# Requeues every failed/cancelled item, children included, through requeue_job() as one Retry does;
+# returns how many hierarchies it reached. A recorded file on disk still means 'redownload', but
+# with search_library=False: a walk of staging and the library per row is too much for one request.
 def retry_all_jobs() -> int:
     with Session() as db:
         # Every top-level row, not just the failed ones: a parent can read completed while a child
@@ -1003,10 +989,9 @@ def add_subscription(
 
     url = normalize_url(url, subscription_type)
 
-    # The subscription table has a unique constraint on (url, subscription_type), so this
-    # check is just for a friendlier flash message. The worker's periodic check also skips
-    # duplicates, so a race between two submissions is harmless: one will succeed, the other
-    # will be ignored.
+    # A unique constraint on (url, subscription_type) blocks duplicates, and the worker's periodic
+    # check skips them; this check only gives a friendlier flash message. Of two racing submissions,
+    # one succeeds and the other is ignored.
     with Session() as db:
         exists = db.query(Subscription).filter(Subscription.url == url).first()
 
@@ -1066,8 +1051,8 @@ def toggle_subscription_backfill(subscription_id: int):
 
 
 # Asks for this subscription's skipped videos: sets backfill_existing and clears last_checked, so
-# the worker's next check is a full first scan that queues them in scan order (see
-# worker.check_subscriptions). Queues nothing itself, and changes nothing for a disabled
+# the worker's next check is a full first scan queueing them in scan order
+# (worker.check_subscriptions). Queues nothing itself, and changes nothing for a disabled
 # subscription, which is never checked.
 @app.post('/subscriptions/{subscription_id}/backfill-now')
 def backfill_subscription_now(subscription_id: int):
@@ -1091,10 +1076,9 @@ def backfill_subscription_now(subscription_id: int):
                 'Subscription has not finished its first scan yet -- try again in a minute.',
             )
 
-        # A fresh scan rather than requeuing the skipped rows here: the scan queues them in its own
-        # order, which the order the rows were recorded in need not follow. Both columns are
-        # written whatever they held: during a first scan last_checked reads empty already, and an
-        # UPDATE without it would leave the stamp that scan may commit before this one.
+        # A fresh scan, not a requeue here: the scan queues the skipped rows in its own order. Both
+        # columns are always written: a first scan already reads last_checked empty, and an UPDATE
+        # without it would leave a stamp that scan may commit.
         db.query(Subscription).filter(Subscription.id == sub.id).update(
             {Subscription.backfill_existing: True, Subscription.last_checked: None},
             synchronize_session=False,
@@ -1153,10 +1137,9 @@ def job_details(request: Request, job_id: int):
     )
 
 
-# Clears a job's transient state and puts it back into one the worker acts on (`status` when
-# given), through one conditional UPDATE that applies only while the row still holds the status
-# this request read, so a row the worker took up meanwhile is left alone. Returns whether the row
-# was reset; its updated_at moves with it, so polling and list views reflect the change.
+# Clears a job's transient state and returns it to a state the worker acts on (`status` if given),
+# via one UPDATE conditional on the status this request read, so a row the worker took is left
+# alone. Returns whether the row was reset; its updated_at moves too, so polls and lists see it.
 def reset_for_redownload(db, target: Download, status: Optional[str] = None) -> bool:
     # An existing file means 'redownload', which runs the worker's rename/refresh
     # path; otherwise this is just a fresh download.
@@ -1309,18 +1292,16 @@ def view_job_log(request: Request, job_id: int):
     })
 
 
-# Marks failed/cancelled jobs completed when their file is already on disk, e.g. after a crash
-# lost the row update the download had earned, then settles each parent it reached through the
-# shared rule (jobstate.settle_parent). Walks the library per job, so it is a manual button
-# rather than something the page does on its own.
+# Marks failed/cancelled jobs completed when their file is already on disk (e.g. a crash lost the
+# row update), then settles each parent reached via jobstate.settle_parent. It walks the library per
+# job, so it is a manual button rather than something the page does on its own.
 @app.post('/admin/sweep_existing')
 def sweep_existing():
     updated = 0
 
-    # The worker's adopt_existing_download() is the same lookup the retry flow uses, so it
-    # refuses parent rows, which own no file of their own. The sweep checks every failed/cancelled
-    # row, and of a parent only its failed/cancelled children, so the same rows are checked as in
-    # the retry flow and a child in flight is left to the worker.
+    # The worker's adopt_existing_download() is the retry flow's lookup and refuses parent rows,
+    # which own no file. So every failed/cancelled row is checked, and of a parent only its
+    # failed/cancelled children, leaving a child in flight to the worker.
     with Session() as db:
         items = (
             db.query(Download)
