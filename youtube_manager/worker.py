@@ -546,7 +546,6 @@ def throttle_youtube_requests() -> None:
     _last_youtube_request_at = time.monotonic()
 
 
-
 # Log each distinct WARNING: line of yt-dlp's stderr once, at WARN, in first-seen order. Returns
 # the other non-blank lines joined, so a failure's ERROR: reason is not buried behind warnings.
 def relay_ytdlp_warnings(stderr: Optional[str]) -> str:

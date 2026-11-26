@@ -104,8 +104,8 @@ docker compose -f compose.example.yaml up -d
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | | Egress proxy; `NO_PROXY` must cover Jellyfin and the bgutil provider |
 
 yt-dlp takes its proxy from these variables and reaches the hosts that `NO_PROXY` names,
-such as the bgutil provider, directly. Set `HTTPS_PROXY` as well as `HTTP_PROXY`, since
-YouTube is reached over HTTPS.
+such as the bgutil provider, directly. With `HTTPS_PROXY` unset, yt-dlp also uses
+`HTTP_PROXY` for HTTPS; set both, so every HTTPS client in the image uses the proxy.
 
 Volumes: `/app/data` (SQLite and its backups), `/downloads` (staging) and `/media` (library).
 
