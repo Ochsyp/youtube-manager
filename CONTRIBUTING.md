@@ -109,10 +109,10 @@ adds a step to `MIGRATIONS` there, keyed by the version it brings the database t
 runs each pending step in one transaction with the version it reaches.
 
 - A step the previous release keeps working through takes the next version in its hundred, such
-  as 2 after 1, and the release can be a minor. Such a step may add a nullable column, a column
-  with a DDL default (`server_default`; an ORM `default=` alone never reaches the DDL, so a file
-  created fresh would refuse the previous release's inserts), a non-unique index or a table, and
-  fill in values the previous release reads the same way.
+  as 2 after 1, and the release can be a minor. Such a step may add a nullable column, a
+  non-unique index or a table, and fill in values the previous release reads the same way. It
+  may also add a column with a DDL default (`server_default`). An ORM `default=` alone never
+  reaches the DDL, so a file created fresh would refuse the previous release's inserts.
 - Any other step takes the next hundred, such as 101 after 1: a dropped, renamed or retyped
   column, a NOT NULL column without a DDL default, a UNIQUE or CHECK constraint. Releases that
   know schema versions refuse the migrated file and older ones would misread it, so the release
@@ -155,16 +155,19 @@ To release X.Y.Z:
    ```
 
    vP.Q.R is the previous release. The first release links to its tag instead, as in
-   `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`. The same pull request sets the
-   README's install command to `YTM_VERSION=X.Y.Z`; a test fails until it does.
-   It also sets `VERSION` to `X.Y.Z`, and its title is `chore(release): X.Y.Z`.
-2. After the merge, sign an annotated tag on the commit the merge created on `main`, which the
-   `gh pr view` line below prints, so that nothing merged after it ships under this version. The
-   tag message is `youtube-manager vX.Y.Z`. Tags are signed with the release signing key: one
-   ed25519 SSH key, added to GitHub as a signing key titled `release signing` so that the tag shows
-   as verified, and listed as `maintainer namespaces="git" <public key>` in the allowed signers
-   file `git tag -v` reads (`gpg.ssh.allowedSignersFile`). Git signs with it once `gpg.format` is
-   `ssh` and `user.signingkey` names the key. Then check the signature and push the tag:
+   `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`. The same pull request sets
+   `VERSION` and the README's install command (`YTM_VERSION=X.Y.Z`) to the new version; a test
+   fails until the README matches. Its title is `chore(release): X.Y.Z`.
+2. After the merge, sign an annotated tag on the merge commit on `main`, which the `gh pr view`
+   line below prints. Then nothing merged after it ships under this version. The tag message is
+   `youtube-manager vX.Y.Z`.
+   - The release signing key is one ed25519 SSH key. It is added to GitHub as a signing key
+     titled `release signing`, so the tag shows as verified.
+   - It is listed as `maintainer namespaces="git" <public key>` in the allowed signers file that
+     `git tag -v` reads (`gpg.ssh.allowedSignersFile`).
+   - Git signs with it once `gpg.format` is `ssh` and `user.signingkey` names the key.
+
+   Then check the signature and push the tag:
 
    ```text
    git switch main
@@ -175,9 +178,9 @@ To release X.Y.Z:
    git push origin vX.Y.Z
    ```
 
-3. Check the tag before publishing, because publishing is final. Releases in this repository
-   are immutable: a published release locks its tag, and deleting the release does not free the
-   tag name. If the release workflow fails after that, the fix ships as the next patch release.
+3. Check the tag before publishing, because publishing is final. Releases here are immutable: a
+   published release locks its tag, and deleting the release does not free the tag name. If the
+   release workflow fails after that, the fix ships as the next patch release.
 
    ```text
    uv run --no-project --python 3.13 python scripts/check_release.py vX.Y.Z
@@ -193,12 +196,16 @@ To release X.Y.Z:
    gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <notes file>
    ```
 
-4. Publishing starts the release workflow (`.github/workflows/release.yml`). It checks that the tag
-   is vX.Y.Z on a commit of `main` and that CHANGELOG.md has its dated heading, builds and
-   smoke-tests the image for amd64 and arm64, pushes `ghcr.io/ochsyp/youtube-manager:X.Y.Z` and
-   `latest` with provenance and SBOM attestations, and appends the image's digest to the release
-   notes. Keep that `## Container image` section in every release's notes: deployments that
-   follow releases read the image digest from it.
+4. Publishing starts the release workflow (`.github/workflows/release.yml`):
+   - it checks that the tag is vX.Y.Z on a commit of `main` and that CHANGELOG.md has its dated
+     heading;
+   - it builds and smoke-tests the image for amd64 and arm64;
+   - it pushes `ghcr.io/ochsyp/youtube-manager:X.Y.Z` and `latest` with provenance and SBOM
+     attestations;
+   - it appends the image's digest to the release notes.
+
+   Keep that `## Container image` section in every release's notes: deployments that follow
+   releases read the image digest from it.
 
 A release marked as a prerelease is pushed without `latest`, and promoting it to a full release
 later does not run the workflow again.
