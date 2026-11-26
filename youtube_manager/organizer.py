@@ -948,13 +948,6 @@ def plan_channel_video(db, job: Download, info: dict, video_path: Path) -> Optio
 # =======================================================
 # Nothing outside the media and staging roots is removed, and nothing another row still points at.
 
-# Report a yt-dlp file still being written ("video.mp4.part", "video.temp.mp4") or a format stream
-# awaiting its merge. Delegates to media.is_ytdlp_intermediate(), the rule is_media_file() uses to
-# rule one out as finished media.
-def is_partial_download(path: Path) -> bool:
-    return is_ytdlp_intermediate(path)
-
-
 # Delete a file, logging either outcome. Used for the sources left behind once a video is filed.
 def discard_file(job: Download, path: Optional[Path], description: str) -> None:
     if not path or not path.exists():
@@ -989,7 +982,7 @@ def remove_exclusive_folder(job: Download, folder: Path) -> bool:
     # A video left in here means the folder is shared, whatever the job row says. A yt-dlp
     # work-in-progress file means a download is still writing into it, and is_media_file()
     # reports that one as not-media.
-    if any(is_media_file(path) or is_partial_download(path) for path in entries):
+    if any(is_media_file(path) or is_ytdlp_intermediate(path) for path in entries):
         return False
     # A subdirectory is another season, show or uploader folder, which rmtree would take with it
     # unchecked; cleanup_old_folder_if_exclusive() applies the same rule while walking up.
@@ -1105,7 +1098,7 @@ def remove_staging_leftovers(job: Download) -> None:
         if not path.is_relative_to(STAGING_TEMP):
             if path.parent in finished_dirs:
                 continue
-            if not (is_partial_download(path) or path.name.lower().endswith(STAGING_SIDECAR_SUFFIXES)):
+            if not (is_ytdlp_intermediate(path) or path.name.lower().endswith(STAGING_SIDECAR_SUFFIXES)):
                 continue
         # A symlink pointing out of staging is not this job's to touch.
         if not path.resolve().is_relative_to(staging_root):

@@ -15,8 +15,6 @@ services:
     environment:
       PUID: "1000"
       PGID: "1000"
-      MEDIA_PATH: /media
-      DOWNLOAD_PATH: /downloads
       # The name the reverse proxy serves the UI under.
       YTM_ALLOWED_HOSTS: ytdl.example.test
     volumes:
@@ -44,8 +42,6 @@ services:
     environment:
       PUID: "1000"
       PGID: "1000"
-      MEDIA_PATH: /media
-      DOWNLOAD_PATH: /downloads
       POT_PROVIDER_URL: http://bgutil-provider:4416
       # Optional: ask Jellyfin to rescan after filing.
       # JELLYFIN_URL: https://jellyfin.example.test:8920
