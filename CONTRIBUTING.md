@@ -169,7 +169,8 @@ edit or delete a release.
 - **What a release is.** One container image for linux/amd64 and linux/arm64, at
   `ghcr.io/ochsyp/youtube-manager`. The "Container image" section of the release notes names it
   by version and digest, `ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...`, and a host pins that
-  whole reference. The release's assets are `image.json` and `SHA256SUMS`, attested.
+  whole reference. The image is attested by that digest, and the release's assets `image.json`
+  and `SHA256SUMS` name it.
 - **The host.** youtube-manager's host is jelly-stack. From jelly-stack's switch to this image on,
   it runs youtube-manager from the image, pinned by version and digest in jelly-stack's own
   Compose file, and never pulls `latest`. Until that switch, jelly-stack still builds
