@@ -171,19 +171,18 @@ edit or delete a release.
   by version and digest, `ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...`, and a host pins that
   whole reference. The image is attested by that digest, and the release's assets `image.json`
   and `SHA256SUMS` name it.
-- **The host.** youtube-manager's host is jelly-stack. From jelly-stack's switch to this image on,
-  it runs youtube-manager from the image, pinned by version and digest in jelly-stack's own
-  Compose file, and never pulls `latest`. Until that switch, jelly-stack still builds
-  youtube-manager from a clone. The host does not check youtube-manager's seal itself: it installs
-  only jelly-stack releases sealed by jelly-stack's maintainer, and those carry the pin. Before a
-  reviewed jelly-stack pull request moves the pin, the session that writes it verifies
-  youtube-manager's `seal/vX.Y.Z` against the release key, and checks that the digest it pins is
-  the one this release names.
+- **The host.** The maintainer's host deployment runs youtube-manager. Once it switches to this
+  image, it runs the image pinned by version and digest in its own Compose file and never pulls
+  `latest`; until then, it builds youtube-manager from a clone. The host does not check this
+  repository's seal itself: it installs only sealed releases of its own deployment, and those
+  carry the pin. Before a reviewed change moves the pin, whoever writes that change verifies
+  `seal/vX.Y.Z` against the release key, and checks that the digest it pins is the one this
+  release names.
 - **The hold.** A release that is published but not yet sealed, or whose seal does not verify, is
   held: the pin stays on the last sealed release, and the host keeps running that image
-  unchanged. Such a release reaches the host only after it is sealed and a new sealed jelly-stack
-  release carries its pin. A release that must not reach it is never sealed, and a later sealed
-  release replaces it.
+  unchanged. Such a release reaches the host only after it is sealed and a new sealed release of
+  the host deployment carries its pin. A release that must not reach it is never sealed, and a
+  later sealed release replaces it.
 
 ## Versioning
 

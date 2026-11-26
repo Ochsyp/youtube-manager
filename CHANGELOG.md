@@ -12,6 +12,10 @@ describes.
 - `release-prepare` writes the README's install command through `VERSION_COPY`, and
   `standard-check` fails until it matches, so `tests/test_readme.py` is gone.
   ([#46](https://github.com/Ochsyp/youtube-manager/pull/46))
+- The docs and comments describe the host deployment and the log pipeline in neutral terms, and
+  the example UI name is `ytdl.example.test` in the README and the tests. SECURITY.md states
+  exactly what a release build takes from that day's Debian archive.
+  ([#45](https://github.com/Ochsyp/youtube-manager/pull/45))
 
 ## [1.2.3] - 2026-11-26
 

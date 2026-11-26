@@ -67,9 +67,11 @@ Release contract in `CONTRIBUTING.md` says.
 
 - CI builds the image for amd64 and arm64 on every pull request and on main, and smoke-tests each
   build with `ci/image-smoke`.
-- A merged release pull request builds the release image without the layer cache, so it has the
-  Debian updates of that day. It is pushed by digest only, after both builds pass the smoke test,
-  with provenance and an SBOM, and attested by digest. The draft release names that digest.
+- A merged release pull request builds the release image without the layer cache. The packages
+  the Dockerfile installs come from that day's Debian archive. The base image is as current as
+  its pinned digest, which Dependabot moves weekly. The image is pushed by digest only, after both
+  builds pass the smoke test, with provenance and an SBOM, and attested by digest. The draft
+  release names that digest.
 - GitHub creates the tag `vX.Y.Z` when the maintainer publishes the release, and only then do
   the tags `X.Y.Z` and `latest` point at the digest. The maintainer's signature is the seal
   `seal/vX.Y.Z`, not the release tag.
