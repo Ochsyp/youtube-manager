@@ -265,8 +265,8 @@ pytest.ini          pytest settings and the posix marker
 VERSION             the current release
 .github/workflows/  CI (tests, image build and smoke test), release and secret scan
 .github/standard/   the repository standard's tools and tests (copies; never edited here)
-.github/            the standard's configuration, Dependabot and the pull request template
-.githooks/          the standard's hooks: no commit or push to main, and the privacy checks
+.github/            Dependabot and the pull request template
+.githooks/          hooks that keep commits and pushes off main
 CHANGELOG.md        changes, newest first
 CONTRIBUTING.md     branch, pull request and release workflow
 SECURITY.md         security policy
