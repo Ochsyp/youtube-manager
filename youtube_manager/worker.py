@@ -1,9 +1,8 @@
 # -------------------------------------------------------
 # YouTube download worker
 #
-# Runs yt-dlp, updates job state in the database, discovers metadata for parent and video jobs,
-# and recovers or retries stalled jobs. Runs as its own process alongside the web app, taking one
-# job at a time; both share one SQLite file, which allows a single writer.
+# Runs yt-dlp, records job state, discovers metadata and retries stalled jobs, one job at a time.
+# It runs beside the web app in its own process; both share one single-writer SQLite file.
 # -------------------------------------------------------
 
 import importlib.metadata
@@ -88,10 +87,9 @@ PROXY = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
 POT_PROVIDER_URL = os.getenv('POT_PROVIDER_URL', '')
 
 
-# Arguments every yt-dlp invocation shares, built fresh per call so a caller extending them into
-# its own command list cannot mutate shared state. --ignore-config always leads, so no yt-dlp
-# config file in the image, the staging directory or a home directory can change what a call does;
-# the PO-token extractor args follow when POT_PROVIDER_URL is set.
+# Arguments every yt-dlp call shares, built fresh per call so a caller cannot mutate shared state.
+# --ignore-config leads so no yt-dlp config file anywhere changes a call; the PO-token extractor
+# args follow when POT_PROVIDER_URL is set.
 def ytdlp_common_args() -> list[str]:
     args = ['--ignore-config']
     if POT_PROVIDER_URL:
@@ -188,11 +186,9 @@ _shutdown = threading.Event()
 class ShutdownRequested(BaseException):
     pass
 
-# Liveness marker for the container healthcheck: this process serves nothing over HTTP, so it
-# proves itself by touching a file. /tmp is a tmpfs in compose.example.yaml, so this stays off
-# the disk, and the file being absent after a restart is correct -- a process that has not
-# reached its loop yet has not proved anything. The healthcheck's staleness window has to clear
-# the longest gap between touches, which is one COMMAND_TIMEOUT_SECONDS-bounded yt-dlp call.
+# Liveness file for the container healthcheck; /tmp is a tmpfs in compose.example.yaml, so a
+# restart correctly clears it. The healthcheck's staleness window must exceed the longest gap
+# between touches: one COMMAND_TIMEOUT_SECONDS-bounded yt-dlp call.
 HEARTBEAT_PATH = Path(os.getenv('WORKER_HEARTBEAT_PATH', '/tmp/worker-heartbeat'))
 
 
@@ -200,10 +196,8 @@ HEARTBEAT_PATH = Path(os.getenv('WORKER_HEARTBEAT_PATH', '/tmp/worker-heartbeat'
 #              LOGGING AND JOB-ROW UPDATES
 # =======================================================
 
-# Refresh the liveness marker. Called from every loop that can run for a long time, so a download
-# in progress keeps the container healthy rather than looking wedged. Failure is swallowed: an
-# unwritable marker means the healthcheck assumes the worst, which is never a reason to abandon
-# a download that is otherwise fine.
+# Refresh the liveness file; every long-running loop calls it so a running download looks healthy.
+# Failure is swallowed: an unwritable marker is never a reason to abandon a working download.
 def touch_heartbeat() -> None:
     try:
         HEARTBEAT_PATH.touch()
@@ -244,11 +238,9 @@ def log_error(msg: str, exc: BaseException | None = None) -> None:
 _refused_write_job_ids: set[int] = set()
 
 
-# Set columns on one job row in its own session and commit. One conditional UPDATE refuses a row
-# marked 'deleted' (WARN once per job per run); a row gone from the table is a no-op. Outside that
-# transaction, a terminal status settles a child's parent and a status or progress write
-# re-aggregates it. organized_at is deliberately left alone here: a progress tick is no reason to
-# send the organizer back over a video it already filed. Only retry and redownload clear it.
+# Set columns on one job row in its own session and commit; a 'deleted' row is refused (WARN once
+# per job per run) and a missing row is a no-op; then the parent is settled or re-aggregated.
+# Only retry and redownload clear organized_at, so a progress tick never re-files a video.
 def update_job(job_id: int, **values) -> None:
     if values.get('status') in RESET_PROGRESS_ON_STATUSES:
         values.setdefault('progress', None)
@@ -328,10 +320,9 @@ def has_library_file(job: Download) -> bool:
     return Path(job.filename).is_relative_to(MEDIA_PATH)
 
 
-# Run one picked-up job to its next resting state, blocking for as long as that takes: refuse a
-# cancelled or unsupported job, refresh a video or parent that already has files on disk, expand a
-# parent that has none, and otherwise download the video. Every branch has to leave the row in a
-# status get_next_job() no longer selects, or the loop picks the same job up again forever.
+# Run one job to its next resting state, blocking: refuse, refresh existing files, expand a parent
+# or download. Every branch must leave a status get_next_job() no longer selects, or it loops
+# forever.
 def process_job(job: Download) -> None:
     # Logged unconditionally: a branch below that no-ops would otherwise make a stuck job
     # indistinguishable from the worker not running at all.
@@ -346,10 +337,8 @@ def process_job(job: Download) -> None:
         update_job(job.id, status='failed', error=f'Unsupported URL: {job.url}')
         return
 
-    # A video whose file is already on disk is refreshed in place rather than downloaded again, and
-    # so is a queued video whose recorded file is in the library: "Retry all" queues one whose file
-    # is not where the row says, and downloading it into staging again would file a second copy.
-    # Either way the terminal status update_job() writes settles the parent.
+    # A video with its file on disk, or a queued one whose recorded file is in the library, is
+    # refreshed in place: downloading it into staging again would file a second copy.
     if job.status in {'metadata', 'redownload'} or has_library_file(job):
         if job.request_type == 'video' and job.filename:
             log(f'Job {job.id}: performing worker-side redownload/rename')
@@ -414,10 +403,8 @@ def get_next_job() -> Optional[Download]:
 #        CHANNEL, PLAYLIST AND SUBSCRIPTION ROWS
 # =======================================================
 
-# Fetch the channel row for `youtube_id`, creating it if absent and refreshing whichever fields the
-# caller supplies; returns None for a falsy id, despite the annotation. Works inside the caller's
-# open session and flushes so the id is assigned, but never commits -- the caller's transaction
-# stays in charge.
+# Fetch or create the channel row for `youtube_id`, refreshing supplied fields; None for a falsy id.
+# Flushes so the id is assigned, but never commits: the caller's transaction stays in charge.
 def get_or_create_channel(
     db, youtube_id: str, name: Optional[str], url: Optional[str] = None,
     thumbnail: Optional[str] = None, description: Optional[str] = None,
@@ -488,11 +475,9 @@ def get_or_create_playlist(db, youtube_id: str, title: Optional[str], channel: O
     return playlist
 
 
-# Resolve a subscription's own channel/playlist row and store its id. It takes a yt-dlp call the
-# web process never makes, so every subscription starts with channel_id/playlist_id NULL.
-# Flushes into the caller's session without committing: the caller commits before any further
-# network call, or the SQLite write lock is held across it, and rolls back on False (nothing
-# resolved). Each False is also counted as a failed check through record_subscription_failure().
+# Resolve and store a subscription's channel/playlist id, which the web process leaves NULL.
+# Flushes without committing: the caller must commit before any further network call, or the SQLite
+# write lock is held across it. It rolls back on False, which record_subscription_failure() counts.
 def resolve_subscription_target(db, subscription: Subscription) -> bool:
     command = [
         'yt-dlp', '--dump-single-json', '--skip-download',
@@ -591,12 +576,9 @@ def relay_ytdlp_warnings(stderr: Optional[str]) -> str:
     return '\n'.join(remainder)
 
 
-# Run a yt-dlp command to completion, throttled and blocking; raises CalledProcessError on a
-# non-zero exit, TimeoutExpired after `timeout` seconds and ShutdownRequested within about a second
-# of a stop. yt-dlp runs in its own session, so a timeout or a stop ends it together with the deno
-# or ffmpeg it started. encoding='utf-8' is explicit because text=True's locale default mangles
-# non-ASCII titles into mojibake on a container with no UTF-8 locale, so the stored filename stops
-# matching the file on disk.
+# Run a yt-dlp command, throttled and blocking; raises CalledProcessError, TimeoutExpired or, within
+# about a second of a stop, ShutdownRequested. A timeout or stop also ends its deno or ffmpeg.
+# encoding='utf-8' is explicit: without a UTF-8 locale, non-ASCII filenames stop matching the disk.
 def run_command(command: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
     throttle_youtube_requests()
     # A stop asked for before this call starts no yt-dlp at all.
@@ -681,11 +663,9 @@ def wait_for_group(process: subprocess.Popen, seconds: float) -> bool:
         time.sleep(0.05)
 
 
-# End yt-dlp and everything it started. yt-dlp runs in its own session and forks ffmpeg or deno,
-# so the whole process group is signalled: SIGTERM, then SIGKILL to whatever is still alive after
-# PROCESS_KILL_TIMEOUT_SECONDS, or a merge wedged inside ffmpeg would hold the job forever. Also
-# called after yt-dlp exited by itself, which ends a child it left running; with nothing left it
-# signals nothing. Returns once the group is gone or both waits ran out.
+# End yt-dlp's whole process group: SIGTERM, then SIGKILL after PROCESS_KILL_TIMEOUT_SECONDS, so a
+# wedged ffmpeg merge cannot hold the job. Safe after yt-dlp exited; it then ends leftover children.
+# Returns once the group is gone or both waits ran out.
 def terminate_process_group(process: subprocess.Popen) -> None:
     # Only a group of yt-dlp's own, which start_new_session gives every call, is ever signalled.
     # killpg(0) would hit this worker's own group and killpg(-1) pid 1; a real Popen never has
@@ -777,10 +757,9 @@ def _pump_subprocess_output(process: subprocess.Popen[str], line_queue: 'queue.Q
         line_queue.put(_OUTPUT_EOF)
 
 
-# Relay a subprocess's output to the log and job row until it exits, polling for a cancel
-# request, a worker shutdown and a stalled transfer as it goes. Returns why it stopped --
-# 'finished', 'cancelled', 'shutdown' or 'stalled' -- and the last line yt-dlp began with
-# 'ERROR:', or None. Leaves no process running behind it.
+# Relay a subprocess's output to the log and job row, watching for cancel, shutdown and stalls.
+# Returns 'finished', 'cancelled', 'shutdown' or 'stalled' and the last 'ERROR:' line, or None.
+# Leaves no process running behind it.
 def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[str, Optional[str]]:
     assert process.stdout
 
@@ -898,11 +877,9 @@ def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[
         outcome = 'error'
         raise
     finally:
-        # A process still running here was cancelled, stalled, or raised past this loop; left
-        # alone it keeps downloading into staging with nothing watching it. Only a stream that
-        # ended at EOF gets time to exit on its own. A stop during that time counts as a stop, so
-        # the job goes back in the queue and uses none of its retries, unless yt-dlp still exits 0:
-        # then its download is finished.
+        # Anything still running here would keep downloading unwatched, so only a stream that hit
+        # EOF gets time to exit. A stop meanwhile requeues the job without using a retry, unless
+        # yt-dlp still exits 0: then its download is finished.
         if outcome != 'finished':
             terminate_process_group(process)
         elif not wait_for_exit(process, PROCESS_EXIT_WAIT_SECONDS):
@@ -1140,10 +1117,8 @@ def apply_metadata(job: Download, metadata: dict) -> None:
 #        REDOWNLOAD, RENAME AND RESTART RECOVERY
 # =======================================================
 
-# Re-discover metadata and optionally redownload/rename files for a job. Returns True on success.
-# A parent re-expands or requeues its children; a video is renamed in staging, re-organized where it
-# already sits in the library, or falls through to a full download_video(), so this can block for
-# the length of a download.
+# Re-discover metadata and redownload or rename a job's files; True on success. A parent re-expands
+# its children; a video is renamed in place or falls through to download_video(), so it may block.
 def redownload_or_rename(job: Download) -> bool:
     log(f'Redoing metadata/filename for job {job.id} ({job.request_type})')
     append_log(job.id, 'Redownload/rename requested...')
@@ -1412,10 +1387,8 @@ def populate_missing_parent_metadata() -> None:
             checkpoint()
             log(f'populate_missing_parent_metadata: discovering metadata for parent {parent.id} ({parent.url})')
 
-            # Guarded per parent so one unreachable URL doesn't abandon the rest of the batch;
-            # a parent that fails simply keeps its missing title and is retried next cycle. Its
-            # status and error are not this repair's to change: a settled parent stays settled,
-            # and a failed lookup only logs WARN.
+            # Guarded per parent: a failed lookup logs WARN, keeps the missing title for the next
+            # cycle and never changes the parent's status or error.
             metadata = None
             try:
                 metadata = discover_metadata(parent, fail_on_error=False, store_error=False)
@@ -1434,10 +1407,8 @@ def populate_missing_parent_metadata() -> None:
 #               PARENT STATUS AGGREGATION
 # =======================================================
 
-# Settle a child's parent now that the child has stopped (jobstate.settle_parent), in its own
-# session, marking the parent finished once none of its children have work left. update_job()
-# calls it for every terminal status. Returns True once the parent has settled into a terminal
-# state with nothing in flight.
+# Settle a stopped child's parent in its own session (jobstate.settle_parent); update_job() calls
+# it for every terminal status. True once the parent is terminal with nothing in flight.
 def finalize_parent_if_done(child_job_id: int) -> bool:
     with Session() as db:
         child = db.get(Download, child_job_id)
@@ -1490,11 +1461,9 @@ def compute_and_persist_parent_progress(parent_id: int) -> None:
 #            PLAYLIST AND CHANNEL EXPANSION
 # =======================================================
 
-# Scan a playlist or channel URL for the video IDs it contains, without downloading anything;
-# `playlist_items` is passed to yt-dlp's --playlist-items when given. Returns (ids, error_message),
-# at most one of them meaningful: the ids are video ids only, once each, in listing order. Output
-# with lines but no video id among them is an error; no output at all is an empty listing.
-# Dropped lines are logged in one WARN.
+# List a playlist or channel URL's video ids, unique and in order, without downloading anything.
+# Returns (ids, error_message); output with no video id is an error, no output an empty listing.
+# `playlist_items` goes to --playlist-items; dropped lines are logged in one WARN.
 def scan_video_ids(
     url: str, playlist_items: Optional[str] = None,
 ) -> tuple[list[str], Optional[str]]:
@@ -1520,10 +1489,8 @@ def scan_video_ids(
     except subprocess.CalledProcessError as exc:
         return [], exc.stderr or str(exc)
 
-    # Normalized so they match stored youtube_id values. A listing can carry ids that are no
-    # video's, such as a playlist's or a channel's, and yt-dlp prints NA for an entry with no id;
-    # recorded as videos, each would become a row. A video listed twice is kept once, or it would
-    # get two rows.
+    # Normalized to match stored youtube_id values. Playlist or channel ids, yt-dlp's NA and
+    # duplicates are dropped, since each would otherwise become a row.
     ids = []
     seen = set()
     rejected = []
@@ -1659,10 +1626,8 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
             db.commit()
             return 0
 
-        # Every row for these videos in one query, split into two sets: already a child of this
-        # parent (skip it), and present anywhere else (adopt rather than download a second copy).
-        # One query, because a per-video lookup makes a 500-video playlist 500 round trips. Oldest
-        # first, so "the first" row of a video below is a defined one.
+        # One query, not 500 round trips for a 500-video playlist: rows already under this parent
+        # are skipped, rows elsewhere are adopted. Oldest first, so a video's "first" row is fixed.
         matches = (
             db.query(Download)
             .filter(Download.youtube_id.in_(video_ids))
@@ -1813,11 +1778,9 @@ def create_child_jobs(parent: Download, video_ids: Iterable[str]) -> int:
     return added
 
 
-# Hands out episode numbers in one pass over a playlist's scan. A video that already holds a number
-# in the playlist gets it again, its firmest (see number_rank), so one video is one episode. Any
-# other video takes its scan position, or, when another video's row holds that position, the
-# number after the highest held. Every number handed out counts as held from then on, so two
-# videos numbered in one pass never share one.
+# Hands out episode numbers in one pass over a playlist scan. A video keeps its firmest held number
+# (see number_rank); others take their scan position, or the number after the highest held if
+# taken. Numbers handed out count as held, so two videos in one pass never share one.
 class PlaylistNumbering:
     # Reads which videos hold which numbers in playlist `playlist_id`, rows of any parent
     # included, in one query.
@@ -1854,10 +1817,9 @@ class PlaylistNumbering:
         return index
 
 
-# Create download jobs for a subscription, skipping videos that already have a row. queue=False
-# still creates them, as SKIPPED_STATUS, so a later scan cannot mistake them for new, and
-# requeue_skipped queues the listed videos' unparented SKIPPED_STATUS rows again. A playlist
-# subscription numbers its rows by scan position, existing rows still without a number included.
+# Create jobs for a subscription's new videos; queue=False creates them as SKIPPED_STATUS so a
+# later scan sees them as known. requeue_skipped requeues listed unparented SKIPPED_STATUS rows.
+# A playlist numbers its rows by scan position, existing unnumbered rows included.
 def create_download_jobs_for_subscription(
     db, subscription: Subscription, video_ids: Iterable[str], queue: bool = True,
     requeue_skipped: bool = False,
@@ -1875,10 +1837,9 @@ def create_download_jobs_for_subscription(
         if row.youtube_id:
             existing_by_id.setdefault(row.youtube_id, []).append(row)
 
-    # A channel scan lists newest first, so its rows are created oldest first, and the worker
-    # downloads them in that order: in upload order through the uploads playlist, or within each
-    # kind, Shorts first, when a channel's root URL was read instead (see scan_subscription). A
-    # playlist keeps scan order, the playlist's own, and numbers each video by its scan position.
+    # A channel scan lists newest first, so rows are created and downloaded oldest first (per kind,
+    # Shorts first, when read through the root URL; see scan_subscription). A playlist keeps its
+    # own order and numbers each video by scan position.
     scan = list(enumerate(video_ids, start=1))
     if group_by_channel:
         scan.reverse()
@@ -1996,14 +1957,11 @@ def auto_retry_delay(attempts: int) -> timedelta:
     return timedelta(seconds=min(RETRY_INTERVAL_SECONDS * 2 ** attempts, RETRY_BACKOFF_MAX_SECONDS))
 
 
-# Automatically retry failed videos. Genuine failures only, never an explicit user cancel, unlike
-# the manual Retry button: a hierarchy whose top row is cancelled or has a cancel pending is
-# skipped whole, and so is a video with a cancel pending. Each video keeps its own count and next
-# retry time on its row, so a restart keeps the schedule: each wait doubles, and after
-# MAX_AUTO_RETRIES the video is given up on with an error that says so, one ERROR line for the
-# pass, and its staging leftovers removed. A video that stopped without failing gets its count
-# back. Rows are written only when they change, since every write moves updated_at and refreshes
-# open dashboards.
+# Retry failed videos with doubling waits; a cancel, pending or done, on a video or its top row is
+# never retried. Count and next time live on the row, so a restart keeps the schedule.
+# After MAX_AUTO_RETRIES a video is given up: error set, one ERROR line per pass, staging cleaned.
+# A video that stopped without failing gets its count back. Rows are written only when they
+# change, since every write moves updated_at and refreshes open dashboards.
 def retry_failed_jobs() -> None:
     now = utcnow()
     given_up: list[Download] = []
@@ -2018,10 +1976,8 @@ def retry_failed_jobs() -> None:
             stopped.auto_retry_attempts = 0
             stopped.next_auto_retry_at = None
 
-        # A parent qualifies on its own stored 'failed' status or on any child's, since the
-        # parent's stored status may not have caught up yet -- see resolve_parent_status. A
-        # cancelled one does not: its children's failures are no reason to restart what the user
-        # stopped.
+        # A parent qualifies on its own 'failed' status or any child's, which may be ahead of it
+        # (see resolve_parent_status). A cancelled parent never does: the user stopped it.
         candidates = (
             db.query(Download)
             .filter(
@@ -2043,13 +1999,10 @@ def retry_failed_jobs() -> None:
 
         deferred = 0
 
-        # One row of a hierarchy, as apply_status_update_to_hierarchy hands it over; returns
-        # whether it was reset. A playlist or channel row is reset as before, once one of its
-        # videos was. A video is reset when its next time has come, with its count raised and
-        # its next time set, and given up on once it has had MAX_AUTO_RETRIES and the last wait
-        # has passed. Only 'failed' is passed, never 'cancelled': an explicit cancel must not be
-        # undone by an automatic retry, nor one still pending on a video that failed before the
-        # worker acted on it.
+        # Reset one row from apply_status_update_to_hierarchy; returns whether it was reset. A
+        # parent resets once one of its videos did; a video resets when due, raising its count,
+        # and is given up after MAX_AUTO_RETRIES and the last wait. Only 'failed' is passed: an
+        # automatic retry must never undo a cancel, including one still pending on a failed video.
         def retry_one(target: Download) -> bool:
             nonlocal deferred
             if target.cancel_requested:
@@ -2129,10 +2082,8 @@ def clear_subscription_failures(subscription_id: int) -> None:
     _subscription_failures.pop(subscription_id, None)
 
 
-# How many of a channel's newest uploads a check reads once the subscription has its baseline,
-# through yt-dlp's --playlist-items: the newest this many of the uploads playlist, or, read through
-# the channel URL, up to this many of each kind. A first scan and every playlist scan read the
-# whole listing.
+# How many newest uploads a channel check reads after its baseline, via --playlist-items (per kind
+# when read through the channel URL). A first scan and every playlist scan read the whole listing.
 PERIODIC_CHANNEL_SCAN_LIMIT = 50
 
 # A YouTube channel id; its uploads playlist id is the same with UU in place of UC.
@@ -2178,11 +2129,9 @@ def is_channel_root_url(url: str) -> bool:
     return on_youtube and CHANNEL_ROOT_PATH.fullmatch(parts.path) is not None
 
 
-# Scan what `subscription` watches. A resolved subscription to a channel's root URL is read through
-# the channel's uploads playlist, the same uploads in one listing in upload order, and through its
-# own URL, kind by kind, when that scan fails. Anything else, a subscription to one tab included, is
-# read through its own URL. Returns (ids, error) as scan_video_ids does, and the URL read; when both
-# scans fail, the error names both reasons, so the check counts one failure.
+# Scan what `subscription` watches: a resolved channel root URL through its uploads playlist, else
+# through its own URL kind by kind; anything else through its own URL. Returns (ids, error, URL
+# read); when both scans fail, the error names both reasons so the check counts one failure.
 def scan_subscription(
     db, subscription: Subscription, playlist_items: Optional[str] = None,
 ) -> tuple[list[str], Optional[str], str]:
@@ -2221,11 +2170,9 @@ def scan_subscription(
     return video_ids, None, subscription.url
 
 
-# Scan every enabled subscription for new videos. Only a scan that succeeded stamps last_checked,
-# in the commit that records its rows, and only while the subscription still holds the
-# last_checked and backfill_existing the check read; a failed resolve or scan counts towards the
-# subscription's run of failures (see record_subscription_failure()). No yt-dlp call runs in a
-# write transaction.
+# Scan every enabled subscription for new videos. A successful scan stamps last_checked with its
+# rows, if the row is unchanged since read; a failure goes to record_subscription_failure().
+# No yt-dlp call runs in a write transaction.
 def check_subscriptions() -> None:
     log('Checking subscriptions')
 
@@ -2254,10 +2201,8 @@ def check_subscriptions() -> None:
                     warn(f'Subscription {subscription.id}: refusing unsupported URL {subscription.url!r}')
                     continue
 
-                # An unresolved subscription has both ids unset, leaving every video it creates
-                # with no channel or playlist. Retried every scan until it succeeds once, and
-                # committed at once: held open across the scan below, the write lock would fail
-                # the web app's writes with 'database is locked' for as long as yt-dlp runs.
+                # Resolved every scan until it succeeds, and committed at once: a write lock held
+                # across the scan fails the web app's writes with 'database is locked'.
                 if subscription.channel_id is None and subscription.playlist_id is None:
                     if not resolve_subscription_target(db, subscription):
                         db.rollback()
@@ -2273,11 +2218,9 @@ def check_subscriptions() -> None:
                 limited = subscription.subscription_type == 'channel' and not is_first_scan
                 playlist_items = f'1:{PERIODIC_CHANNEL_SCAN_LIMIT}' if limited else None
                 video_ids, error, scan_url = scan_subscription(db, subscription, playlist_items)
-                # A window whose every upload is new may hold only the newest of more uploads than
-                # fit it, so as many new ids as one window holds trigger a read of the whole
-                # listing. Read through the channel URL, each kind has its own window, and the
-                # output does not say which kind a line is. The baseline holds everything older,
-                # so whatever the whole listing has unrecorded is new too.
+                # A window full of new ids may have missed older new uploads, so it triggers a read
+                # of the whole listing (per-kind windows are unlabelled in the output). The baseline
+                # holds everything older, so whatever the full listing has unrecorded is new too.
                 if (
                     limited and not error
                     and count_unrecorded(db, video_ids) >= PERIODIC_CHANNEL_SCAN_LIMIT
@@ -2311,21 +2254,17 @@ def check_subscriptions() -> None:
                     # "Only new videos from now on" happens on the first scan: the current
                     # lineup is recorded as a baseline, never queued.
                     queue_now = backfill_existing or not is_first_scan
-                    # A first scan with backfill_existing set (a new "All existing" subscription,
-                    # or "Download existing now") also queues what a baseline skipped, in scan
-                    # order. The trade-off: a channel's back catalogue then takes its next free
-                    # numbers after the episodes already filed, in the order it is downloaded,
-                    # oldest first (see create_download_jobs_for_subscription).
+                    # A first scan with backfill_existing ("All existing", "Download existing now")
+                    # also queues what a baseline skipped; a channel's back catalogue then numbers
+                    # after the filed episodes (see create_download_jobs_for_subscription).
                     create_download_jobs_for_subscription(
                         db, subscription, video_ids, queue=queue_now,
                         requeue_skipped=is_first_scan and backfill_existing,
                     )
 
-                # Stamped in the same commit as the rows, and only if the row still holds what this
-                # check read: "Download existing now" committed by the web app during the scan
-                # wins, and the next check runs with it. The rows go with the stamp. Only the web
-                # app writes meanwhile, and it only ever empties last_checked, so whether it is
-                # set is all there is to compare.
+                # Rows and stamp commit together, only if the row is unchanged: a "Download existing
+                # now" from the web app during the scan wins. The web app only ever empties
+                # last_checked, so comparing whether it is set is enough.
                 unchanged_last_checked = (
                     Subscription.last_checked.is_(None) if is_first_scan
                     else Subscription.last_checked.isnot(None)
@@ -2404,10 +2343,9 @@ def backfill_playlist_indexes(parent_id: int, video_ids: Iterable[str]) -> None:
 INERT_STATUSES = frozenset({'deleted', 'cancelled', 'failed', SKIPPED_STATUS})
 
 
-# True when `filename` is a library file filed as channel episode `index`: plan_channel_video
-# writes "<show>/Season 01/<show> - S01E0005 - <title>", four digits where plan_episode writes two,
-# and a transcode keeps that name under another extension. A movie or another show's episode does
-# not match. The path is not checked on disk.
+# True when `filename` is filed as channel episode `index` by plan_channel_video's pattern
+# "<show>/Season 01/<show> - S01E0005 - <title>", under any extension. Four digits tell it from
+# plan_episode's two, so a movie or another show's episode never matches. Not checked on disk.
 def filed_under_number(filename: Optional[str], index: Optional[int]) -> bool:
     if not filename or index is None:
         return False
@@ -2426,10 +2364,9 @@ def number_rank(video: Download) -> int:
     return 2 if video.status in INERT_STATUSES else 1
 
 
-# True when resequence_channel_index must leave a channel row's number alone: the video is filed,
-# its library file carries that number while it awaits a refile (a parent's redownload clears
-# organized_at and leaves the file), the row is inert, or it has no upload_date to order it by. A
-# library file without the number, such as a movie this channel just adopted, keeps nothing.
+# True when resequence_channel_index must keep a row's number: the video is filed, its library file
+# carries the number while awaiting a refile, the row is inert, or it has no upload_date. A library
+# file without the number, such as a movie this channel just adopted, keeps nothing.
 def keeps_channel_index(video: Download) -> bool:
     if video.organized_at is not None:
         return True
@@ -2438,14 +2375,11 @@ def keeps_channel_index(video: Download) -> bool:
     return video.status in INERT_STATUSES or video.upload_date is None
 
 
-# Number a channel's grouped videos without changing one a filed video carries: rows that keep
-# their number (see keeps_channel_index) stay, and the rest follow in (upload_date, id) order from
-# one past the highest kept. A further row of a video that already has a number shares its firmest
-# one (see number_rank), so one video is one episode. The trade-off: a video older than filed ones
-# takes the next free number, numbers already duplicated on disk stay, and gaps can appear. A
-# number is handed out once, except the highest after its episode moves to a playlist's show,
-# which the next new video takes. Takes an open session and does not commit, so it composes with
-# the caller.
+# Number a channel's videos without changing a filed one's: kept numbers (see keeps_channel_index)
+# stay and the rest follow in (upload_date, id) order past the highest kept. Rows of one video share
+# its firmest number (see number_rank). Trade-off: an older video takes the next free number,
+# duplicates on disk stay and gaps can appear. A number is handed out once, except the highest
+# after its episode moves to a playlist's show. Uses the caller's open session; never commits.
 def resequence_channel_index(db, channel_id: int) -> None:
     # A row with a playlist is an episode of that playlist, and its index is its position there.
     videos = (
@@ -2581,11 +2515,9 @@ def is_watch_url_of(url: Optional[str], youtube_id: str) -> bool:
         return False
 
 
-# True when `row` sits where `subscription`'s scans file rows: grouped under a channel
-# subscription's channel, or in a playlist subscription's playlist. Download records no
-# subscription_id. A parented row counts too: a download of the same channel or playlist adopts the
-# rows a subscription recorded, and treating its own rows as the subscription's errs on the side of
-# a record-only re-baseline.
+# True when `row` sits where `subscription`'s scans file rows (Download records no subscription_id):
+# under its channel or in its playlist. A parented row counts too, which errs towards a record-only
+# re-baseline, since a download of the same channel or playlist adopts the subscription's rows.
 def subscription_owns_row(subscription: Subscription, row: Download) -> bool:
     if subscription.subscription_type == 'channel':
         return (
@@ -2596,10 +2528,9 @@ def subscription_owns_row(subscription: Subscription, row: Download) -> bool:
     return subscription.playlist_id is not None and row.playlist_id == subscription.playlist_id
 
 
-# Retire the video rows a scan built from a line that is no video id, such as a playlist's or a
-# channel's: each in RETIRABLE_STATUSES becomes 'deleted', and the parent of one is re-synced. A
-# subscription that owned one is re-baselined record-only: its next scan records the current
-# listing as skipped. Local database work only, for startup; at most one commit.
+# At startup, mark 'deleted' each RETIRABLE_STATUSES row a scan built from a non-video id, re-sync
+# its parent, and re-baseline its subscription record-only (next scan records all as skipped).
+# Local database work only; at most one commit.
 def retire_invalid_scan_rows() -> None:
     with Session() as db:
         # Columns alone first: the pattern runs in Python, and nearly every row passes it.
@@ -2760,11 +2691,9 @@ def discard_final_path_file(path_file: Path) -> None:
         warn(f'Could not remove {path_file}: {exc}')
 
 
-# The yt-dlp argv for one video, writing into staging under `output_template`. The sidecars it
-# requests (description, info.json, thumbnail) are what the organizer reads to build the NFO, and
-# the final media path goes to final_path_file(job_id). `url` becomes a positional argument, so
-# callers must screen it through is_safe_url() first. YouTube's JS challenges are solved locally:
-# deno runs the yt-dlp-ejs solver that yt-dlp[default] installs, so nothing comes from GitHub.
+# The yt-dlp argv for one video into staging; the sidecars feed the organizer's NFO and the final
+# path goes to final_path_file(job_id). Callers must screen `url` through is_safe_url() first.
+# deno runs the yt-dlp-ejs solver from yt-dlp[default] locally, so nothing comes from GitHub.
 def build_download_command(url: str, output_template: str, job_id: int) -> list[str]:
     command = [
         'yt-dlp',
@@ -2792,10 +2721,8 @@ def build_download_command(url: str, output_template: str, job_id: int) -> list[
     return command
 
 
-# Fold a yt-dlp .info.json sidecar into the job's database row, which is how the full yt-dlp
-# record survives for the organizer's NFO once the sidecar itself has been cleaned up. A sidecar
-# whose id is not the row's is refused with a WARN (False, nothing folded in): it would rewrite
-# the row's identity.
+# Fold a yt-dlp .info.json sidecar into the job row, so the organizer's NFO outlives the sidecar.
+# A sidecar with another id is refused with a WARN and False: it would rewrite the row's identity.
 def apply_metadata_from_info_file(job: Download, info_path: Optional[Path]) -> bool:
     if not info_path or not info_path.exists():
         return False
@@ -2870,11 +2797,9 @@ def remove_cancelled_leftovers(job: Download) -> None:
         warn(f'Job {job.id}: could not remove staging leftovers: {exc}')
 
 
-# Download one video job to completion, in the caller's thread: adopt an existing file if staging
-# already has one, fetch metadata, run yt-dlp while streaming its output into the job row, record
-# the file yt-dlp reports, then hand off to the organizer. Blocks for the whole download. Reports
-# outcome by writing the row's status rather than returning it, and swallows its own failures so
-# the worker loop survives.
+# Download one video job in the caller's thread, blocking, then hand off to the organizer.
+# Reports its outcome only through the row's status, and swallows its own failures so the worker
+# loop survives.
 def download_video(job: Download) -> None:
     log(f'Downloading: {job.url}')
 
@@ -3031,10 +2956,8 @@ def _request_shutdown(signum, _frame) -> None:
 COMPONENT_PACKAGES = ('yt-dlp', 'yt-dlp-ejs', 'bgutil-ytdlp-pot-provider')
 
 
-# The installed version of each COMPONENT_PACKAGES entry, then deno's path, then the version of
-# the SQLite library the sqlite3 module runs on, keyed by name in that order. Never raises: a
-# package that is not installed reads 'not installed', one whose metadata cannot be read
-# 'unknown', and a deno missing from PATH 'not found'.
+# Versions of each COMPONENT_PACKAGES entry, deno's path and the SQLite library, keyed by name in
+# that order. Never raises: values read 'not installed', 'unknown' or, for deno, 'not found'.
 def component_versions() -> dict[str, str]:
     versions = {}
     for package in COMPONENT_PACKAGES:
@@ -3070,13 +2993,10 @@ def snapshot_minute_of_day() -> int:
     return int(hours) * 60 + int(minutes)
 
 
-# The worker's daily database snapshot, a backup_database copy tagged 'daily'. Each day's copy is
-# due from the snapshot time until the next day's, so a job still running at that time delays it
-# rather than skipping it. run_if_due() writes it on the first call in that span, unless backups/
-# already holds a copy from within it, which keeps it to one per span across restarts; a worker
-# starting before the time on its first day, with no copy since the day before, writes one at once.
-# A failed attempt is tried again an hour later; the first failure in a span is an ERROR, since a
-# human has to see why, and the retries after it are WARN.
+# The daily backup_database copy tagged 'daily', due from the snapshot time until the next day's,
+# so a running job delays it rather than skipping it. run_if_due() skips a span backups/ already
+# holds a copy from; a first start before the time with no copy since yesterday writes one.
+# A failure retries an hour later: the first in a span is an ERROR, the retries are WARN.
 class DailySnapshot:
 
     # `minute_of_day`: minutes after midnight UTC from which each day's snapshot is due.

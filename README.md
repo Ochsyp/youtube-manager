@@ -4,6 +4,11 @@ Self-hosted YouTube downloader that files everything into a Jellyfin library. Qu
 videos, playlists and channels from a web UI, subscribe to channels, and get properly
 named movies and shows with NFO metadata and artwork.
 
+## Who it is for
+
+People who run their own media server at home and want YouTube content in it. It runs in
+Docker on a Linux host, amd64 or arm64, and one person looks after it.
+
 ## Features
 
 - Web UI to queue single videos, playlists and whole channels, with live progress and
@@ -18,18 +23,6 @@ named movies and shows with NFO metadata and artwork.
   hours, survive a restart and stop after 8 retries (about 17 hours); restart recovery,
   and cancel and stall handling
 
-## Architecture
-
-One image, two containers (the image's `web` and `worker` commands), one SQLite database
-in WAL mode.
-
-| Component | Role |
-|---|---|
-| `youtube_manager/app.py` (FastAPI + Jinja2, uvicorn on `:8080`) | Web UI and the polling endpoints it uses |
-| `youtube_manager/worker.py` | Job loop that drives yt-dlp, subscriptions and the organizer |
-| `youtube_manager/organizer.py` | Moves finished files into the library layout and writes metadata |
-| `bgutil-provider` sidecar | Mints the PO tokens YouTube requires |
-
 ## Requirements
 
 - Docker with Compose on Linux, on amd64 or arm64: the release image is built for both.
@@ -43,6 +36,55 @@ in WAL mode.
   and deno, which runs it, ship in the image, so nothing is fetched from GitHub at run
   time. Pulling the image needs `ghcr.io` and `pkg-containers.githubusercontent.com`.
 - Optional: Jellyfin for the library refresh, and an HTTP(S) proxy for egress
+
+## Deploying
+
+Run one web container and one worker from the same image, next to a bgutil PO-token
+provider. [compose.example.yaml](compose.example.yaml) is a complete example. It runs the
+release that `YTM_VERSION` names, and every Compose command for that file needs the
+variable, so keep it in an `.env` file beside the example:
+
+```sh
+echo 'YTM_VERSION=1.2.2' > .env
+docker compose -f compose.example.yaml up -d
+```
+
+- **Image.** Each release is published as `ghcr.io/ochsyp/youtube-manager:<version>`,
+  such as `X.Y.Z`, for amd64 and arm64, and `latest` moves with every release that is not
+  a prerelease. In production, pin the digest the release notes list as well, as in
+  `YTM_VERSION=X.Y.Z@sha256:<digest>`: a tag can be moved to another image, a digest
+  cannot.
+- **Commands.** The image has two: `web`, the default, serves the UI on port 8080, and
+  `worker` runs the download worker. Arguments after either go to its process, and any
+  other command runs as given. Every command runs as the `PUID`/`PGID` user, not root.
+  Both services use the SQLite database under `/app/data`, so run exactly one of each.
+- **Init.** tini is PID 1 in both containers. It passes `docker stop`'s SIGTERM on and
+  reaps orphaned yt-dlp and ffmpeg processes, so neither container needs `init: true`.
+- **Volumes.** `/app/data` holds the database and its backups (Backups and restore), so
+  back it up. `/downloads` is the staging area and `/media` the library. They may sit on
+  different disks: filing copies to a hidden temporary file, syncs it and renames it into
+  place.
+- **Reverse proxy.** Serve the UI through any reverse proxy and set `YTM_ALLOWED_HOSTS` to
+  the name it serves the UI under. The proxy must pass on the `Host` header the browser
+  sent, port included, or every POST gets 403. In nginx that is
+  `proxy_set_header Host $http_host;`, because `$host` drops the port; Caddy and Traefik
+  pass it on by default. Let the proxy admit only the clients and probes that should
+  reach the UI, and publish the container's port to nothing else.
+- **Stopping.** On SIGTERM the worker stops within a few seconds. A download or a yt-dlp
+  lookup ends with every process it started, and its job goes back in the queue. The
+  subscription check, the backfills and filing stop between two items, never inside a
+  copy. Give the worker a stop grace period of 60 seconds: filing a large file to a slow
+  disk can outlast Docker's default of 10, and a copy cut short is redone at the next
+  start.
+- **Updating.** Set `YTM_VERSION` to the new release, with its digest, and run
+  `docker compose -f compose.example.yaml up -d`. It pulls the image and recreates both
+  containers together. Read the release's CHANGELOG section first: a major release lists
+  what the host has to change. Going back to the previous release works the same way,
+  unless that section has a `Migration (cannot be rolled back)` part.
+- **Building from a checkout.** `docker build -t youtube-manager .` builds the image for
+  the local architecture, with `dev` as its version (`--build-arg YTM_VERSION=<version>`
+  sets another). It needs BuildKit, Docker's default builder since version 23. To run
+  such a build with the example, set both `image:` lines to `youtube-manager`.
 
 ## Configuration
 
@@ -95,62 +137,7 @@ Volumes: `/app/data` (SQLite and its backups), `/downloads` (staging) and `/medi
   verifying the server, and urllib3's `InsecureRequestWarning` is silenced
   process-wide.
 
-## Deploying
-
-Run one web container and one worker from the same image, next to a bgutil PO-token
-provider. [compose.example.yaml](compose.example.yaml) is a complete example. It runs the
-release that `YTM_VERSION` names, and every Compose command for that file needs the
-variable, so keep it in an `.env` file beside the example:
-
-```sh
-echo 'YTM_VERSION=1.2.2' > .env
-docker compose -f compose.example.yaml up -d
-```
-
-- **Image.** Each release is published as `ghcr.io/ochsyp/youtube-manager:<version>`,
-  such as `X.Y.Z`, for amd64 and arm64, and `latest` moves with every release that is not
-  a prerelease. In production, pin the digest the release notes list as well, as in
-  `YTM_VERSION=X.Y.Z@sha256:<digest>`: a tag can be moved to another image, a digest
-  cannot.
-- **Commands.** The image has two: `web`, the default, serves the UI on port 8080, and
-  `worker` runs the download worker. Arguments after either go to its process, and any
-  other command runs as given. Every command runs as the `PUID`/`PGID` user, not root.
-  Both services use the SQLite database under `/app/data`, so run exactly one of each.
-- **Init.** tini is PID 1 in both containers: it passes `docker stop`'s SIGTERM on and
-  reaps orphaned yt-dlp and ffmpeg processes, so neither container needs `init: true`.
-- **Volumes.** `/app/data` holds the database and its backups (Backups and restore), so
-  back it up. `/downloads` is the staging area and `/media` the library. They may sit on
-  different disks: filing copies to a hidden temporary file, syncs it and renames it into
-  place.
-- **Reverse proxy.** Serve the UI through any reverse proxy and set `YTM_ALLOWED_HOSTS` to
-  the name it serves the UI under. The proxy must pass on the `Host` header the browser
-  sent, port included, or every POST gets 403. In nginx that is
-  `proxy_set_header Host $http_host;`, because `$host` drops the port; Caddy and Traefik
-  pass it on by default. Let the proxy admit only the clients and probes that should
-  reach the UI, and publish the container's port to nothing else.
-- **Healthchecks.** The web UI answers `GET /health` without touching the database, and
-  the image includes curl to ask it. The worker touches `WORKER_HEARTBEAT_PATH` from
-  every long-running loop; treat it as dead once that file is more than 600 seconds old.
-- **Stopping.** On SIGTERM the worker stops within a few seconds. A download or a yt-dlp
-  lookup ends with every process it started, and its job goes back in the queue. The
-  subscription check, the backfills and filing stop between two items, never inside a
-  copy. Give the worker a stop grace period of 60 seconds: filing a large file to a slow
-  disk can outlast Docker's default of 10, and a copy cut short is redone at the next
-  start.
-- **Updating.** Set `YTM_VERSION` to the new release, with its digest, and run
-  `docker compose -f compose.example.yaml up -d`, which pulls the image and recreates
-  both containers together. Read the release's CHANGELOG section first: a major release
-  lists what the host has to change. Going back to the previous release works the same
-  way, unless that section has a `Migration (cannot be rolled back)` part.
-- **Startup log.** The web UI logs `YouTube Manager <version> web UI starting, SQLite
-  <version>`. The worker logs a `Components:` line with the release, the versions of
-  yt-dlp, yt-dlp-ejs and the bgutil plugin, deno's path and the SQLite version.
-- **Building from a checkout.** `docker build -t youtube-manager .` builds the image for
-  the local architecture, with `dev` as its version (`--build-arg YTM_VERSION=<version>`
-  sets another). It needs BuildKit, Docker's default builder since version 23. To run
-  such a build with the example, set both `image:` lines to `youtube-manager`.
-
-### Backups and restore
+## Backups and restore
 
 Both services copy the database into `data/backups`, beside `youtube.db`, with SQLite's
 backup API. Each copy is one consistent snapshot, taken while both services run, and a
@@ -173,11 +160,11 @@ restore from these copies.
   each table's row count before and after. Every start needs free space for that copy:
   if it cannot be written, the web UI does not start and logs an ERROR, and the worker
   exits with status 1 after waiting 300 seconds, so a restart policy brings it back.
-- **Older releases.** From this release on, a release runs on a newer schema that only
-  adds to its own, and logs a warning. On a schema from a later major release, both
-  services log an ERROR and exit, and keep restarting that way: run that release, or
-  restore a copy from before it. Earlier releases ignore the schema version, so never
-  run one on a database a major release has migrated.
+- **Older releases.** Releases from 1.1.0 on run on a newer schema that only adds to
+  their own, and log a warning. On a schema from a later major release, both services
+  log an ERROR and exit, and keep restarting that way: run that release, or restore a
+  copy from before it. Releases before 1.1.0 ignore the schema version, so never run one
+  on a database a major release has migrated.
 - **Restoring.** Stop both containers. Move `youtube.db` and every `youtube.db-*` file
   beside it (`-wal`, `-shm`, `-journal`) together into a new directory, so the current
   state can still be recovered and no journal is left to meet the snapshot. Copy the
@@ -197,7 +184,16 @@ restore from these copies.
   the migration: every table the database had keeps its count. No output means that
   release has no schema change for this database.
 
-## Running tests
+## Checking that it works
+
+- **Startup log.** The web UI logs `YouTube Manager <version> web UI starting, SQLite
+  <version>`. The worker logs a `Components:` line with the release, the versions of
+  yt-dlp, yt-dlp-ejs and the bgutil plugin, deno's path and the SQLite version.
+- **Healthchecks.** The web UI answers `GET /health` without touching the database, and
+  the image includes curl to ask it. The worker touches `WORKER_HEARTBEAT_PATH` from
+  every long-running loop; treat it as dead once that file is more than 600 seconds old.
+
+### Running tests
 
 From the repository root, with [uv](https://docs.astral.sh/uv/), which fetches a
 standalone CPython 3.13, so no system Python is needed (on Windows this also sidesteps
@@ -215,6 +211,33 @@ CI also builds the image for amd64 and arm64 and runs `scripts/smoke-test-image.
 each build. On Linux with Docker, `bash scripts/smoke-test-image.sh youtube-manager` runs
 the same checks on a local build (Deploying, Building from a checkout).
 
+## What can go wrong
+
+- **Low-quality downloads.** Without a reachable bgutil provider of the plugin's release,
+  yt-dlp gets no PO tokens and falls back to low-bitrate HLS (Requirements).
+- **Every request gets 400.** The `Host` is not in `YTM_ALLOWED_HOSTS`, or a client
+  reaches the published port directly (Security notes).
+- **Every POST gets 403.** The proxy drops the port from `Host`; in nginx use
+  `proxy_set_header Host $http_host;` (Deploying, Reverse proxy).
+- **Nothing is filed.** The `LIBRARY_SENTINEL` file is missing, which the worker logs at
+  ERROR at most once an hour (Configuration).
+- **A service exits at start.** The database has a schema from a later major release, or
+  the volume has no room for the pre-migration copy (Backups and restore).
+- **A stop is cut off.** Docker's default grace period of 10 seconds can end a large copy;
+  give the worker 60 (Deploying, Stopping).
+
+## Architecture
+
+One image, two containers (the image's `web` and `worker` commands), one SQLite database
+in WAL mode.
+
+| Component | Role |
+|---|---|
+| `youtube_manager/app.py` (FastAPI + Jinja2, uvicorn on `:8080`) | Web UI and the polling endpoints it uses |
+| `youtube_manager/worker.py` | Job loop that drives yt-dlp, subscriptions and the organizer |
+| `youtube_manager/organizer.py` | Moves finished files into the library layout and writes metadata |
+| `bgutil-provider` sidecar | Mints the PO tokens YouTube requires |
+
 ## Repository layout
 
 ```text
@@ -230,6 +253,7 @@ youtube_manager/    the application package
 tests/              pytest suite and its fixtures (conftest.py)
   schemas/          each schema version as a release created it, for the migration tests
 scripts/            release check and image smoke test, run by the workflows
+ci/test             the test stage CI runs: the pytest suite, failing on any skip
 data/               SQLite database and its backups (runtime, git-ignored)
 Dockerfile          image build: base images pinned by digest, deno, the pinned packages
 entrypoint.sh       drops root to PUID/PGID and maps the web and worker commands
@@ -238,7 +262,9 @@ requirements.in     direct runtime dependencies, unpinned
 requirements.txt    exact pins uv compiles from requirements.in; the image installs these
 requirements-dev.txt  test-only dependencies (pytest, httpx)
 pytest.ini          pytest settings and the posix marker
+VERSION             the current release
 .github/workflows/  CI (tests, image build and smoke test), release and secret scan
+.github/standard/   the repository standard's tools and tests (copies; never edited here)
 .github/            Dependabot and the pull request template
 .githooks/          hooks that keep commits and pushes off main
 CHANGELOG.md        changes, newest first
@@ -248,7 +274,7 @@ SECURITY.md         security policy
 
 ## Contributing
 
-Changes go through feature branches and pull requests; [CONTRIBUTING.md](CONTRIBUTING.md)
+Changes go through feature branches and pull requests. [CONTRIBUTING.md](CONTRIBUTING.md)
 describes the workflow, and [CHANGELOG.md](CHANGELOG.md) lists what changed.
 
 ## License

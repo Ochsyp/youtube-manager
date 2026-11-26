@@ -1,12 +1,11 @@
 # -------------------------------------------------------
 # Organizer
 #
-# Organizer for the YouTube Manager: files completed downloads out of the flat DOWNLOAD_PATH into
-# a Jellyfin library layout. Playlist-linked and channel-grouped videos become episodes of a
-# per-playlist/per-channel show; everything else becomes a movie. Naming follows Sonarr/Radarr
-# conventions plus a [{video_id}] collision guard. Safe to re-run: organized_at, or a destination
-# file that already exists, means already-organized, unless no other row uses it and its size
-# differs.
+# Files completed downloads from the flat DOWNLOAD_PATH into a Jellyfin library layout.
+# Playlist-linked and channel-grouped videos become episodes of a per-playlist/per-channel show,
+# everything else a movie. Names follow Sonarr/Radarr conventions plus a [{video_id}] collision
+# guard. Safe to re-run: organized_at, or an existing destination file, means already organized,
+# unless no other row uses it and its size differs.
 # -------------------------------------------------------
 
 import errno
@@ -263,10 +262,9 @@ def append_id_tag(base_name: str, youtube_id: Optional[str]) -> str:
     return base_name[:MAX_NAME_LENGTH - len(tag)].rstrip(' .') + tag
 
 
-# The tag that makes one video's filename unique. The row id stands in when the video has no
-# YouTube id: untagged, every untitled video plans the same destination, and execute_plan() reads
-# an existing destination as this video already filed -- so the second one to organize adopts the
-# first one's file and discards its own download. The id is stable, so re-runs plan the same path.
+# The tag that makes one video's filename unique; the row id stands in for a missing YouTube id.
+# Untagged, untitled videos would share a destination, and execute_plan() would let the second adopt
+# the first's file and discard its own download. The id is stable, so re-runs plan the same path.
 def video_id_tag(job: Download) -> str:
     return str(job.youtube_id) if job.youtube_id else f'job-{job.id}'
 
@@ -342,10 +340,9 @@ def same_filesystem(src: Path, dest: Path) -> bool:
     return src.stat().st_dev == dest.parent.stat().st_dev
 
 
-# Move `src` over `dest` so that one complete copy exists at every moment. On one filesystem that is
-# a rename. Across two -- staging and the library are separate disks, so this is the normal case --
-# a synced copy is renamed into place before `src` is unlinked. Raises on failure with `src` intact
-# and no temp left. `dest`'s folder must already exist.
+# Move `src` over `dest` so one complete copy exists at every moment: a rename on one filesystem,
+# else (the normal case: staging and the library are separate disks) a synced copy renamed into
+# place before `src` is unlinked. Raises with `src` intact, no temp left. Needs `dest`'s folder.
 def safe_move(src: Path, dest: Path) -> None:
     if same_filesystem(src, dest):
         try:
@@ -619,10 +616,9 @@ def write_capped_body(response: requests.Response, fh: BinaryIO) -> None:
         fh.write(chunk)
 
 
-# Download an image into `dest`. Best-effort by design: artwork is never worth failing an
-# organize over, so a failure is logged at WARN and reported rather than raised. Only
-# is_allowed_image_url() hosts are fetched, a redirect counts as a failure, and the body must be
-# image/* within MAX_IMAGE_BYTES; it is written atomically, so a failure leaves `dest` untouched.
+# Download an image into `dest`. Best-effort: artwork is never worth failing an organize over, so a
+# failure is logged at WARN and reported, not raised. Only is_allowed_image_url() hosts, no
+# redirects, image/* within MAX_IMAGE_BYTES; the atomic write leaves `dest` untouched on failure.
 def download_image(url: str, dest: Path, description: str) -> bool:
     if not is_allowed_image_url(url):
         warn(f'Refusing to download {description} from {url}: not https on a YouTube image host')
@@ -786,10 +782,9 @@ class OrganizePlan(NamedTuple):
     channel: Optional[Channel] = None
 
 
-# The show folder a playlist's episodes belong in. It nests under the channel's own folder only
-# while a channel subscription exists, not merely when the channel is known -- so subscribing or
-# unsubscribing changes the answer for a playlist already on disk, which relocate_misfiled_shows()
-# is what acts on. Both callers must agree, or a relocation would run on every scan.
+# The show folder for a playlist's episodes. It nests under the channel's folder only while a
+# channel subscription exists, so (un)subscribing moves playlists already on disk, which
+# relocate_misfiled_shows() acts on. Both callers must agree, or a relocation would run every scan.
 def playlist_show_dir(db, playlist: Playlist) -> Path:
     folder_name = get_or_assign_folder_name(db, playlist)
 
@@ -1015,11 +1010,9 @@ def remove_exclusive_folder(job: Download, folder: Path) -> bool:
         return False
 
 
-# True when a row other than `job` still points at `path`. Two rows share a file whenever the same
-# video is requested twice -- standalone and again inside a playlist -- because execute_plan() has
-# the second one adopt the file already at the destination instead of storing a copy.
-# Queries through `db`, else the session `job` is attached to; with neither it fails closed and
-# answers True, so no delete or overwrite proceeds unchecked.
+# True when a row other than `job` still points at `path`, as when one video is requested twice and
+# execute_plan() has the second adopt the first's file. Queries through `db`, else `job`'s session;
+# with neither it fails closed and answers True, so no delete or overwrite proceeds unchecked.
 def file_claimed_by_another_row(job: Download, path: Path, db=None) -> bool:
     if db is None:
         db = object_session(job)
@@ -1055,10 +1048,8 @@ def remove_downloaded_files(job: Download) -> None:
         log(f'Job {job.id}: keeping {video_path}, another download still points at it')
         return
 
-    # The video is gone, so the sidecars are gone too. The NFO is the only one that matters, and it
-    # is written only when the video is filed, so a missing NFO is not an error. The thumbnail is the
-    # only other sidecar that matters, and it is re-fetched if missing, so a missing thumbnail is not
-    # an error either.
+    # The video is gone, so its sidecars go too. A missing NFO or thumbnail is not an error: the NFO
+    # is written only when the video is filed, and the thumbnail is re-fetched if missing.
     sidecars = [video_path]
     for suffix in ('.nfo', '-thumb.jpg', '.jpg', '.info.json', '.description'):
         sidecar = find_sidecar(video_path, suffix)
@@ -1079,10 +1070,10 @@ def remove_downloaded_files(job: Download) -> None:
 STAGING_SIDECAR_SUFFIXES = ('.info.json', '.description', '.jpg', '.jpeg', '.png', '.webp')
 
 
-# Delete what a stopped download of `job` left in staging: every file under STAGING_TEMP carrying
-# its '[<id>]' tag, plus that id's partials, format fragments and sidecars in any staging folder
-# holding no finished media for it. Opens its own read-only session. Does nothing for a row
-# without a valid id, or while another active row shares the id and may still resume the files.
+# Delete what a stopped download of `job` left in staging: files under STAGING_TEMP tagged '[<id>]',
+# plus that id's partials, format fragments and sidecars in staging folders without finished media
+# for it. Opens its own read-only session. Does nothing without a valid id, or while another active
+# row shares the id and may still resume the files.
 def remove_staging_leftovers(job: Download) -> None:
     with Session() as db:
         # The row, not `job`: the worker's copy predates the metadata lookup that sets the id.
@@ -1163,10 +1154,9 @@ def remove_stale_partials(job: Download, plan: OrganizePlan) -> None:
         discard_file(job, partial_path(dest), 'stale partial copy')
 
 
-# Carry out a plan: move the video and its thumbnail into the library, write the NFO, discard the
-# sidecars it supersedes, and record the result on the job. force_nfo rewrites an existing NFO
-# instead of only a missing one; set only for a job the user targeted, never for the routine scan,
-# which must not clobber a manual Jellyfin metadata edit.
+# Carry out a plan: move the video and thumbnail into the library, write the NFO, drop superseded
+# sidecars, and record the result on the job. force_nfo rewrites an existing NFO; only a job the
+# user targeted sets it, never the routine scan: that must not clobber a manual Jellyfin edit.
 def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: dict, dry_run: bool, force_nfo: bool = False) -> bool:
     # Both sidecar conventions are checked -- yt-dlp's for a video fresh from staging, this
     # module's for one being re-filed -- so re-organizing leaves nothing at the old location.
@@ -1182,10 +1172,9 @@ def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: 
     if not dry_run:
         remove_stale_partials(job, plan)
 
-    # An existing destination means a previous run already filed this video; clean up whatever
-    # is still sitting in the staging directory and record it as organized. A source whose size
-    # differs is the exception: it replaces a destination no other row claims (most likely one an
-    # interrupted move truncated), and is kept beside one another row does claim.
+    # An existing destination means a previous run filed this video: clean up staging and record it
+    # as organized. A source of differing size replaces a destination no other row claims (likely
+    # one an interrupted move truncated), and is kept beside one another row does claim.
     if plan.dest_video.exists():
         if dry_run:
             log(f'[dry-run] Job {job.id}: {plan.dest_video} already in place, would mark organized')
@@ -1336,11 +1325,9 @@ def organize_single_job(job_id: int, tick: Optional[Callable[[], bool]] = None) 
     return result
 
 
-# Ask Jellyfin to scan for library changes rather than wait on its schedule or its filesystem
-# watcher (unreliable across bind mounts), if it is configured. An unreachable Jellyfin is not an
-# organizing failure and logs WARN; a rejected token (401/403) fails every refresh until fixed, so
-# it logs ERROR. Any other error is raised to the caller. With a `tick`, a stop can cut the wait
-# for the answer short.
+# Ask Jellyfin, if configured, to scan now; its filesystem watcher is unreliable across bind mounts.
+# Unreachable logs WARN, not a failure; a rejected token (401/403) logs ERROR, as every refresh
+# fails until fixed. Other errors are raised. With a `tick`, a stop can cut the wait short.
 def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
     if not JELLYFIN_URL or not JELLYFIN_TOKEN:
         return
@@ -1375,11 +1362,10 @@ def post_jellyfin_refresh(url: str, token: str) -> requests.Response:
     )
 
 
-# Send the refresh on a daemon thread while this thread keeps asking `tick`. Returns the answer and
-# raises the request's error here, or logs a WARN and returns None once tick has answered False and
-# JELLYFIN_STOP_WAIT_SECONDS have passed. A daemon, because a blocked request cannot be interrupted
-# and must not keep the process alive at exit. The thread only makes the request: it logs nothing,
-# since writing to the log while Python shuts down can abort the process, and uses no database.
+# Send the refresh on a daemon thread while this thread asks `tick`. Returns the answer or raises
+# the request's error; once tick answers False and JELLYFIN_STOP_WAIT_SECONDS pass, logs WARN and
+# returns None. A daemon, as a blocked request cannot be interrupted and must not hold the process
+# at exit. The thread logs nothing (logging during shutdown can abort it) and uses no database.
 def post_jellyfin_refresh_until_stop(
     url: str, token: str, tick: Callable[[], bool],
 ) -> Optional[requests.Response]:
@@ -1474,10 +1460,9 @@ def repair_stale_filenames(db, dry_run: bool = False) -> int:
     return repaired
 
 
-# Send already-filed episodes back through the organizer when their show belongs somewhere else
-# now. Subscribing to a channel moves its playlists under the channel's folder and unsubscribing
-# moves them back out, but the main loop only looks at organized_at IS NULL, so episodes filed
-# before the change would stay behind and split one show across two folders.
+# Send already-filed episodes back through the organizer when their show now belongs elsewhere.
+# (Un)subscribing to a channel moves its playlists' folder, but the main loop only sees organized_at
+# IS NULL, so episodes filed earlier would stay behind and split one show in two.
 def relocate_misfiled_shows(db, dry_run: bool = False) -> int:
     jobs = (
         db.query(Download)
@@ -1571,11 +1556,10 @@ def repair_missing_thumbnails(db, dry_run: bool = False) -> int:
     return repaired
 
 
-# File every completed video job that isn't organized yet. Called periodically by the worker, and
-# once after each parent job finishes. Returns 0, touching nothing, while library_ready() refuses:
-# the jobs stay completed and unorganized for the first pass after the library is back. `tick`, if
-# given, is asked before each video; False ends the filing there, and the pass finishes as usual,
-# so the worker can stop between two videos and Jellyfin still hears about those already filed.
+# File every completed video job not yet organized; the worker calls it periodically and after each
+# parent job. Returns 0, touching nothing, while library_ready() refuses; the jobs wait for the next
+# pass. `tick`, if given, is asked before each video: False ends the filing there and the pass ends
+# as usual, so the worker can stop between videos and Jellyfin still hears about those filed.
 def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] = None) -> int:
     if not library_ready():
         return 0

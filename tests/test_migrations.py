@@ -163,10 +163,9 @@ def test_fresh_database_gets_current_user_version(empty_db):
     assert backup_files() == []
 
 
-# A database from before versions comes out at SCHEMA_VERSION with every ORM table and column,
-# every row and value it had, the defaults on the added NOT NULL columns and downloads.youtube_id
-# no longer unique. The log names the copy taken first, with each table's row count, and the row
-# counts after the migration.
+# A pre-versions database reaches SCHEMA_VERSION with every ORM table, column, row and value, the
+# added NOT NULL columns' defaults, and downloads.youtube_id no longer unique. The log names the
+# backup taken first with per-table row counts, and the row counts after the migration.
 def test_legacy_v0_database_migrates_and_preserves_rows(empty_db, caplog):
     caplog.set_level(logging.INFO)
     build_legacy_database(empty_db)
@@ -549,12 +548,9 @@ def test_v2_takes_inserts_without_the_new_columns(empty_db, tmp_path):
         assert stored == [(0, None)], path.name
 
 
-# A file as a 1.0.x release creates it, which is frozen version 1 at user_version 0 since no
-# release before schema versions set one, comes out with exactly the schema a new file gets, NOT
-# NULL included.
-# Migration 1 adds today's columns, so it has to add them as the ORM declares them, or step 2
-# finds them there and never adds its own. The row the file had reads the defaults of the added
-# columns, and the NOT NULL column refuses a NULL.
+# A 1.0.x file (frozen version 1 at user_version 0) comes out with exactly a new file's schema, NOT
+# NULL included. Migration 1 must add today's columns as the ORM declares them: step 2 then skips
+# them. The existing row reads the added columns' defaults, and the NOT NULL column refuses a NULL.
 def test_unversioned_release_file_upgrades_to_the_current_schema(empty_db, tmp_path):
     build_frozen_database(empty_db, 1, rows=((1, None, None, '2026-11-01 10:00:00.000000'),))
     set_stored_version(empty_db, 0)
@@ -583,10 +579,9 @@ def test_unversioned_release_file_upgrades_to_the_current_schema(empty_db, tmp_p
         connection.close()
 
 
-# A table from before versions that lacks a NOT NULL column with no default for its rows, here
-# playlists.title, still migrates. SQLite refuses ADD COLUMN NOT NULL with a NULL default on a
-# table with rows, which is why the playlist row is there, so such a column is added without
-# NOT NULL, as it always was, and the row is kept with no title.
+# A pre-versions table lacking a NOT NULL column with no default, here playlists.title, still
+# migrates. SQLite refuses ADD COLUMN NOT NULL with a NULL default on a table with rows (hence the
+# playlist row), so the column is added without NOT NULL and the row is kept with no title.
 def test_not_null_column_without_default_still_added_to_a_table_with_rows(empty_db):
     build_legacy_database(empty_db)
     connection = open_file(empty_db)

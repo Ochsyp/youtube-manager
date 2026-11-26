@@ -2,10 +2,9 @@
 # -------------------------------------------------------
 # Fake yt-dlp
 #
-# Stands in for yt-dlp in worker tests, so a download runs end to end with no network and no
-# video. Honours -P home:/temp:, -o and --print-to-file the way yt-dlp does, and answers
-# --get-filename and --dump-single-json. YTDLP_FAKE_MODE picks the outcome of a download, or of
-# any call for the modes that hang.
+# Stands in for yt-dlp in worker tests, so a download runs end to end with no network and no video.
+# Honours -P home:/temp:, -o and --print-to-file like yt-dlp, and answers --get-filename and
+# --dump-single-json. YTDLP_FAKE_MODE picks the outcome of a download, or of any call when it hangs.
 # -------------------------------------------------------
 
 import json
@@ -122,10 +121,9 @@ time.sleep(3600)
 '''
 
 
-# Start a child, as yt-dlp starts ffmpeg, write 'started' once both run, and sleep. On SIGTERM this
-# process waits for the child, then writes 'parent-stopped' and exits 143. The SIGTERM is not passed
-# on: the child stops only if the caller signals the whole process group, and then both markers
-# exist before the caller sees this process end.
+# Start a child, as yt-dlp starts ffmpeg, write 'started' once both run, and sleep. On SIGTERM, wait
+# for the child, write 'parent-stopped' and exit 143. SIGTERM is not passed on: the child stops only
+# on a process-group signal, and then both markers exist before the caller sees this process end.
 def hang_tree() -> None:
     marker_dir = os.environ['YTDLP_FAKE_MARKER_DIR']
     child = subprocess.Popen([sys.executable, '-c', CHILD_CODE, marker_dir])

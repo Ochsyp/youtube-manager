@@ -51,10 +51,9 @@ class FinishedProcess:
         return self.returncode
 
 
-# Run every 'yt-dlp' command, Popen and subprocess.run alike, as the fake under this interpreter,
-# so the worker's real argv reaches it on Windows too. The process is reaped instead of signalled,
-# since Windows has no killpg, and nothing is organized afterwards. Mode 'complete' unless a test
-# sets YTDLP_FAKE_MODE itself.
+# Run every 'yt-dlp' command, Popen and subprocess.run alike, as the fake under this interpreter, so
+# the real argv reaches it on Windows too. The process is reaped, not signalled (no killpg on
+# Windows), and nothing is organized. Mode 'complete' unless a test sets YTDLP_FAKE_MODE itself.
 @pytest.fixture
 def fake_ytdlp(monkeypatch: pytest.MonkeyPatch) -> None:
     real_popen = subprocess.Popen

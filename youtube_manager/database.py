@@ -93,12 +93,10 @@ def require_sqlite_url(url: str) -> None:
         )
 
 
-# Apply the per-connection settings to a connection as it opens. WAL lets the app read while the
-# worker writes. Under WAL, synchronous=NORMAL cannot corrupt the database and saves an fsync per
-# commit: a power cut or an OS crash can roll back only the last few commits, as if both processes
-# had stopped a moment earlier, and a crash of the app or its container loses none. A connection
-# left out of WAL keeps SQLite's default, FULL, as NORMAL is only safe under WAL. A failure is
-# logged at WARN and the connection is used as it is.
+# Apply the per-connection settings as a connection opens; on failure, log a WARN and go on.
+# WAL lets the app read while the worker writes. Under WAL, synchronous=NORMAL saves an fsync per
+# commit and cannot corrupt the file: a power cut or OS crash rolls back only the last few commits,
+# and an app or container crash loses none. Without WAL, FULL stays, as NORMAL is safe only there.
 def _configure_sqlite_connection(dbapi_connection, connection_record):
     try:
         cursor = dbapi_connection.cursor()
@@ -118,10 +116,9 @@ def _configure_sqlite_connection(dbapi_connection, connection_record):
         logging.warning('Could not configure the SQLite connection: %s', exc)
 
 
-# Build an engine for `url` that runs _configure_sqlite_connection on every connection it opens;
-# `url` must pass require_sqlite_url. Connects lazily, so nothing touches the database file until
-# the first query. The pool keeps its defaults: a SQLite file has no server connection that could
-# go stale, so it needs no pre-ping or recycling.
+# Build an engine for `url`, which must pass require_sqlite_url, that runs
+# _configure_sqlite_connection on every new connection. Nothing touches the file before the first
+# query. The pool keeps its defaults: a SQLite file has no server connection that can go stale.
 def _create_engine(url: str) -> Engine:
     require_sqlite_url(url)
     created = create_engine(
@@ -132,12 +129,11 @@ def _create_engine(url: str) -> Engine:
             # The driver sets the busy timeout as it connects, so the timeout already covers the
             # WAL switch in _configure_sqlite_connection.
             'timeout': BUSY_TIMEOUT_SECONDS,
-            # The driver's legacy transaction control, stated rather than defaulted: it begins a
-            # transaction only before an INSERT, UPDATE, DELETE or REPLACE, and runs DDL on its
-            # own. A session that only reads holds no snapshot open, which would keep
-            # checkpoints from emptying the WAL, and each of its queries sees the other process's
-            # latest commit. Python plans to change the default; a Python without this constant
-            # fails here, at import, rather than changing how the app's transactions behave.
+            # Legacy transaction control, stated because Python plans to change the default: a
+            # transaction begins only before an INSERT, UPDATE, DELETE or REPLACE, and DDL runs
+            # on its own. A read-only session then holds no snapshot that keeps checkpoints from
+            # emptying the WAL, and sees the other process's latest commit. A Python without
+            # this constant fails here, at import, rather than changing how transactions behave.
             'autocommit': sqlite3.LEGACY_TRANSACTION_CONTROL,
         },
     )
@@ -150,12 +146,11 @@ engine = _create_engine(DATABASE_URL)
 # =======================================================
 #                      ORM MODELS
 # =======================================================
-# The four tables and the relationships between them. Both processes write a Download. The worker
-# owns a video's in-flight states. The app sets request flags (cancel_requested), resets a row that
-# has stopped (Retry, Fetch Metadata, Add), cancels a queued or expanding row outright, and
-# settles or re-queues a playlist or channel row from its children (jobstate.settle_parent).
-# Neither the worker's status writes (worker.update_job) nor a settle overwrite a 'deleted' row;
-# only an explicit request queues one again.
+# The four tables and their relationships. The worker owns a video's in-flight states. The app
+# sets cancel_requested, resets a stopped row (Retry, Fetch Metadata, Add), cancels a queued or
+# expanding row outright, and settles or re-queues a parent from its children
+# (jobstate.settle_parent).
+# Neither worker.update_job nor a settle overwrites a 'deleted' row; only an explicit request does.
 
 Base = declarative_base()
 
@@ -206,10 +201,10 @@ class Playlist(Base):
     subscriptions = relationship('Subscription', back_populates='playlist')
 
 
-# A channel or playlist watched for new uploads. worker.check_subscriptions rescans every enabled
-# row on a schedule and queues whatever it has not recorded before, and a first scan with
-# backfill_existing set also the skipped rows it lists; channel_id/playlist_id stay empty until the
-# first scan resolves the URL to a Channel or Playlist row.
+# A channel or playlist watched for new uploads; worker.check_subscriptions rescans each enabled
+# row on a schedule and queues what it has not recorded. With backfill_existing set, a first scan
+# also queues the skipped rows it lists.
+# channel_id/playlist_id stay empty until the first scan resolves the URL to a Channel or Playlist.
 class Subscription(Base):
 
     __tablename__ = 'subscriptions'
@@ -260,11 +255,10 @@ class Download(Base):
     thumbnail = Column(String)
     description = Column(Text)
     upload_date = Column(String)
-    # Episode number within the show. In a playlist: the number the video already holds there,
-    # else its scan position, else the next past the highest held (see worker.PlaylistNumbering).
-    # In a channel: the next free number in upload-date order, never changed once filed (see
-    # worker.resequence_channel_index). None until one is assigned, and the organizer waits for it
-    # rather than guessing, so a video without an index stays unfiled.
+    # Episode number within the show; None until assigned, and until then the video stays unfiled.
+    # In a playlist: the number the video holds there, else its scan position, else the next past
+    # the highest held (worker.PlaylistNumbering). In a channel: the next free number in upload-date
+    # order, never changed once filed (worker.resequence_channel_index).
     playlist_index = Column(Integer)
     # Descriptive metadata captured from yt-dlp so the organizer can write a complete NFO
     # even after the .info.json sidecar has been cleaned up.
@@ -283,10 +277,10 @@ class Download(Base):
     organized_at = Column(DateTime)
     log = Column(Text)
     status = Column(String, nullable=False, default='queued')
-    # The app's request to cancel, set only on a row in progress. The app cancels a queued or
-    # expanding row outright; a row in flight keeps it until the worker acts on it, the UI
-    # meanwhile showing 'cancelling' (see jobstate.compute_effective_status), and a parent in
-    # flight with it set settles as 'cancelled' once no child is (jobstate.settle_parent).
+    # The app's request to cancel a row in flight; a queued or expanding row is cancelled outright.
+    # It stays until the worker acts; the UI shows 'cancelling' meanwhile (see
+    # jobstate.compute_effective_status). A parent in flight with it set settles as 'cancelled'
+    # once no child is (jobstate.settle_parent).
     cancel_requested = Column(Boolean, nullable=False, default=False)
     error = Column(Text)
     created_at = Column(DateTime, default=utcnow)
@@ -319,19 +313,18 @@ Index('idx_download_updated_at', Download.updated_at)
 # runs in one transaction with the version it reaches (initialize_database), and each is a no-op on
 # a database it finds already done, since it runs against a live file.
 
-# The schema version this release creates and migrates to. A database from before versions, or a
-# new file, reads 0. Versions in the same hundred are compatible: a step inside a hundred keeps
-# the release before it working on the migrated file, so it may add a nullable column, a column
-# with a DDL default (server_default; an ORM default= alone never reaches the DDL), a non-unique
-# index or a table, and fill in values that release reads the same way. Anything else -- a
-# dropped, renamed or retyped column, a NOT NULL column without a DDL default, a UNIQUE or CHECK
-# constraint -- takes the next hundred and ships in a major release (CONTRIBUTING, Schema changes).
+# The schema version this release creates and migrates to; a new or pre-version file reads 0.
+# Versions in the same hundred are compatible: a step inside a hundred keeps the release before it
+# working, so it may add a nullable column, a column with a DDL default (server_default; an ORM
+# default= alone never reaches the DDL), a non-unique index or a table, and fill in values that
+# release reads the same way. Anything else (a dropped, renamed or retyped column, a NOT NULL column
+# without a DDL default, a UNIQUE or CHECK constraint) takes the next hundred and ships in a major
+# release (CONTRIBUTING, Schema changes).
 SCHEMA_VERSION = 3
 
-# Copies kept of the database at one version before one migration, tagged
-# pre-v<new version>-from-v<old version>. A start that keeps failing takes one each time, and since
-# the tag names the version copied, a partly migrated file never pushes out the copy of the file
-# as it was before the upgrade.
+# Pre-migration copies kept per tag pre-v<new version>-from-v<old version>. A failing start takes
+# one each time; the tag names the version copied, so a partly migrated file never pushes out the
+# copy taken before the upgrade.
 PRE_MIGRATION_BACKUPS_KEPT = 3
 
 
@@ -415,10 +408,9 @@ def sqlite_literal(value) -> str:
     return str(value)
 
 
-# Render a column's default as a SQLite DEFAULT clause for ALTER TABLE ADD COLUMN. A DDL default
-# written as SQL text is used as written. A DDL default that is a SQL expression, such as
-# func.now(), raises ValueError: ADD COLUMN takes only a constant, so that column needs a step
-# written by hand.
+# Render a column's default as a SQLite DEFAULT clause for ALTER TABLE ADD COLUMN. A DDL default in
+# SQL text is used as written. One that is a SQL expression, such as func.now(), raises ValueError:
+# ADD COLUMN takes only a constant, so that column needs a step written by hand.
 def get_sqlite_column_default(column) -> str:
     server_default = getattr(column, 'server_default', None)
     if server_default is not None and getattr(server_default, 'arg', None) is not None:
@@ -480,10 +472,9 @@ def find_unique_youtube_id_index(conn) -> str | None:
     return None
 
 
-# Drop the legacy UNIQUE constraint on downloads.youtube_id through `conn`, preserving existing
-# rows, since one video may be a child of several playlists. A named index is dropped in place;
-# an sqlite_autoindex can only go by rebuilding the table. Runs inside the caller's transaction,
-# so a rebuild that fails partway leaves the original table as it was.
+# Drop the legacy UNIQUE constraint on downloads.youtube_id through `conn`, keeping the rows: one
+# video may be a child of several playlists. An sqlite_autoindex needs a table rebuild. Runs inside
+# the caller's transaction, so a rebuild that fails partway leaves the original table as it was.
 def relax_downloads_youtube_id_uniqueness(conn) -> None:
     # Nothing to migrate if the table has not been created yet.
     if not conn.execute(
@@ -549,7 +540,7 @@ def ensure_table_columns(conn) -> None:
             default_clause = get_sqlite_column_default(column)
             # NOT NULL where the ORM declares it, so the column comes out as a new file has it.
             # SQLite refuses that beside a NULL default on a table with rows, so a column whose
-            # type offers no default for its rows is still added without it, as it always was.
+            # type offers no default for its rows is added without NOT NULL.
             keeps_not_null = not column.nullable and not is_null_default(default_clause)
             not_null = ' NOT NULL' if keeps_not_null else ''
             conn.execute(text(
@@ -558,23 +549,21 @@ def ensure_table_columns(conn) -> None:
             ))
 
 
-# Migration 1: bring a database from before schema versions to version 1 through `conn`. It
-# creates any table the ORM declares that the file lacks, adds the columns the ORM has gained, then
-# drops the legacy UNIQUE constraint on downloads.youtube_id. The columns come first: the rebuild
-# copies only the columns both tables share, and a NOT NULL column's Python-side default never
-# reaches the DDL, so the copy would abort on "NOT NULL constraint failed". It reads today's ORM,
-# so a later step has to allow for columns, tables and indexes this one already created.
+# Migration 1, through `conn`, for a file from before schema versions: create missing tables, add
+# the columns the ORM has gained, then drop the legacy UNIQUE constraint on downloads.youtube_id.
+# Columns come first: the rebuild copies only shared columns, and a NOT NULL column's Python-side
+# default never reaches the DDL, so the copy would abort on "NOT NULL constraint failed". It reads
+# today's ORM, so a later step must allow for columns, tables and indexes this one created.
 def migrate_to_1(conn) -> None:
     Base.metadata.create_all(conn)
     ensure_table_columns(conn)
     relax_downloads_youtube_id_uniqueness(conn)
 
 
-# Migration 2: the auto-retry columns and the index for the dashboard's change check, through
-# `conn`. Each column is added only where it is missing, since migration 1 adds today's columns
-# to a database from before versions. Then every row gets an updated_at, so the change check can
-# read that one column: its completed_at, else its created_at, else 1 January 1970. The DDL is
-# written out rather than read from today's model, so later model changes cannot alter the step.
+# Migration 2, through `conn`: the auto-retry columns, where missing (migration 1 adds today's
+# columns), and the index for the dashboard's change check. Every row then gets an updated_at:
+# its completed_at, else created_at, else 1 January 1970, so the check reads one column. The DDL
+# is written out rather than read from the model, so later model changes cannot alter the step.
 def migrate_to_2(conn) -> None:
     columns = {row[1] for row in conn.execute(text('PRAGMA table_info(downloads)'))}
     if 'auto_retry_attempts' not in columns:
@@ -602,10 +591,9 @@ STEP_3_INDEXES = (
 )
 
 
-# Migration 3: the four downloads indexes, through `conn`, where the file lacks them. A database
-# from before versions whose youtube_id was never UNIQUE keeps its table through step 1, which
-# adds columns but no indexes, so it can reach version 2 without them. Only adds indexes, so the
-# release before it runs on the result.
+# Migration 3, through `conn`: the four downloads indexes, where missing. A pre-version table whose
+# youtube_id was never UNIQUE survives step 1, which adds no indexes, so it reaches version 2
+# without them. Only adds indexes, so the release before it runs on the result.
 def migrate_to_3(conn) -> None:
     for name, columns in STEP_3_INDEXES:
         conn.execute(text(f'CREATE INDEX IF NOT EXISTS {name} ON downloads ({columns})'))
@@ -672,15 +660,14 @@ def backup_taken_within(tag: str, start: datetime, end: datetime) -> bool:
     )
 
 
-# Copy the live database with SQLite's backup API to backups/youtube-<tag>-<UTC time>.db beside it,
-# the time being `now` or the current one, then delete all but the `keep` newest copies with that
-# tag, never the one just written. The copy is one consistent snapshot even while both processes
-# write, and it is left in rollback-journal mode, so it is a single self-contained file; a
-# restored copy goes back to WAL as the app opens it. It is written under a .tmp name and renamed
-# into place, so a file under the final name is always complete, and what an interrupted copy
-# left behind under that name, journal files included, is removed first. Returns the copy's path.
-# Raises ValueError for a bad tag or count, or a database in memory; any other failure is
-# re-raised once the partial copy is gone.
+# Copy the live database with SQLite's backup API to backups/youtube-<tag>-<UTC time>.db beside it
+# (time `now` or the current one), then delete all but the `keep` newest copies with that tag,
+# never the new one. The copy is a consistent snapshot while both processes write. It is left in
+# rollback-journal mode, a single file; a restored copy returns to WAL as the app opens it. It is
+# written as .tmp and renamed, so the final name is always complete; an interrupted copy's
+# leftovers, journal files included, are removed first. Returns the copy's path. Raises ValueError
+# for a bad tag or count, or a database in memory; any other failure is re-raised once the partial
+# copy is gone.
 def backup_database(tag: str, keep: int, now: datetime | None = None) -> Path:
     if not BACKUP_TAG.fullmatch(tag) or keep < 1:
         raise ValueError(f'A backup needs a tag like "daily" and a count of at least 1, not '
@@ -729,9 +716,8 @@ def _autocommit_connection():
 
 
 # Run the block in one BEGIN IMMEDIATE transaction on `conn`, an _autocommit_connection: committed
-# if the block returns, rolled back if it raises. IMMEDIATE takes the write lock before the first
-# statement, waiting for it as long as the busy timeout allows, so the block never stops halfway
-# on a lock another connection holds.
+# on return, rolled back on raise. IMMEDIATE takes the write lock up front, waiting up to the busy
+# timeout, so the block never stops halfway on a lock another connection holds.
 @contextmanager
 def _immediate_transaction(conn):
     conn.exec_driver_sql('BEGIN IMMEDIATE')
@@ -758,15 +744,14 @@ def _row_counts(conn) -> str:
     )
 
 
-# Create the schema, or bring the database's up to SCHEMA_VERSION. A file without tables gets the
-# ORM's tables and SCHEMA_VERSION in one transaction. An older schema is first copied with
-# backup_database, then moved up one MIGRATIONS step at a time, each step in one BEGIN IMMEDIATE
-# transaction with the version it reaches, so a failed step leaves the file at the last version
-# it completed. The copy, and each table's row count before and after, go to the log. A ladder
-# that ends short of SCHEMA_VERSION, for want of a step, is an ERROR and raises RuntimeError. A
-# newer schema is reported by check_newer_schema and left as it is, which for a later hundred
-# means SchemaTooNewError. Only the app process calls this, at startup; the worker waits in
-# wait_for_schema(), so two writers never race through the DDL.
+# Create the schema, or bring it up to SCHEMA_VERSION. A file without tables gets the ORM's tables
+# and SCHEMA_VERSION in one transaction. An older schema is copied with backup_database, then moved
+# up one MIGRATIONS step at a time, each in one BEGIN IMMEDIATE transaction with the version it
+# reaches, so a failed step leaves the last completed version. The copy and the row counts before
+# and after go to the log. A ladder short of SCHEMA_VERSION is an ERROR and raises RuntimeError.
+# A newer schema goes to check_newer_schema and stays as it is (SchemaTooNewError for a later
+# hundred). Only the app calls this, at startup; the worker waits in wait_for_schema(), so two
+# writers never race through the DDL.
 def initialize_database() -> None:
     with _autocommit_connection() as conn:
         version = read_schema_version(conn)
@@ -839,11 +824,10 @@ def is_schema_initialized() -> bool:
         return schema_relation(read_schema_version(conn)) in ('current', 'newer')
 
 
-# Block until this release can run on the database (is_schema_initialized) and return True. Only
-# the app creates and migrates the schema, so the worker can start against an empty or older file
-# and polls here until the app is done. Returns False once `timeout_seconds` pass first. A newer
-# schema is reported by check_newer_schema, so one from a later hundred raises SchemaTooNewError at
-# once instead of waiting out the timeout.
+# Block until this release can run on the database (is_schema_initialized) and return True, or
+# False once `timeout_seconds` pass. Only the app migrates, so the worker may start on an empty or
+# older file and polls here. A schema from a later hundred raises SchemaTooNewError at once
+# (check_newer_schema) instead of waiting out the timeout.
 def wait_for_schema(timeout_seconds: int | None = None) -> bool:
     deadline = None if timeout_seconds is None else time.time() + timeout_seconds
     reported_error = False

@@ -1,9 +1,8 @@
 # -------------------------------------------------------
 # Job-state vocabulary and aggregation
 #
-# Shared job-state vocabulary and progress/speed aggregation for the YouTube Manager.
-# app.py and worker.py both import from here, so the two processes can never disagree about
-# what status a job shows or settles into, how far along a parent is, or how fast it is going.
+# Shared by app.py and worker.py, so the two processes never disagree on the status a job shows
+# or settles into, how far along a parent is, or how fast it is going.
 # Nothing here opens a Session or commits: every function mutates the rows it is handed and
 # leaves the transaction to its caller, since SQLite admits only one writer at a time.
 # -------------------------------------------------------
@@ -27,21 +26,19 @@ ACTIVE_STATUSES = ('queued', 'metadata', 'redownload', 'expanding', 'downloading
 # the user removed the downloaded file; the row is marked rather than dropped, but is inert.
 TERMINAL_STATUSES = ('completed', 'failed', 'cancelled', 'deleted')
 
-# Recorded by a subscription's first scan when backfill_existing is off: marks a video as already
-# known so a later scan cannot mistake it for new, without queuing it. Queued only on request: by
-# a first scan with backfill_existing on ("Download existing now"), by a playlist or channel
-# download that adopts the row, by pasting its URL into Add, or by Fetch Metadata on it or on its
-# playlist or channel. Never set on a parent, and a parent left in flight with only such children
-# fails (settle_parent).
+# Recorded by a subscription's first scan when backfill_existing is off: marks a video as known,
+# without queuing it, so a later scan cannot take it for new. Queued only on request: a first scan
+# with backfill_existing on ("Download existing now"), a playlist or channel download that adopts
+# the row, its URL pasted into Add, or Fetch Metadata on it or on its playlist or channel. Never
+# set on a parent; a parent left in flight with only such children fails (settle_parent).
 SKIPPED_STATUS = 'skipped'
 
 # Statuses the worker will pick up from the queue and act on.
 WORKER_PICKUP_STATUSES = ('queued', 'metadata', 'expanding', 'redownload')
 
-# Statuses shown on the dashboard queue view and on the history view respectively; both exclude
-# 'deleted' and SKIPPED_STATUS, neither being a visible download. query_downloads() filters on
-# the *effective* status, so display-only values belong here too, or a job whose cancel the
-# worker has not acted on yet matches no list and vanishes from every view.
+# Statuses on the dashboard queue view and on the history view; neither shows 'deleted' or
+# SKIPPED_STATUS. query_downloads() filters on the *effective* status, so display-only values belong
+# here too, or a job with a cancel still pending matches no list and vanishes from every view.
 QUEUE_STATUSES = (
     'queued', 'metadata', 'redownload', 'expanding', 'downloading', 'failed', 'cancelled',
     'cancelling', 'cancel requested',
@@ -165,10 +162,9 @@ def format_speed_value(bytes_per_second: float) -> str:
 # =======================================================
 # The status a job displays as, which the stored one only sometimes matches.
 
-# Derive a parent's status from its children's outcomes, or None when there is nothing to derive
-# it from. The single definition of "is the parent done, and how did it end", shared by the worker
-# settling a parent row and by the UI rendering one. One failed child outranks any number of
-# completed ones, so a mostly-succeeded playlist reads 'failed' until every failure is cleared.
+# Derive a parent's status from its children, or None when there is nothing to derive it from.
+# The one definition of "is the parent done, and how did it end", for the worker and the UI alike.
+# One failed child outranks every completed one: a playlist reads 'failed' until none is left.
 def resolve_parent_status(job) -> Optional[str]:
     children = child_jobs(job)
     if not children:
@@ -240,12 +236,12 @@ def is_in_progress(job) -> bool:
     return compute_effective_status(job) in CANCELABLE_EFFECTIVE_STATUSES
 
 
-# Settle a parent's stored status from its children by resolve_parent_status()'s rule, as
-# compute_effective_status() shows it; both processes settle a parent through this one function.
-# A stored 'cancelled' or 'deleted' stands, a cancel pending on a parent in flight settles it as
+# Settle a parent's stored status by resolve_parent_status()'s rule, as compute_effective_status()
+# shows it; both processes use this.
+# A stored 'cancelled' or 'deleted' stands, a pending cancel on a parent in flight settles it as
 # 'cancelled' once nothing runs, and one left in flight with only skipped children fails. Mutates
-# the row in the caller's session and never commits. True once the parent has settled into a
-# terminal state with nothing in flight; False otherwise, and for a parent with no children yet.
+# the row in the caller's session and never commits. True once settled into a terminal state with
+# nothing in flight; False otherwise, and for a parent with no children yet.
 def settle_parent(parent) -> bool:
     children = child_jobs(parent)
     if not children:
@@ -299,10 +295,9 @@ def settle_parent(parent) -> bool:
     return False
 
 
-# Whether retrying this job would do anything. A retry cascades to each child individually (see
-# app.retry_job / apply_status_update_to_hierarchy), so a parent with children is retriable exactly
-# when a child is, whatever its own effective status: one whose children are all skipped or
-# finished has nothing a retry would reset.
+# Whether retrying this job would do anything. A retry cascades to each child (app.retry_job /
+# apply_status_update_to_hierarchy), so a parent with children is retriable exactly when a child
+# is, whatever its own status; with all children skipped or finished, a retry resets nothing.
 def is_retriable(job) -> bool:
     children = child_jobs(job)
     if children:
@@ -453,11 +448,10 @@ def restart_auto_retry(job) -> None:
     job.next_auto_retry_at = None
 
 
-# Reset one job so the worker picks it up again, if eligible under allowed_statuses: the manual
-# Retry button passes failed and cancelled alike, scheduled auto-retry only {'failed'} so it
-# never overrides an explicit cancel. A file already on disk routes to 'redownload', reusing the
-# file, since the metadata may be what failed: found by recorded name or '[<id>]' tag, or with
-# search_library=False by one stat of the recorded name, walking neither staging nor the library.
+# Reset one job so the worker picks it up again, if its status is in allowed_statuses: the Retry
+# button passes failed and cancelled, auto-retry only {'failed'} so it never overrides a cancel.
+# A file already on disk routes to 'redownload' and is reused, since the metadata may be what
+# failed. It is found by recorded name or '[<id>]' tag, or with search_library=False by one stat.
 def reset_job_for_retry(
     job, allowed_statuses=FAILED_OR_CANCELLED, search_library: bool = True,
 ) -> bool:

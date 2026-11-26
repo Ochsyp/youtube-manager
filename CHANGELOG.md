@@ -13,6 +13,9 @@ describes.
 - The repository standard's configuration arrives ahead of its adoption, with two privacy
   exemptions: the made-up example host name in the README and the tests, and the made-up user part
   of a test URL. ([#39](https://github.com/Ochsyp/youtube-manager/pull/39))
+- The README follows the writing rule's order, with new "Who it is for", "Checking that it works"
+  and "What can go wrong" sections, and comments in the code and tests are shorter. No code
+  changes. ([#42](https://github.com/Ochsyp/youtube-manager/pull/42))
 
 ## [1.2.2] - 2026-11-25
 

@@ -1,10 +1,9 @@
 # -------------------------------------------------------
 # Job state machine tests
 #
-# Pins the job-state transitions the web app and the worker share: how a parent settles once its
-# children stop, cancel against auto-retry, explicit requests queuing inert rows again, retry
-# routing, and refusing a redownload while a job runs or a worker write to a deleted row. Nothing
-# runs yt-dlp.
+# Pins the job-state transitions the web app and the worker share: a parent settling once its
+# children stop, cancel against auto-retry, explicit requests requeuing inert rows, retry routing,
+# and refusing a redownload of a running job or a worker write to a deleted row. No yt-dlp runs.
 # -------------------------------------------------------
 
 import logging

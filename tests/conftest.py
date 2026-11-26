@@ -31,9 +31,8 @@ def sqlite_url(path: Path) -> str:
 
 
 # Point YOUTUBE_DB_URI, DOWNLOAD_PATH, MEDIA_PATH, WORKER_HEARTBEAT_PATH and tempfile's directory
-# into a session temp root, and allow APP_HOST through YTM_ALLOWED_HOSTS, before collection imports
-# any project module: database.py builds its engine, media.py reads its paths and app.py reads its
-# hosts at import, and organizer copies MEDIA_PATH, so none of them sees a later change.
+# at a session temp root, and allow APP_HOST via YTM_ALLOWED_HOSTS, before any project import:
+# database.py, media.py, app.py and organizer read these at import and never see a later change.
 @pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
     global SESSION_ROOT

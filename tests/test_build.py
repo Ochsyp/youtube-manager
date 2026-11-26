@@ -1,10 +1,9 @@
 # -------------------------------------------------------
 # Image build tests
 #
-# Checks what the image build relies on, read from the files rather than a build: exact pins that
-# yt-dlp accepts, base images pinned by digest, a wheel-only --no-deps install pip check verifies,
-# tini with the web and worker commands, every call's yt-dlp arguments, the component versions the
-# worker logs and the example's provider release. CI builds and smoke-tests the image itself.
+# What the image build relies on, read from the files: exact pins yt-dlp accepts, digest-pinned base
+# images, a wheel-only --no-deps install pip check verifies, tini with the web and worker commands,
+# yt-dlp arguments, logged versions, the provider release. CI builds and smoke-tests the image.
 # -------------------------------------------------------
 
 import ast

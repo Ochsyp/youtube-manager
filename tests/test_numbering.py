@@ -1,11 +1,9 @@
 # -------------------------------------------------------
 # Episode numbering tests
 #
-# Pins how the worker numbers episodes and orders its queue: a channel's filed episodes keep their
-# number while new ones take the next free one, playlist rows take their scan position or the next
-# number past the highest held, one video keeps one number, a library file is refreshed rather
-# than downloaded again, and a channel backfill runs oldest first. Database only: nothing runs
-# yt-dlp.
+# Pins how the worker numbers episodes and orders its queue: filed episodes keep their number, new
+# ones take the next free one, playlist rows their scan position or the next past the highest, one
+# video keeps one number, a library file is refreshed, a backfill runs oldest first. No yt-dlp runs.
 # -------------------------------------------------------
 
 import json
@@ -291,10 +289,9 @@ def test_channel_backfill_files_each_video_under_its_own_number(db, channel_id):
     assert worker.get_next_job() is None
 
 
-# The startup resequence leaves every filed number as it is, numbers already duplicated on disk
-# included and organized_at alone keeping V2's, whose recorded path is gone. The unfiled dated
-# videos are numbered after the highest kept one, by upload_date: a number left over from the old
-# full resequence, V5's 9 on a staging file, counts for nothing. A second pass changes nothing.
+# The startup resequence keeps every filed number, duplicates on disk included, and V2's by
+# organized_at alone though its path is gone. Unfiled dated videos follow the highest kept number by
+# upload_date; V5's leftover 9 on a staging file counts for nothing. A second pass changes nothing.
 def test_resequence_never_renumbers_filed_videos(db, make_job, channel_id):
     filed = [
         filed_episode(make_job, channel_id, V1, 1, '20200103'),
@@ -418,10 +415,9 @@ def test_taken_position_gets_number_past_highest_held(db, make_job, channel_id, 
     assert (only_row(db, V1).playlist_index, only_row(db, V2).playlist_index) == (6, 2)
 
 
-# A video that already holds a number in the playlist keeps it for every further row, so one video
-# is one episode: the subscription's own row of V1, whose only other row is a playlist download's
-# child, takes that child's 7 although position 1 is free. Two rows of V2, whose position another
-# video holds, share the one number they get.
+# A video holding a number in the playlist keeps it for every further row, so one video is one
+# episode: the subscription's row of V1 takes its playlist-download child's 7 though position 1 is
+# free. Two rows of V2, whose position another video holds, share the one number they get.
 def test_video_keeps_the_number_it_holds_in_the_playlist(db, make_job, channel_id, playlist_id):
     subscription_id = make_subscription(db, channel_id, playlist_id)
     parent = playlist_parent(make_job, playlist_id)
@@ -456,10 +452,9 @@ def test_playlist_download_numbers_around_held_numbers(db, make_job, channel_id,
     assert {only_row(db, youtube_id).parent_id for youtube_id in (V1, V3, V4)} == {parent.id}
 
 
-# A library file not named as this channel's episode keeps nothing: a movie the channel adopted,
-# numbered 2 by an earlier pass while it awaits its refile, is renumbered with the unfiled videos
-# by upload date, behind an older one, instead of holding 2 for good. Neither a playlist episode's
-# two-digit name nor a movie whose title contains the pattern counts.
+# A library file not named as this channel's episode keeps nothing: an adopted movie numbered 2
+# while it awaits its refile is renumbered by upload date behind an older unfiled video. Neither a
+# playlist episode's two-digit name nor a movie title containing the pattern counts.
 @pytest.mark.parametrize('filed_as', [
     MEDIA_PATH / f'Video [{V3}]' / f'Video [{V3}].mp4',
     MEDIA_PATH / 'Test playlist' / 'Season 01' / f'Test playlist - S01E02 - Video [{V3}].mp4',
