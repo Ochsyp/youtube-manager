@@ -13,6 +13,9 @@ describes.
   checks; the compose example no longer sets `MEDIA_PATH` and `DOWNLOAD_PATH` to their defaults;
   and a wrapper, a dead import fallback and a repeated pytest flag are gone.
   ([#48](https://github.com/Ochsyp/youtube-manager/pull/48))
+- `release-prepare` writes the README's install command through `VERSION_COPY`, and
+  `standard-check` fails until it matches, so `tests/test_readme.py` is gone.
+  ([#46](https://github.com/Ochsyp/youtube-manager/pull/46))
 - yt-dlp takes its proxy from `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` instead of a `--proxy`
   the worker passed on, so hosts that `NO_PROXY` names, such as the bgutil provider, are reached
   directly. A host with a proxy sets `HTTPS_PROXY` as well. Every yt-dlp call puts `--` before its

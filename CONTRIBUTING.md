@@ -200,5 +200,5 @@ and the database.
   `compose.example.yaml` to the same release in that pull request; the tests fail until they
   match. A host's provider of the same major release keeps working, with a warning in the log.
 
-The release pull request also sets the README's install command to `YTM_VERSION=X.Y.Z`; a test
-fails until it does.
+`release-prepare` also sets the README's install command to `YTM_VERSION=X.Y.Z` (`VERSION_COPY`
+in `.github/standard.conf`), and `standard-check` fails until it matches.
