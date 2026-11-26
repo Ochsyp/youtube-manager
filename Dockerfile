@@ -25,10 +25,10 @@ COPY --from=deno /deno /usr/local/bin/deno
 
 WORKDIR /app
 
-# --no-deps installs exactly the pins, so a set missing a dependency fails
-# pip check here instead of pulling in an unpinned package; --only-binary
-# keeps unpinned build tools out by taking wheels only. pip check skips
-# extras, so tests/test_build.py checks the pins of yt-dlp's default extra.
+# --no-deps installs exactly the pins: a set missing a dependency fails pip
+# check here instead of pulling in an unpinned package. --only-binary takes
+# wheels only, which keeps unpinned build tools out. pip check skips extras,
+# so tests/test_build.py checks the pins of yt-dlp's default extra.
 COPY requirements.txt ./
 RUN pip install --no-deps --only-binary=:all: -r requirements.txt && pip check
 
@@ -45,10 +45,10 @@ EXPOSE 8080
 ARG YTM_VERSION=dev
 ENV YTM_VERSION=${YTM_VERSION}
 
-# The web UI and the worker share this image, differing only in the command:
+# The web UI and the worker share this image and differ only in the command.
 # entrypoint.sh maps `web` or `worker` to its process and execs it as
 # PUID/PGID, not root. tini, as PID 1, reaps the orphaned yt-dlp and ffmpeg
-# processes a Python PID 1 would leave as zombies; -s (subreaper) keeps that
+# processes a Python PID 1 would leave as zombies. -s (subreaper) keeps that
 # working when the host runs an init of its own.
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "./entrypoint.sh"]
 CMD ["web"]
