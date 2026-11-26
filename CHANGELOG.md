@@ -13,9 +13,9 @@ A patch release, and the first built, drafted and sealed by the repository stand
 flow. In the image only FastAPI and annotated-doc change, so nothing has to change on a host and
 going back to 1.2.2 needs no step. yt-dlp stays at 2026.11.23 and the bgutil plugin at 2.0.2.
 
-From this release on, each release has a seal, the signed tag `seal/vX.Y.Z`, and hosts take only
-sealed releases (CONTRIBUTING.md, Release contract). The release notes name the image as
-`ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...` in their "Container image" section.
+From this release on, each release has a seal, the signed tag `seal/vX.Y.Z`. A host that follows
+the Release contract in CONTRIBUTING.md takes only sealed releases. The release notes name the
+image as `ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...` in their "Container image" section.
 
 ### Changed
 
