@@ -848,7 +848,8 @@ def stream_process_output(process: subprocess.Popen[str], job_id: int) -> tuple[
                 pending_update['progress'] = progress
                 if speed:
                     pending_update['speed'] = speed
-                # Sampled, or thousands of near-identical lines land in the log column and Loki.
+                # Sampled, or thousands of near-identical lines land in the log column and the
+                # container log.
                 if time.monotonic() - last_flush >= PROGRESS_UPDATE_INTERVAL_SECONDS:
                     log(stripped)
                     pending_lines.append(stripped)
@@ -3053,8 +3054,9 @@ def take_daily_snapshot(snapshot: DailySnapshot) -> None:
 def worker() -> None:
     log('YouTube worker started')
 
-    # `docker stop` sends SIGTERM and SIGKILLs ten seconds later; handling it kills the running
-    # download and requeues its job rather than leaving the row claimed until the next startup.
+    # `docker stop` sends SIGTERM and SIGKILLs after the stop grace period (60 s in
+    # compose.example.yaml). Handling it kills the running download and requeues its job rather
+    # than leaving the row claimed until the next startup.
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
 
