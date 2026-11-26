@@ -313,3 +313,10 @@ def test_component_versions_marks_missing_components(monkeypatch):
         'deno': 'not found',
         'sqlite': sqlite3.sqlite_version,
     }
+
+
+# The release build passes `--build-arg VERSION=X.Y.Z`, as the standard's image.yml does, and the
+# app reads YTM_VERSION, so the Dockerfile maps the one onto the other, with dev for a local build.
+def test_dockerfile_maps_the_version_build_argument():
+    assert 'VERSION=dev' in dockerfile_arguments('ARG')
+    assert 'YTM_VERSION=${VERSION}' in dockerfile_arguments('ENV')

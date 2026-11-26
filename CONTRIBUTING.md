@@ -127,7 +127,64 @@ runs each pending step in one transaction with the version it reaches.
   them. They also upgrade a file as a 1.0.x release creates it, version 1's schema with no
   `user_version`, and compare the result with the newest frozen schema, NOT NULL included.
 
+<!-- standard:begin releasing -->
 ## Releasing
+
+GitHub Actions builds each release, and the maintainer publishes it in the browser, then seals
+it: hosts that install this repository's releases install a sealed release only.
+
+1. A session opens the release pull request `chore/release-X.Y.Z`, written with
+   `.github/standard/bin/release-prepare`: `VERSION`, the `VERSION_COPY` files, and the
+   `CHANGELOG.md` section with its links. Its body names the dependency updates since the last
+   release. CI checks the version, the date and the links. The `release` workflow builds the
+   release twice and compares the builds.
+2. The maintainer reviews and squash-merges it. The push to `main` that changes `VERSION` runs
+   the `release` workflow: the checks of `ci` on that commit, the build, an attestation in the
+   public repositories, and a draft release `vX.Y.Z` of that commit.
+3. The maintainer checks the draft (notes, assets, target commit, image digest) and clicks
+   **Publish release**. GitHub creates the tag and the immutable release. The `verify` job then
+   checks the published release, and the maintainer looks for it to pass.
+4. Then the maintainer seals the release. Double-click this repository's seal shortcut and check
+   what the dialog shows: the version, its commit, the release pull request, the commits since
+   the last seal and each check the tool ran. Click **Seal** and type the passphrase of the
+   offline signing key. The tool pushes the annotated, SSH-signed tag `seal/vX.Y.Z` on the
+   release's commit, from a mirror of its own; `pre-push` refuses `refs/tags/seal/*` from every
+   clone.
+5. To fix a draft, merge a pull request from `fix/release-X.Y.Z-<slug>`; its `CHANGELOG.md` line
+   goes into `## [X.Y.Z]`. Then run the `release` workflow on `main` (Actions, release, Run
+   workflow). Merge nothing else until the draft is published: CI says so on every pull request
+   while a release waits.
+6. Never delete a published release, and never move or delete a seal: a host stops on a seal
+   that moved. To stop a release before its seal, leave it unsealed and tick **Set as a
+   pre-release**, so the maintainer's daily check stops asking for its seal; then ship X.Y.Z+1.
+   To stop a sealed release, use the hold that the Release contract names, and ship X.Y.Z+1.
+   For a container image, the pre-release tick also moves `latest` back.
+
+Sessions prepare release pull requests. They never create a tag or a seal, and never publish,
+edit or delete a release.
+<!-- standard:end releasing -->
+
+## Release contract
+
+- **What a release is.** One container image for linux/amd64 and linux/arm64, at
+  `ghcr.io/ochsyp/youtube-manager`. The "Container image" section of the release notes names it
+  by version and digest, `ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...`, and a host pins that
+  whole reference. The release's assets are `image.json` and `SHA256SUMS`, attested.
+- **The host.** youtube-manager's host is jelly-stack. From jelly-stack's switch to this image on,
+  it runs youtube-manager from the image, pinned by version and digest in jelly-stack's own
+  Compose file, and never pulls `latest`. Until that switch, jelly-stack still builds
+  youtube-manager from a clone. The host does not check youtube-manager's seal itself: it installs
+  only jelly-stack releases sealed by jelly-stack's maintainer, and those carry the pin. Before a
+  reviewed jelly-stack pull request moves the pin, the session that writes it verifies
+  youtube-manager's `seal/vX.Y.Z` against the release key, and checks that the digest it pins is
+  the one this release names.
+- **The hold.** A release that is published but not yet sealed, or whose seal does not verify, is
+  held: the pin stays on the last sealed release, and the host keeps running that image
+  unchanged. Such a release reaches the host only after it is sealed and a new sealed jelly-stack
+  release carries its pin. A release that must not reach it is never sealed, and a later sealed
+  release replaces it.
+
+## Versioning
 
 Releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version covers the
 image and its interface: the environment variables, the volumes, the `web` and `worker` commands
@@ -143,72 +200,5 @@ and the database.
   `compose.example.yaml` to the same release in that pull request; the tests fail until they
   match. A host's provider of the same major release keeps working, with a warning in the log.
 
-To release X.Y.Z:
-
-1. Open a release pull request from `chore/release-X.Y.Z`. It moves the entries under
-   `## [Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section, the heading the release
-   workflow looks for, and updates the compare links at the end of CHANGELOG.md:
-
-   ```text
-   [Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/vX.Y.Z...HEAD
-   [X.Y.Z]: https://github.com/Ochsyp/youtube-manager/compare/vP.Q.R...vX.Y.Z
-   ```
-
-   vP.Q.R is the previous release. The first release links to its tag instead, as in
-   `https://github.com/Ochsyp/youtube-manager/releases/tag/v1.0.0`. The same pull request sets
-   `VERSION` to `X.Y.Z` and the README's install command to `YTM_VERSION=X.Y.Z`; a test fails until
-   the README matches. Its title is `chore(release): X.Y.Z`.
-2. After the merge, sign an annotated tag on the merge commit on `main`, which the `gh pr view`
-   line below prints. Then nothing merged after it ships under this version. The tag message is
-   `youtube-manager vX.Y.Z`.
-   - The release signing key is one ed25519 SSH key. It is added to GitHub as a signing key
-     titled `release signing`, so the tag shows as verified.
-   - It is listed as `maintainer namespaces="git" <public key>` in the allowed signers file that
-     `git tag -v` reads (`gpg.ssh.allowedSignersFile`).
-   - Git signs with it once `gpg.format` is `ssh` and `user.signingkey` names the key.
-
-   Then check the signature and push the tag:
-
-   ```text
-   git switch main
-   git pull --ff-only
-   gh pr view <number> --json mergeCommit --jq .mergeCommit.oid
-   git tag -s vX.Y.Z -m "youtube-manager vX.Y.Z" <merge commit>
-   git tag -v vX.Y.Z
-   git push origin vX.Y.Z
-   ```
-
-3. Check the tag before publishing, because publishing is final. Releases here are immutable: a
-   published release locks its tag, and deleting the release does not free the tag name. If the
-   release workflow fails after that, the fix ships as the next patch release.
-
-   ```text
-   uv run --no-project --python 3.13 python scripts/check_release.py vX.Y.Z
-   git branch -r --contains vX.Y.Z
-   gh run list --commit <merge commit>
-   ```
-
-   The first prints X.Y.Z, the second lists `origin/main`, and the third shows CI green on the
-   merge commit, its image job included. Then publish the release. Its notes come from a file
-   holding that version's CHANGELOG section:
-
-   ```text
-   gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <notes file>
-   ```
-
-4. Publishing starts the release workflow (`.github/workflows/release.yml`):
-   - it checks that the tag is vX.Y.Z on a commit of `main` and that CHANGELOG.md has its dated
-     heading;
-   - it builds and smoke-tests the image for amd64 and arm64;
-   - it pushes `ghcr.io/ochsyp/youtube-manager:X.Y.Z` and `latest` with provenance and SBOM
-     attestations;
-   - it appends the image's digest to the release notes.
-
-   Keep that `## Container image` section in every release's notes: deployments that follow
-   releases read the image digest from it.
-
-A release marked as a prerelease is pushed without `latest`, and promoting it to a full release
-later does not run the workflow again.
-
-First release only: check the package's visibility on its GitHub page. If it is private, make it
-public under Package settings, Change visibility. This cannot be undone.
+The release pull request also sets the README's install command to `YTM_VERSION=X.Y.Z`; a test
+fails until it does.

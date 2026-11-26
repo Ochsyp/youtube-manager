@@ -82,7 +82,7 @@ docker compose -f compose.example.yaml up -d
   what the host has to change. Going back to the previous release works the same way,
   unless that section has a `Migration (cannot be rolled back)` part.
 - **Building from a checkout.** `docker build -t youtube-manager .` builds the image for
-  the local architecture, with `dev` as its version (`--build-arg YTM_VERSION=<version>`
+  the local architecture, with `dev` as its version (`--build-arg VERSION=<version>`
   sets another). It needs BuildKit, Docker's default builder since version 23. To run
   such a build with the example, set both `image:` lines to `youtube-manager`.
 
@@ -252,7 +252,8 @@ youtube_manager/    the application package
   templates/        Jinja2 templates
 tests/              pytest suite and its fixtures (conftest.py)
   schemas/          each schema version as a release created it, for the migration tests
-scripts/            release check and image smoke test, run by the workflows
+scripts/            the image smoke test, run by ci/image-smoke
+ci/image-smoke      the image check CI and the release run on each platform
 ci/test             the test stage CI runs: the pytest suite, failing on any skip
 data/               SQLite database and its backups (runtime, git-ignored)
 Dockerfile          image build: base images pinned by digest, deno, the pinned packages

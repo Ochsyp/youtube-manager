@@ -1,0 +1,13 @@
+#!/bin/bash
+# ci/image-smoke of youtube-manager: image.yml runs it once per platform of IMAGE_PLATFORMS with
+# IMAGE-REF PLATFORM, after it built and loaded that image. It runs scripts/smoke-test-image.sh.
+# arm64 runs under QEMU and starts many times slower, so it gets longer limits.
+set -euo pipefail
+if [[ $# -ne 2 ]]; then
+    echo "usage: ci/image-smoke IMAGE-REF PLATFORM" >&2
+    exit 64
+fi
+if [[ $2 == linux/arm64 ]]; then
+    export SMOKE_TIMEOUT=600 SMOKE_STOP_LIMIT=45
+fi
+exec bash "$(dirname "${BASH_SOURCE[0]}")/../scripts/smoke-test-image.sh" "$1" "$2"
