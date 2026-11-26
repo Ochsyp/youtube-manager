@@ -103,8 +103,9 @@ docker compose -f compose.example.yaml up -d
 | `TZ` | | Timezone of the log timestamps |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | | Egress proxy; `NO_PROXY` must cover Jellyfin and the bgutil provider |
 
-Downloads also pass `HTTP_PROXY` to yt-dlp as `--proxy`, which ignores `NO_PROXY`, so
-the proxy itself must let the worker reach the bgutil provider.
+yt-dlp takes its proxy from these variables and reaches the hosts that `NO_PROXY` names,
+such as the bgutil provider, directly. Set `HTTPS_PROXY` as well as `HTTP_PROXY`, since
+YouTube is reached over HTTPS.
 
 Volumes: `/app/data` (SQLite and its backups), `/downloads` (staging) and `/media` (library).
 

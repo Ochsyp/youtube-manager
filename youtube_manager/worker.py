@@ -79,8 +79,6 @@ from youtube_manager.organizer import scan_and_process as organizer_scan_and_pro
 #              SETUP AND TUNING CONSTANTS
 # =======================================================
 
-PROXY = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
-
 # Base URL of the bgutil PO token provider, usually a sidecar container. YouTube withholds its
 # full DASH format list from a client with no PO token, leaving yt-dlp on low-bitrate HLS.
 # Left unset, no token arguments are passed at all.
@@ -332,11 +330,6 @@ def process_job(job: Download) -> None:
         update_job(job.id, status='cancelled', error='Cancelled by user')
         return
 
-    if not is_safe_url(job.url):
-        warn(f'Job {job.id}: refusing unsupported URL {job.url!r}')
-        update_job(job.id, status='failed', error=f'Unsupported URL: {job.url}')
-        return
-
     # A video with its file on disk, or a queued one whose recorded file is in the library, is
     # refreshed in place: downloading it into staging again would file a second copy.
     if job.status in {'metadata', 'redownload'} or has_library_file(job):
@@ -482,7 +475,7 @@ def resolve_subscription_target(db, subscription: Subscription) -> bool:
     command = [
         'yt-dlp', '--dump-single-json', '--skip-download',
         *ytdlp_common_args(),
-        '--flat-playlist', subscription.url,
+        '--flat-playlist', '--', subscription.url,
     ]
     try:
         result = run_command(command)
@@ -552,12 +545,6 @@ def throttle_youtube_requests() -> None:
         time.sleep(YTDLP_MIN_INTERVAL_SECONDS - elapsed)
     _last_youtube_request_at = time.monotonic()
 
-
-# yt-dlp takes its URL as a positional argument, so a stored value beginning with "-" is read as
-# an option instead -- and --exec runs an arbitrary command. Only that shape is refused: yt-dlp
-# accepts a bare "youtube.com/watch?v=..." and older rows may hold one.
-def is_safe_url(url: Optional[str]) -> bool:
-    return bool(url) and not url.startswith('-')
 
 
 # Log each distinct WARNING: line of yt-dlp's stderr once, at WARN, in first-seen order. Returns
@@ -923,7 +910,7 @@ def discover_metadata(
     if job.request_type in PARENT_REQUEST_TYPES:
         command.append('--flat-playlist')
 
-    command.append(job.url)
+    command += ['--', job.url]
 
     # The reason is stored whatever fail_on_error says: that flag decides who owns the job's
     # status, not whether yt-dlp's message is worth keeping. Only store_error=False, for a caller
@@ -1480,7 +1467,7 @@ def scan_video_ids(
     # See PERIODIC_CHANNEL_SCAN_LIMIT.
     if playlist_items:
         command += ['--playlist-items', playlist_items]
-    command.append(url)
+    command += ['--', url]
 
     try:
         result = run_command(command)
@@ -2198,9 +2185,6 @@ def check_subscriptions() -> None:
                 # Deleted or disabled since the run began.
                 if subscription is None or not subscription.enabled:
                     continue
-                if not is_safe_url(subscription.url):
-                    warn(f'Subscription {subscription.id}: refusing unsupported URL {subscription.url!r}')
-                    continue
 
                 # Resolved every scan until it succeeds, and committed at once: a write lock held
                 # across the scan fails the web app's writes with 'database is locked'.
@@ -2627,6 +2611,7 @@ def resolve_expected_output_path(job: Download, output_template: Optional[str] =
         *ytdlp_common_args(),
         '--get-filename',
         *ytdlp_output_args(output_template),
+        '--',
         job.url,
     ]
 
@@ -2693,7 +2678,7 @@ def discard_final_path_file(path_file: Path) -> None:
 
 
 # The yt-dlp argv for one video into staging; the sidecars feed the organizer's NFO and the final
-# path goes to final_path_file(job_id). Callers must screen `url` through is_safe_url() first.
+# path goes to final_path_file(job_id). `--` ends the options, so the URL is never read as one.
 # deno runs the yt-dlp-ejs solver from yt-dlp[default] locally, so nothing comes from GitHub.
 def build_download_command(url: str, output_template: str, job_id: int) -> list[str]:
     command = [
@@ -2714,10 +2699,7 @@ def build_download_command(url: str, output_template: str, job_id: int) -> list[
         str(final_path_file(job_id)),
     ]
 
-    if PROXY:
-        command.extend(['--proxy', PROXY])
-
-    command.append(url)
+    command += ['--', url]
 
     return command
 

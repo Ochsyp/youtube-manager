@@ -544,7 +544,7 @@ def test_periodic_channel_scan_limited_after_baseline(monkeypatch, db):
     scans = scan_commands(commands)
     [baseline, periodic] = [command for command in scans if command[-1] == CHANNEL_URL]
     assert '--playlist-items' not in baseline
-    assert periodic[-3:] == ['--playlist-items', '1:50', CHANNEL_URL]
+    assert periodic[-4:] == ['--playlist-items', '1:50', '--', CHANNEL_URL]
     playlist_scans = [command for command in scans if command[-1] == PLAYLIST_URL]
     assert len(playlist_scans) == 2
     assert not any('--playlist-items' in command for command in playlist_scans)
@@ -571,7 +571,7 @@ def test_periodic_scan_reads_whole_channel_when_all_new(
     worker.check_subscriptions()
 
     [limited, full] = scan_commands(commands)
-    assert limited[-3:] == ['--playlist-items', '1:50', url]
+    assert limited[-4:] == ['--playlist-items', '1:50', '--', url]
     assert '--playlist-items' not in full and full[-1] == url
     queued = [row.youtube_id for row in all_rows(db) if row.status == 'queued']
     assert queued == uploads[::-1]
@@ -956,7 +956,7 @@ def test_channel_subscription_scans_uploads_playlist(monkeypatch, db):
     scans = scan_commands(commands)
     [first, periodic] = [command for command in scans if command[-1] != tab_url]
     assert first[-1] == UPLOADS_URL and '--playlist-items' not in first
-    assert periodic[-3:] == ['--playlist-items', '1:50', UPLOADS_URL]
+    assert periodic[-4:] == ['--playlist-items', '1:50', '--', UPLOADS_URL]
     assert [command[-1] for command in scans if command[-1] == tab_url] == [tab_url, tab_url]
     assert row_states(db) == [(V1, SKIPPED_STATUS), (V2, 'queued'), (V3, 'queued')]
 
