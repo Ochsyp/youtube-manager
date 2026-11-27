@@ -112,7 +112,8 @@ json_value() {
 }
 
 # Run ci/NAME with ARGS when it exists, then ci/NAME.ps1 with ARGS under Windows PowerShell 5.1,
-# as spec 2.6 sets it: -NoProfile -ExecutionPolicy Bypass, with TEMP and TMP set to RUNNER_TEMP.
+# as the ci/ interface sets it: -NoProfile -ExecutionPolicy Bypass, with TEMP and TMP set to
+# RUNNER_TEMP.
 # Return the first failing status, or 0. Off Windows, a ci/NAME.ps1 ends the tool with an error.
 # POWERSHELL names the PowerShell to run (default powershell.exe).
 run_hook() {

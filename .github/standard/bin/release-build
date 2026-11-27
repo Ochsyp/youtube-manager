@@ -1,6 +1,6 @@
 #!/bin/bash
 # release-build of the repository standard: the same file in every repository; never edit it
-# here. The build and dry-run jobs of release.yml, and the last step of image.yml (spec 3.5).
+# here. The build and dry-run jobs of release.yml, and the last step of image.yml.
 # Archive kinds (zip, tar, stack): ci/release-build builds the archive when the repository has
 # one. Otherwise the build is the generic archive: git archive of HEAD under TZ=UTC, with the
 # RELEASE_MANIFEST added through --add-file. Then ci/release-check, when present, runs with

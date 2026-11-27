@@ -4,10 +4,11 @@
 #
 # Filesystem and LUKS UUIDs.
 uuid|\b[0-9A-Fa-f]{8,9}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b|^5ca1ab1e
-# UUIDs written without dashes.
-uuid-dashless|\b[0-9A-Fa-f]{32}\b|^5ca1ab1e
-# NTFS volume serials.
-ntfs-serial|\b[0-9A-Fa-f]{16}\b|^5ca1ab1e
+# UUIDs written without dashes. An underscore is a word character, so the hit may also start or
+# end at one, as in a device name, and the exemption allows it.
+uuid-dashless|(\b|_)[0-9A-Fa-f]{32}(\b|_)|^_?5ca1ab1e
+# NTFS volume serials, and other 16-digit serials, with an underscore beside them too.
+ntfs-serial|(\b|_)[0-9A-Fa-f]{16}(\b|_)|^_?5ca1ab1e
 # FAT volume serials, in fstab, blkid or GRUB form. Only option words, each starting with -
 # (quoted or parenthesised hints included), may stand between --fs-uuid and the serial, so a hit
 # ends at the first serial that is no option, and the exemption covers that serial alone.
@@ -16,6 +17,11 @@ fat-serial|(UUID=.?|--fs-uuid([[:blank:]]+-[^[:space:]]+)*[[:blank:]]+)[0-9A-Fa-
 lvm-uuid|\b[0-9A-Za-z]{6}(-[0-9A-Za-z]{4}){5}-[0-9A-Za-z]{6}\b|^5ca1ab
 # MBR PARTUUIDs and PTUUIDs, which carry the disk signature.
 partuuid|\b[Pp]([Aa][Rr])?[Tt][Uu][Uu][Ii][Dd][^0-9A-Za-z]{0,3}[0-9A-Fa-f]{8}|5ca1ab1e
-# /dev/disk/by-id/ names, which carry a model and a serial. The leading letter or digit keeps
-# globs and prose about the folder itself out. The exemption covers the synthetic names only.
-disk-by-id|/dev/disk/by-id/[0-9A-Za-z][0-9A-Za-z#+.:=@_-]*|^/dev/disk/by-id/[a-z]+-Synthetic(_Stick)?(_5CA1AB1E[0-9A-F]{8})?(-[0-9]+:[0-9]+)?(-part[0-9]+)?$
+# /dev/disk/by-id/ names, which carry a model and a serial, with or without the folder, as lsblk
+# and ls print them. The leading letter or digit keeps globs and prose about the folder itself
+# out. Without the folder, a name starts with a bus and holds an underscore between vendor, model
+# and serial, so words such as usb-c stay out. The exemption covers the synthetic names only.
+disk-by-id|(/dev/disk/by-id/[0-9A-Za-z]|\b(ata|nvme|scsi|usb|mmc|memstick|ieee1394|virtio)-[0-9A-Za-z][0-9A-Za-z#+.:=@-]*_)[0-9A-Za-z#+.:=@_-]*|^(/dev/disk/by-id/)?[a-z0-9]+-Synthetic(_Stick)?(_5CA1AB1E[0-9A-F]{8})?(-[0-9]+:[0-9]+)?(-part[0-9]+)?$
+# Disk serials and WWNs as udev reports them (udevadm info) or matches them in a rule. A value
+# that starts with $, % or * is a variable or a pattern, not a serial.
+udev-serial|\bID_(SERIAL(_SHORT)?|WWN(_WITH_EXTENSION)?)(=|[}]==?"?)[^[:space:]"',;}]+|^ID_[A-Z_]+(=|[}]==?"?)([$%*]|Synthetic|(0x)?5ca1ab1e)

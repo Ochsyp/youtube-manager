@@ -1,13 +1,13 @@
 #!/bin/bash
 # release-prepare of the repository standard: the same file in every repository; never edit it
-# here. A session runs it on a release branch chore/release-X.Y.Z from an up-to-date main
-# (spec 3.5). It writes VERSION and the VERSION_COPY files. It moves the lines under
+# here. Run it on a release branch chore/release-X.Y.Z from an up-to-date main
+# It writes VERSION and the VERSION_COPY files. It moves the lines under
 # ## [Unreleased] into a new ## [X.Y.Z] - YYYY-MM-DD section (today, UTC) under an empty
 # [Unreleased]. At the first release it replaces the header's "There are no releases yet.", and
 # it fixes the link block. Where ROLE=source it rebuilds the MANIFEST with tools/manifest. It
 # checks the result with release-meta (state pending). It prints a pull request body that names
-# the Dependabot updates since the last tag. The session makes any edits that a repository's own
-# contract asks for.
+# the Dependabot updates since the last tag. Make any edits that the repository's own contract
+# asks for.
 #   release-prepare X.Y.Z
 # Exit 0; 1 when it cannot prepare that release; 64 usage.
 set -euo pipefail

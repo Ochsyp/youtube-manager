@@ -1,4 +1,4 @@
-# The container image of the image kind (spec 3.5): the same file in every repository of the
+# The container image of the image kind: the same file in every repository of the
 # release profile (.github/standard/MANIFEST); change it in repo-standard, never here. ci.yml calls
 # it with push false: it builds and loads each platform of IMAGE_PLATFORMS with the build argument
 # VERSION and runs ci/image-smoke on each. release.yml calls it with push true and the version: it

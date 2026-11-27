@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-stage of the repository standard: the same file in every repository; never edit it here.
-# Runs one CI stage of this repository through the fixed ci/ interface (spec 2.6): ci/STAGE,
+# Runs one CI stage of this repository through the fixed ci/ interface: ci/STAGE,
 # then ci/STAGE.ps1 under Windows PowerShell 5.1, from the top of the repository. The jobs
 # lint, test and system of ci.yml call it.
 #   run-stage lint|test|system

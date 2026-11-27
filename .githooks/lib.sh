@@ -555,7 +555,7 @@ scan_run() {
     fi
     LC_ALL=C tr -d '\000' < "$std_scan/stream.raw" > "$std_scan/stream.nul" ||
         std_fail "cannot build the scan"
-    # Messages between sessions turn each at sign into the fullwidth U+FF20: fold it back, so
+    # Some chat and copy tools turn an at sign into the fullwidth U+FF20: fold it back, so
     # that the e-mail rule and denylist terms that hold an at sign still match.
     std_fw=$(printf '\357\274\240')
     LC_ALL=C sed "s/$std_fw/@/g" "$std_scan/stream.nul" > "$std_scan/stream" ||

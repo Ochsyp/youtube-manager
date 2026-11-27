@@ -90,8 +90,8 @@ Release contract in `CONTRIBUTING.md` says.
   after 60 days without activity in this repository.
 - **Hooks.** The hooks in `.githooks/` check every commit and push on the maintainer's machine:
   content, path names, messages, ref names and identities, against the rule packs and a denylist
-  that never leaves that machine. The maintainer also checks every day what reached GitHub, pull
-  request texts and release notes included.
+  that never leaves that machine. The maintainer also checks regularly, with repo-standard's
+  `tools/status`, what reached GitHub, pull request texts and release notes included.
 - **CI and releases.** The `ci` workflow checks the standard's copies, the privacy rules over the
   tree, the version, the changelog and the pull request, and runs the tests. The `release`
   workflow builds, attests and drafts each release, and verifies it once it is published.

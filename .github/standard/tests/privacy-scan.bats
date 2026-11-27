@@ -52,11 +52,17 @@ leaks() {
     printf 'search --fs-uuid --set=root %s-%s\n' 1a2b 3c4d    # 24 fat-serial
     printf 'lvm %s-%s-%s-%s-%s-%s-%s\n' Ab12Cd 3456 7890 abcd EfGh 1234 Zz99Yy   # 25 lvm-uuid
     printf 'disk %sUUID="%s-01"\n' PART d00dfeed              # 26 partuuid
-    printf 'id /dev/disk/%s/%s\n' by-id usb-Vendor_Model_123456-0:0      # 27 disk-by-id
+    printf 'id /dev/disk/%s/%s-%s\n' by-id usb Vendor_Model_123456-0:0   # 27 disk-by-id
     printf 'vm %s %s %s %s %s %s %s %s-%s %s %s %s %s %s %s %s\n' \
         56 4d 12 34 56 78 9a bc de f0 12 34 56 78 9a bc       # 28 vmware-uuid
     printf 'nic %s="%s"\n' MACAddress 080027AB12CD            # 29 vbox-mac
     printf 'label %s\n' "${DENY_TERM^^}"                      # 30 denylist
+    printf 'name %s-%s\n' usb Vendor_Model_123456-0:0         # 31 disk-by-id
+    printf 'name %s-%s\n' ata VENDOR_MODEL123_ZX12AB34        # 32 disk-by-id
+    printf 'serial Model_%s%s-0:0\n' D00DFEED CAFEF00D        # 33 ntfs-serial
+    printf 'luks key_%s%s%s%s\n' d00dfeed cafe4abc 8def0123 456789ab   # 34 uuid-dashless
+    printf 'udev %s=%s\n' ID_SERIAL Vendor_Model_123456       # 35 udev-serial
+    printf 'rule ENV{%s}=="%s"\n' ID_SERIAL_SHORT ZX12AB34    # 36 udev-serial
 }
 
 # Print synthetic and reserved values that every pack lets through.
@@ -81,6 +87,12 @@ synthetic() {
     printf 'id /dev/disk/%s/%s\n' by-id usb-Synthetic_Stick_5CA1AB1E00000001-0:0
     printf 'id /dev/disk/%s/%s\n' by-id ata-Synthetic-part1
     printf 'glob /dev/disk/%s/*\n' by-id
+    printf 'name %s\n' usb-Synthetic_Stick_5CA1AB1E00000001-0:0
+    printf 'serial Model_%s%s-0:0\n' 5CA1AB1E 01234567
+    printf 'luks key_%s%s\n' 5ca1ab1e 0123456789abcdef01234567
+    printf 'prose a usb-c cable, an ata-disk, the usb-stick and virtio-net\n'
+    printf 'udev %s=%s\n' ID_SERIAL Synthetic_Stick_5CA1AB1E00000001
+    printf 'rule ENV{%s}=="%s"\n' ID_SERIAL_SHORT '$serial'
     printf 'vm %s %s %s %s %s %s %s %s-%s %s %s %s %s %s %s %s\n' \
         5c a1 ab 1e 00 00 00 01 de f0 12 34 56 78 9a bc
     printf 'nic %s="%s"\n' MACAddress 5CA1AB1E0001
@@ -110,14 +122,15 @@ synthetic() {
     for hit in 14 15 16 17 18; do [[ $stderr == *"leak.txt:$hit: home-path"* ]]; done
     for hit in "19: e-mail" "20: uuid" "21: uuid-dashless" "22: ntfs-serial" "23: fat-serial" \
         "24: fat-serial" "25: lvm-uuid" "26: partuuid" "27: disk-by-id" "28: vmware-uuid" \
-        "29: vbox-mac" "30: denylist"; do
+        "29: vbox-mac" "30: denylist" "31: disk-by-id" "32: disk-by-id" "33: ntfs-serial" \
+        "34: uuid-dashless" "35: udev-serial" "36: udev-serial"; do
         [[ $stderr == *"leak.txt:$hit"* ]] || { printf 'missing: leak.txt:%s\n%s\n' "$hit" "$stderr" >&2; return 1; }
     done
     [[ $stderr == *"privacy-scan: crlf.txt: crlf"* ]]
     [[ $stderr == *"privacy-scan: link:1: home-path"* ]]
     [[ $stderr == *"privacy-scan: path name 4 of the scanned paths: host-name"* ]]
-    # Exactly these 33 findings: nothing twice, nothing else.
-    [ "$(grep -c '^privacy-scan: .*: [a-z0-9-]*$' <<< "$stderr")" -eq 33 ]
+    # Exactly these 39 findings: nothing twice, nothing else.
+    [ "$(grep -c '^privacy-scan: .*: [a-z0-9-]*$' <<< "$stderr")" -eq 39 ]
     [[ $stderr != *someone* && $stderr != *d00dfeed* && $stderr != *D00DFEED* && $stderr != *1A2B* ]]
     refute_term_shown
     assert_tmpdir_empty

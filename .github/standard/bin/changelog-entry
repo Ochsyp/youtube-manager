@@ -1,10 +1,10 @@
 #!/bin/bash
 # changelog-entry of the repository standard: the same file in every repository; never edit it
-# here. In CI it checks the lines that a pull request adds to CHANGELOG.md (spec 3.8). It passes
+# here. In CI it checks the lines that a pull request adds to CHANGELOG.md. It passes
 # when they add a line under ## [Unreleased]; or a version heading, as a release pull request
 # does; or, from a branch fix/release-X.Y.Z-<slug>, a line in the section of X.Y.Z, as the fix of
 # a draft release does. A Dependabot pull request, by dependabot[bot] from a dependabot/ branch,
-# needs no line (D5). Each added line inside a section must keep to 100 columns and may name a
+# needs no line. Each added line inside a section must keep to 100 columns and may name a
 # phase only as a trailing "(phase N)". Lines that were there before are never checked.
 # Reads BASE (the pull request's base commit), HEAD_REF (its branch) and AUTHOR (its author).
 # Exit 0; 1 when the pull request breaks a rule; 2 when the check cannot run; 64 usage.

@@ -1,8 +1,8 @@
 #!/bin/bash
 # release-meta of the repository standard: the same file in every repository; never edit it
-# here. Checks that VERSION, CHANGELOG.md and the release tags agree (spec 3.8 and 3.9), and
-# prints version=, latest= and state= lines for CI. It applies the launcher's version rules and
-# the -dev rule.
+# here. Checks that VERSION, CHANGELOG.md and the release tags agree, and
+# prints version=, latest= and state= lines for CI. It applies the version rules and the -dev
+# rule.
 #   release-meta check [--event EVENT] [--release vX.Y.Z] [--root DIR]
 #   release-meta notes X.Y.Z [--root DIR]
 # check reads the vX.Y.Z tags on stdin, one per line; other tags are ignored. The state is
@@ -131,7 +131,7 @@ read_tags() {
 }
 
 # Set VERSION and DEV from VERSION: exactly one line X.Y.Z or X.Y.Z-dev and a line feed, with no
-# BOM, no CR and no leading zeros (the launcher's rule).
+# BOM, no CR and no leading zeros.
 read_version() {
     local file="$ROOT/VERSION" content re
     if [[ ! -f $file ]]; then
@@ -156,7 +156,8 @@ version_text() {
 
 # Read CHANGELOG.md: the header before the first "## " heading, the sections, the [Unreleased]
 # entry, and the link references of [Unreleased] and [X.Y.Z]. Reports the headings and the
-# subsections that break spec 3.8, and text after the link block. Returns 1 when unreadable.
+# subsections that break the changelog rules, and text after the link block. Returns 1 when
+# unreadable.
 read_changelog() {
     local file="$ROOT/CHANGELOG.md" line label version n=0 in_unreleased=0 first_link=0
     local in_header=1 section="" last_sub=-1 sub idx i
