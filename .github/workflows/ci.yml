@@ -8,6 +8,9 @@ name: ci
 
 on:
   pull_request:
+    # edited: a title or body changed in the browser becomes the squash commit's message, so the
+    # pull request checks run again on it.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
   schedule:
