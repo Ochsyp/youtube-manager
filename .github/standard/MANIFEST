@@ -1,6 +1,6 @@
-# Repository standard 1.3.1. Written by tools/manifest; never edit it.
+# Repository standard 1.4.0. Written by tools/manifest; never edit it.
 # type  profile  blob-id                                   mode    path[#block[@variant]]
-standard 1.3.1
+standard 1.4.0
 file    all      0c3c9c971991b2943b468bf94d911cfb6dd984c4  100755  .githooks/commit-msg
 file    all      cc238bb39f7e3ceb481a632d18ada8a42fadafcf  100644  .githooks/lib.sh
 file    all      d5c698aa8c8da0560bb52304c8aafca57a0bf5c3  100755  .githooks/pre-commit
@@ -11,10 +11,10 @@ file    all      0cbb587f8e8aea0fff4b1e61d129f1ccf7ebaacd  100644  .githooks/rul
 file    all      4a58f0f9a3fb9ce5db8f1413e9755e402ddcddb4  100644  .githooks/rules/disk
 file    all      a34753f7f764dd463fe795f388a243da0b1fcf91  100644  .githooks/rules/vm
 file    all      1fd68eab7ce3eeb367ffab3722137032ca82bdd3  100644  .github/pull_request_template.md
-file    all      8c34d2bcf43ca4bea7cffd056380b034e3f210cf  100644  .github/standard/README.md
+file    all      a93190523d07664dc58aecef2da8f01ae947d6e0  100644  .github/standard/README.md
 file    all      a29ad273f519ed29d86dd3c3af12f93517b9edba  100644  .github/standard/actions.allow
 file    all      237de99e763079c5c9d02838f8ddbe7f5bbb22d2  100755  .github/standard/bin/changelog-entry
-file    all      92cb7ec7ab92dff644fd57ba296a585921023b38  100755  .github/standard/bin/conf
+file    all      f05880fef17a14e3da9945ff34a815ff4e1301b2  100755  .github/standard/bin/conf
 file    all      b71ae4209e2649292304f5c44291c6d0a36fe2a8  100755  .github/standard/bin/install-tools
 file    all      d22aeb934c3513ca17d7fdf6ba4f45ec0ffc87aa  100644  .github/standard/bin/lib.bash
 file    all      896c9969b818ba9bdbb300858c3fe95058849a25  100755  .github/standard/bin/no-skips
@@ -23,13 +23,13 @@ file    all      2862d99e304d411b863b54b91452f44d62749af2  100755  .github/stand
 file    all      93ed1e0fcaa7c45e17e9a0b4d78a3eefa9af269d  100755  .github/standard/bin/release-build
 file    all      bb7f1ce139499e4cf591772935eeb916168adf05  100755  .github/standard/bin/release-draft
 file    all      011516f4e0fe9f5b1cfb17e719579fb03ad3ac50  100755  .github/standard/bin/release-meta
-file    all      9e52559b74e24e290f787a603e10715ce8043b64  100755  .github/standard/bin/release-prepare
+file    all      cd030c99dcea29aae9549613dc1e0ac650fe4edb  100755  .github/standard/bin/release-prepare
 file    all      be7ebfffaea37ceca710ab077b2f1a22fdffd728  100755  .github/standard/bin/release-promote
 file    all      22d07ddae5d583537c2f27d52051c5bb76d7f53f  100755  .github/standard/bin/release-verify
 file    all      9014ed95df1a083e724d091582b6a3acd24f2ec7  100755  .github/standard/bin/run-stage
 file    all      7c96f4aacb3b0d8cddd410079e9778fa9ac166b4  100755  .github/standard/bin/secret-scan
 file    all      1768e14ea0085aa29617018c12230ad76b2d310c  100755  .github/standard/bin/standard-check
-file    all      883b239032723b52a4bdf75e1032bce270e5dd76  100755  .github/standard/tests/conf.bats
+file    all      53af74ad905dce2574fa536b3460d303bd37139f  100755  .github/standard/tests/conf.bats
 file    all      b89d28c2dfa1f6459f51bb6605109206446ad400  100755  .github/standard/tests/hooks.bats
 file    all      5b922b9bbc0b43ce419575826a09b4324e58b74b  100644  .github/standard/tests/lib.bash
 file    all      e99288d7e0b805cb5bc9c580d2242c82f2d026c7  100755  .github/standard/tests/lint.bats
@@ -41,8 +41,8 @@ file    all      d9451228eb2ab3bc8c37109d2c93b4ea9cbdba70  100755  .github/stand
 file    all      0dc7bf3a939fcbe91f4e89701b19d8374d0f9698  100755  .github/standard/tests/stub-bin/docker
 file    all      dad7a863872b9291df4d91ba0ca2a8e785ce2c6a  100755  .github/standard/tests/stub-bin/gh
 file    all      b9229271396615e2fab9ef1720eeaac20a4bb26f  100755  .github/standard/tests/stub-bin/gitleaks
-file    all      f335438de61adec35abadc75dfeaa43680f7dbb9  100755  .github/standard/tests/workflows.bats
-file    all      e2411c3f548af10d6715c0974f91d368f433f7d3  100644  .github/workflows/ci.yml
+file    all      c3213f48a347fd07076e5c2c028d58e773fee782  100755  .github/standard/tests/workflows.bats
+file    all      b1ee58e732fe0e6cdd455e100dee4e8cb292a147  100644  .github/workflows/ci.yml
 file    release  8d25bcab5f0d32ccb3429b2d2666043746a53027  100644  .github/workflows/image.yml
 file    release  3fe3bb4f2ea134e66cdd098dee2e35f89642e7e3  100644  .github/workflows/release.yml
 file    all      ecbe1d8c58d31984b6d5b673ccc400e1edb2747e  100644  .github/workflows/secret-scan.yml
@@ -53,12 +53,12 @@ block   all      ee7eb51cc6cb0bc0cd314d1389b502f4c0448d4a  -       .gitattribute
 block   all      274acae589a5bfd19c6cac4932a2d3febcef4f78  -       .github/dependabot.yml#dependabot
 block   private  0349dd094a6e2a5cd1a32da9b18e1fbcdd2c8521  -       CONTRIBUTING.md#guard-rails@private
 block   public   b31d1289edaf556408e17bd0686cfbac6c44e6d8  -       CONTRIBUTING.md#guard-rails@public
-block   release  1c03cd6705ec9ff28045b3a47069d091de3d28ad  -       CONTRIBUTING.md#releasing
-block   seal     33ab7f15004049e5003dda763fab3dfbf34894c2  -       CONTRIBUTING.md#releasing@seal
+block   release  e96b8d14b8de5f91007ba9b9fb1655b0398cc924  -       CONTRIBUTING.md#releasing
+block   seal     6f47eac354592e976ac9143feaba03c5a821b159  -       CONTRIBUTING.md#releasing@seal
 block   all      50d5eb50402dbc4587f18afd0b144a026792a095  -       CONTRIBUTING.md#standard
 block   all      7e30f1be4881d0907233e745c8f8af887489bad1  -       CONTRIBUTING.md#workflow
 block   private  294a4f4990494de886e7c044bda468db8fa3f7d5  -       SECURITY.md#automated-checks@private
-block   public   5bf9c7d8c8bc839d2ac9d81e34837b384bfcb4f9  -       SECURITY.md#automated-checks@public
+block   public   1745eb87759fef0abe8be4b49e8de78aeab87aec  -       SECURITY.md#automated-checks@public
 block   private  c828e6428c3280d2da931787c7880ebadfd14b54  -       SECURITY.md#reporting@private
 block   public   cec24782757f5de75882626848f6ccf75c18a9cc  -       SECURITY.md#reporting@public
-block   seal     774e2312ad2aa8658109db866b590b8f41a5bf94  -       SECURITY.md#sealed-releases@seal
+block   seal     62e1a8123e81dd9242932628b0f39796e77c87f2  -       SECURITY.md#sealed-releases@seal

@@ -1,6 +1,6 @@
 #!/bin/bash
 # release-prepare of the repository standard: the same file in every repository; never edit it
-# here. Run it on a release branch chore/release-X.Y.Z from an up-to-date main
+# here. Run it on a release branch chore/release-X.Y.Z from an up-to-date main.
 # It writes VERSION and the VERSION_COPY files. It moves the lines under
 # ## [Unreleased] into a new ## [X.Y.Z] - YYYY-MM-DD section (today, UTC) under an empty
 # [Unreleased]. At the first release it replaces the header's "There are no releases yet.", and

@@ -4,7 +4,8 @@
 # persist-credentials, triggers, expressions in scripts, top-level permissions, timeouts, GH_TOKEN,
 # image digests, and the contracts of ci.yml, secret-scan.yml and release.yml. Each rule runs over
 # this repository's workflows, and over a fixture that breaks it.
-# A legacy release.yml or image.yml (RELEASE_KIND=legacy) meets the general rules only.
+# A legacy release.yml or image.yml (RELEASE_KIND=legacy) meets the general rules except
+# actions.allow.
 
 # The awk programs and the YAML fixtures are single-quoted on purpose.
 # shellcheck disable=SC2016
@@ -283,6 +284,13 @@ contract_ci() {
     fi
     if [[ $(flat "$1" | awk -F '\t' '$1 == "jobs.test.steps.0.with.fetch-tags" { print $2 }') != true ]]; then
         printf 'ci.yml: the test job checks out without the tags\n' >&2
+        bad=1
+    fi
+    # A title or body edited in the browser becomes the squash commit's message, so CI checks the
+    # pull request text again on every edit.
+    if [[ $(flat "$1" | awk -F '\t' '$1 == "on.pull_request.types" { print $2 }') != \
+        '[opened, synchronize, reopened, edited]' ]]; then
+        printf 'ci.yml: pull_request does not run again when the title or body is edited\n' >&2
         bad=1
     fi
     return "$bad"

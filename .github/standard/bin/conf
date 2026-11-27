@@ -13,8 +13,10 @@
 #                             run it from the top of the checkout (it reads the MANIFEST and git)
 #   conf --samples KIND       print the realistic values of a pack kind that the checks use
 # FILE defaults to .github/standard.conf. Exit 0; 1 when the file does not parse, each problem on
-# stderr as "conf: line N: ..."; 2 when a check cannot run; 64 usage. A message never shows a
-# value from the file.
+# stderr as "conf: line N: ...", or as "conf: ..." for a missing required key and for keys that
+# do not go together (SEAL=yes with RELEASE_KIND=legacy or VISIBILITY=private, RELEASE_KIND=image
+# without IMAGE_PLATFORMS); 2 when a check cannot run; 64 usage. A message never shows a value
+# from the file.
 #
 # --ci reads EVENT (github.event_name), WORKFLOW (github.workflow: "release" when release.yml
 # calls ci.yml), PRIVATE (github.event.repository.private), BASE (the pull request's base, or a
@@ -316,6 +318,19 @@ if [ "$mode" != --defaults ]; then
                 print "conf: SEAL=yes needs a RELEASE_KIND other than legacy" > "/dev/stderr"
                 bad = 1
             }
+            # A seal needs a tag ruleset that keeps every login from moving or deleting it, and
+            # the GitHub plan offers rulesets to public repositories only.
+            if (got["SEAL"] == "yes" && got["VISIBILITY"] == "private") {
+                print "conf: SEAL=yes needs VISIBILITY=public: make the repository public first," \
+                    " or keep SEAL off" > "/dev/stderr"
+                bad = 1
+            }
+            # Without platforms CI never smoke-tests the image, and the release would push it
+            # before release-build stops.
+            if (got["RELEASE_KIND"] == "image" && got["IMAGE_PLATFORMS"] == "") {
+                print "conf: RELEASE_KIND=image needs IMAGE_PLATFORMS" > "/dev/stderr"
+                bad = 1
+            }
             exit bad
         }' "$tmp/kinds" "$tmp/in" > "$tmp/values" || status=$?
     [ "$status" -le 1 ] || fail "cannot parse the config"
@@ -374,6 +389,8 @@ print_values() {
             d["ROLE"] = "consumer"; d["LICENSE"] = "MIT"; d["CI_RUNNER"] = "ubuntu"
             d["CI_STAGES"] = "test"; d["CI_WEEKLY"] = "no"; d["RELEASE_RUNNER"] = "ubuntu"
             d["MAX_BLOB_KB"] = "1024"; d["SEAL"] = "no"
+            # Without the line the base pack runs: leaving a key out never turns the packs off.
+            d["PRIVACY_RULES"] = "base"
         }
         {
             if ($2 in repeat) list[$2] = list[$2] (want == "" ? $2 "=" : "") $3 "\n"
