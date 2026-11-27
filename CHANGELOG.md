@@ -13,7 +13,7 @@ describes.
   ([#51](https://github.com/Ochsyp/youtube-manager/pull/51))
 - Repository standard 1.4.0: the copies and blocks of this release. CI also runs when a pull
   request's title or body is edited, and the seal texts say that only the maintainer's own hosts
-  require a seal.
+  require a seal. The Release contract says how the host's seal check is met here.
 
 ## [1.2.4] - 2026-11-26
 

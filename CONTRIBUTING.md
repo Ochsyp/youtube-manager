@@ -179,7 +179,9 @@ script or automation publishes a release, or edits or deletes a published one.
   repository's seal itself: it installs only sealed releases of its own deployment, and those
   carry the pin. Before a reviewed change moves the pin, whoever writes that change verifies
   `seal/vX.Y.Z` against the release key, and checks that the digest it pins is the one this
-  release names.
+  release names. This is how the host meets the seal check in `SECURITY.md`, Sealed releases:
+  the host's own sealed release carries the pin, and that pin moves only after this
+  repository's seal has been verified.
 - **The hold.** A release that is published but not yet sealed, or whose seal does not verify, is
   held: the pin stays on the last sealed release, and the host keeps running that image
   unchanged. Such a release reaches the host only after it is sealed and a new sealed release of
