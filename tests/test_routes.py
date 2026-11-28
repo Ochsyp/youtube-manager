@@ -121,11 +121,14 @@ def test_toggle_backfill_flips_and_reports(client, db):
 
 # Either toggle of an id with no subscription says so and changes nothing.
 @pytest.mark.parametrize('action', ['toggle-enabled', 'toggle-backfill'])
-def test_toggle_of_a_missing_subscription_says_so(client, action):
-    response = post(client, f'/subscriptions/999/{action}')
+def test_toggle_of_a_missing_subscription_says_so(client, db, action):
+    sub_id = make_subscription(db)
+
+    response = post(client, f'/subscriptions/{sub_id + 1}/{action}')
 
     assert response.status_code == 303
     assert 'Subscription not found.' in client.get('/subscriptions').text
+    assert flags(db, sub_id) == (True, True)
 
 
 # A playlist row with one video under it; returns (parent, child).
@@ -168,12 +171,17 @@ def test_log_poll_reports_a_change_and_carries_the_log(client, make_job):
     assert answer['log_content'] == 'first line\nsecond line\n'
 
 
-# Both polls answer 404 for a job that is gone, so the page stops polling it.
-@pytest.mark.parametrize('path', ['/api/job/999', '/api/job/999/log'])
-def test_poll_of_a_missing_job_is_404(client, path):
+# Both polls answer 404 for a job that is gone, so the page stops polling it: the job poll with
+# no change, the log poll with an error.
+@pytest.mark.parametrize(('path', 'body'), [
+    ('/api/job/999', {'changed': False}),
+    ('/api/job/999/log', {'error': 'Job not found.'}),
+])
+def test_poll_of_a_missing_job_is_404(client, path, body):
     response = client.get(path)
 
     assert response.status_code == 404
+    assert response.json() == body
 
 
 # The queue section is a fragment for the dashboard to swap in: it lists a job in progress and

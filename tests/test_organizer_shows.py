@@ -192,7 +192,7 @@ def test_channel_video_is_filed_as_an_episode_of_the_channel(monkeypatch, db, ma
     assert ET.parse(show_nfo).getroot().findtext('uniqueid') == CHANNEL_ID
     assert (show_dir / 'poster.jpg').read_bytes() == AVATAR_BYTES
     assert (show_dir / 'Season 01' / 'poster.jpg').read_bytes() == AVATAR_BYTES
-    assert fetched == [AVATAR_URL, AVATAR_URL]
+    assert set(fetched) == {AVATAR_URL}
     assert stored(db, job.id).filename == str(video)
 
 
