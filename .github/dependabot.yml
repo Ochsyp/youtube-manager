@@ -22,12 +22,13 @@ updates:
 
   # requirements.txt pins every runtime dependency exactly, so their updates
   # arrive as pull requests rather than only as security alerts.
-  # uv rather than pip: it recompiles requirements.txt with the uv command in
-  # its header, for every platform and Python 3.13, and also updates the pins
-  # in requirements-dev.txt. Checked daily, with each release held back seven
-  # days so a broken or compromised one is usually withdrawn first. yt-dlp,
-  # its JavaScript solver and its PO-token plugin skip the wait: their
-  # releases follow YouTube's changes.
+  # uv rather than pip: it recompiles requirements.txt and then
+  # requirements-dev.txt with the uv commands in their headers, for every
+  # platform and Python 3.13, and writes the new release's hashes into both.
+  # Checked daily, with each release held back seven days so a broken or
+  # compromised one is usually withdrawn first. yt-dlp, its JavaScript
+  # solver and its PO-token plugin skip the wait: their releases follow
+  # YouTube's changes.
   - package-ecosystem: uv
     directory: /
     schedule:

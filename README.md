@@ -262,8 +262,9 @@ Dockerfile          image build: base images pinned by digest, deno, the pinned 
 entrypoint.sh       drops root to PUID/PGID and maps the web and worker commands
 compose.example.yaml  example deployment: web UI, worker and bgutil provider
 requirements.in     direct runtime dependencies, unpinned
-requirements.txt    exact pins uv compiles from requirements.in; the image installs these
-requirements-dev.txt  test-only dependencies (pytest, httpx)
+requirements.txt    exact pins with hashes uv compiles from requirements.in; the image installs these
+requirements-dev.in   test-only dependencies (pytest, httpx)
+requirements-dev.txt  their exact pins with hashes, compiled against requirements.txt
 pytest.ini          pytest settings and the posix marker
 VERSION             the current release
 .github/workflows/  CI (tests, image build and smoke test), release and secret scan

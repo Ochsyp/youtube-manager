@@ -2,7 +2,7 @@
 # ci/test of youtube-manager: the pytest suite under the PYTHON the config sets up. A skipped
 # test fails the run, as CI requires.
 set -euo pipefail
-python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 log=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pytest.log
 python -m pytest 2>&1 | tee "$log"
 if grep -q -E '[0-9]+ skipped' "$log"; then

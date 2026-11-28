@@ -14,6 +14,8 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 # packaging comes with pytest.
 from packaging.requirements import Requirement
 from packaging.version import Version
@@ -34,8 +36,9 @@ DENO_PATH = '/usr/local/bin/deno'
 WEB_COMMAND = 'uvicorn youtube_manager.app:app --host 0.0.0.0 --port 8080'
 WORKER_COMMAND = 'python -m youtube_manager.worker'
 
-# A requirements.txt line as uv writes it: a name, optional extras, one exact version and an
-# optional environment marker. A range, a wildcard, a URL or a bare name does not match.
+# A requirements.txt line as uv writes it, its hashes taken off: a name, optional extras, one exact
+# version and an optional environment marker. A range, a wildcard, a URL or a bare name does not
+# match.
 PINNED_REQUIREMENT = re.compile(
     r'[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9.!+]+(?:\s*;\s*\S.*)?'
 )
@@ -83,11 +86,26 @@ def canonical(name: str) -> str:
     return re.sub(r'[-_.]+', '-', name).lower()
 
 
-# The requirement lines of a requirements file, with comments, blank lines and uv's `# via`
-# annotations dropped.
+# A `--hash=sha256:<hex>` option of a requirement line.
+HASH_OPTION = re.compile(r'\s--hash=sha256:[0-9a-f]{64}')
+
+
+# The requirement lines of a requirements file, with continuation lines joined, and comments,
+# blank lines, uv's `# via` annotations and the `--hash` options dropped.
 def requirement_lines(name: str) -> list[str]:
-    lines = (line.split('#', 1)[0].strip() for line in repo_text(name).splitlines())
+    joined = repo_text(name).replace('\\\n', ' ')
+    lines = (HASH_OPTION.sub('', line.split('#', 1)[0]).strip() for line in joined.splitlines())
     return [line for line in lines if line]
+
+
+# The pinned requirements of a compiled file, each with the number of hashes it carries.
+def hashed_pins(name: str) -> list[tuple[str, int]]:
+    joined = repo_text(name).replace('\\\n', ' ')
+    pins = []
+    for line in joined.splitlines():
+        if line.strip() and not line.lstrip().startswith(('#', '-')):
+            pins.append((line.split()[0], len(HASH_OPTION.findall(line))))
+    return pins
 
 
 # The normalized names requirements.txt pins.
@@ -147,6 +165,29 @@ def test_requirements_txt_pins_every_package_exactly():
     assert [line for line in lines if not PINNED_REQUIREMENT.fullmatch(line)] == []
 
 
+# Both compiled files carry a hash for every pin, as `uv pip compile --generate-hashes` writes
+# them: pip installs a file with hashes only in hash-checking mode, which then refuses any package
+# without one, and the image installs with --require-hashes.
+@pytest.mark.parametrize('name', ['requirements.txt', 'requirements-dev.txt'])
+def test_compiled_requirements_carry_hashes(name):
+    pins = hashed_pins(name)
+    assert pins
+    assert [pin for pin, hashes in pins if hashes == 0] == []
+    assert '--generate-hashes' in repo_text(name).splitlines()[1]
+
+
+# requirements-dev.txt pins everything the tests pull in, each exactly, and a package both files
+# pin has the same version in both, so CI installs them together without a conflict.
+def test_dev_requirements_pin_everything_like_the_image():
+    lines = requirement_lines('requirements-dev.txt')
+    assert lines and [line for line in lines if not PINNED_REQUIREMENT.fullmatch(line)] == []
+    runtime = pinned_versions()
+    for requirement in map(Requirement, lines):
+        name = canonical(requirement.name)
+        if name in runtime:
+            assert next(iter(requirement.specifier)).version == runtime[name], name
+
+
 # Every direct dependency in requirements.in is pinned in requirements.txt. The image installs
 # requirements.txt alone, so a dependency missing there would be missing from the image.
 def test_requirements_in_names_are_pinned():
@@ -200,13 +241,16 @@ def test_dockerfile_images_are_pinned_by_digest():
 
 
 # Nothing is piped from the network into a shell, and the one pip install takes requirements.txt
-# as wheels only, with --no-deps, followed by pip check: a pin set missing a dependency then fails
-# the build instead of pulling in an unpinned package, and no sdist builds with unpinned tools.
+# as wheels only, with --no-deps and --require-hashes, followed by pip check: a pin set missing a
+# dependency then fails the build instead of pulling in an unpinned package, no sdist builds with
+# unpinned tools, and a file whose hash is not on record is refused.
 def test_dockerfile_installs_only_the_pins():
     runs = dockerfile_arguments('RUN')
     assert [run for run in runs if SHELL_PIPE.search(run)] == []
     installs = [arguments.split() for run in runs for arguments in PIP_INSTALL.findall(run)]
-    assert installs == [['--no-deps', '--only-binary=:all:', '-r', 'requirements.txt']]
+    assert installs == [
+        ['--no-deps', '--only-binary=:all:', '--require-hashes', '-r', 'requirements.txt']
+    ]
     assert any(INSTALL_THEN_CHECK.search(run) for run in runs)
 
 
@@ -337,3 +381,15 @@ def test_dockerignore_admits_exactly_what_the_dockerfile_copies():
         tokens = [token for token in arguments.split() if not token.startswith('--')]
         copied.update(token.rstrip('/') for token in tokens[:-1])
     assert admitted == copied
+
+
+# Every service of compose.example.yaml rotates its log: the json-file driver keeps a bounded
+# number of files of a bounded size, so a long-running host's disk does not fill with logs.
+def test_compose_example_rotates_every_service_log():
+    text = repo_text('compose.example.yaml')
+    services = re.findall(r'^  ([a-z][a-z0-9-]*):\n', text.split('\nservices:\n', 1)[1], re.MULTILINE)
+    assert services == ['youtube-manager', 'youtube-worker', 'bgutil-provider']
+    assert text.count('    logging: *logging\n') == len(services)
+    anchor = text.split('x-logging: &logging\n', 1)[1].split('\n\n', 1)[0]
+    assert 'driver: json-file' in anchor
+    assert re.search(r'max-size: "\d+m"', anchor) and re.search(r'max-file: "\d+"', anchor)

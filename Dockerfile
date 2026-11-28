@@ -27,10 +27,11 @@ WORKDIR /app
 
 # --no-deps installs exactly the pins: a set missing a dependency fails pip
 # check here instead of pulling in an unpinned package. --only-binary takes
-# wheels only, which keeps unpinned build tools out. pip check skips extras,
+# wheels only, which keeps unpinned build tools out. --require-hashes refuses
+# any wheel whose hash requirements.txt does not list. pip check skips extras,
 # so tests/test_build.py checks the pins of yt-dlp's default extra.
 COPY requirements.txt ./
-RUN pip install --no-deps --only-binary=:all: -r requirements.txt && pip check
+RUN pip install --no-deps --only-binary=:all: --require-hashes -r requirements.txt && pip check
 
 COPY --chmod=755 entrypoint.sh ./
 COPY LICENSE ./
