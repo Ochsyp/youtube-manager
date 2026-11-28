@@ -456,3 +456,34 @@ def test_give_up_yields_to_a_web_retry_during_the_walk(monkeypatch, db, make_job
     assert (stored.status, stored.error) == ('queued', ERROR)
     assert cleaned == []
     assert row(db, searched.id).status == 'queued'
+
+
+# The same inside a playlist: one video is reset and one given up, and the web deletes the reset
+# one during its search. The whole playlist keeps what is stored: the deleted video stays
+# deleted, the spent one is not given up, the playlist row stays failed, nothing is cleaned up.
+def test_playlist_with_a_give_up_yields_to_a_web_delete(monkeypatch, db, make_job, library):
+    import sqlite3
+
+    from youtube_manager import jobstate
+
+    parent, (searched, spent) = failed_playlist(make_job, 'PL1', {V1: 0, V2: MAX_AUTO_RETRIES})
+    path = database.database_file()
+    cleaned = []
+
+    # Stands in for the walk of the first video: the web deletes it meanwhile.
+    def walk(target, search_paths):
+        other = sqlite3.connect(path, timeout=5, isolation_level=None)
+        try:
+            other.execute("UPDATE downloads SET status = 'deleted' WHERE id = ?", (searched.id,))
+        finally:
+            other.close()
+        return None
+
+    monkeypatch.setattr(jobstate, 'find_existing_media', walk)
+    monkeypatch.setattr(worker, 'remove_cancelled_leftovers', cleaned.append)
+    retry_pass(monkeypatch, minutes(5))
+
+    assert row(db, searched.id).status == 'deleted'
+    assert (row(db, spent.id).status, row(db, spent.id).error) == ('failed', ERROR)
+    assert row(db, parent.id).status == 'failed'
+    assert cleaned == []
