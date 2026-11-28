@@ -45,7 +45,7 @@ release that `YTM_VERSION` names, and every Compose command for that file needs 
 variable, so keep it in an `.env` file beside the example:
 
 ```sh
-echo 'YTM_VERSION=1.2.4' > .env
+echo 'YTM_VERSION=1.2.5' > .env
 docker compose -f compose.example.yaml up -d
 ```
 

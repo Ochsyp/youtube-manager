@@ -7,8 +7,18 @@ describes.
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-11-28
+
+A patch release with the fixes from the second final check. yt-dlp stays at 2026.11.23 and the
+bgutil plugin at 2.0.2, and the database is unchanged, so going back to 1.2.4 needs no step.
+
+A host needs no change. One that copied `compose.example.yaml` can take its new `logging:` lines
+to cap each service's log at three files of 10 MB.
+
 ### Changed
 
+- The image ships pydantic 2.14.4 instead of 2.14.3 and pydantic-core 2.50.5 instead of 2.50.4.
+  ([#50](https://github.com/Ochsyp/youtube-manager/pull/50))
 - Repository standard 1.3.1: the copies and blocks of this release, which also bring 1.3.0's.
   ([#51](https://github.com/Ochsyp/youtube-manager/pull/51))
 - Repository standard 1.4.0: the copies and blocks of this release. CI also runs when a pull
@@ -594,7 +604,8 @@ plugin refuses a provider of another major release and warns about any other dif
 - No reverse-proxy name is built in. Before deploying, set `YTM_ALLOWED_HOSTS` on the web service
   to the name the proxy serves the UI under, or every request through the proxy gets 400.
 
-[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.4...HEAD
+[Unreleased]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.5...HEAD
+[1.2.5]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Ochsyp/youtube-manager/compare/v1.2.1...v1.2.2
