@@ -58,7 +58,6 @@ def test_every_lookup_puts_the_url_after_a_double_dash(commands, url):
 # The download ends with `--` and the URL, and passes no --proxy even when HTTP_PROXY is set.
 def test_download_command_puts_the_url_last_and_passes_no_proxy(monkeypatch):
     monkeypatch.setenv('HTTP_PROXY', 'http://proxy.example.test:3128')
-    monkeypatch.setattr(worker, 'PROXY', 'http://proxy.example.test:3128', raising=False)
 
     command = worker.build_download_command(OPTION_LIKE_URL, worker.OUTPUT_TEMPLATE_FLAT, 1)
 

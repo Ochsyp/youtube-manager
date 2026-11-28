@@ -27,8 +27,8 @@ STAGING_TEMP = DOWNLOAD_PATH / '.incomplete'
 SEARCH_PATHS = (DOWNLOAD_PATH, MEDIA_PATH)
 
 # Extensions treated as playable media; sidecars (.info.json, .description, .jpg) never count.
-# A container missing here fails a finished download and sends it into permanent retry, so the
-# list errs towards including anything playable.
+# A container missing here fails a finished download, which is then retried until the automatic
+# retries run out, so the list errs towards including anything playable.
 MEDIA_EXTENSIONS = frozenset({
     '.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.aac', '.opus', '.flac',
     '.wav', '.avi', '.mov', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv',
