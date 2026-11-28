@@ -352,7 +352,8 @@ def test_library_walk_holds_no_write_lock(monkeypatch, db, make_job, library):
 
 
 # A delete or a cancel that the web commits while the pass searches the library wins: the pass
-# drops its reset of that video instead of writing it back to queued over the user's change.
+# drops its reset of that video instead of writing it back to queued over the user's change. For
+# a playlist, the whole job keeps what is stored: its other video and the playlist row too.
 def test_change_during_the_walk_wins(monkeypatch, db, make_job, library):
     import sqlite3
 
@@ -361,10 +362,12 @@ def test_change_during_the_walk_wins(monkeypatch, db, make_job, library):
     deleted = failed_video(make_job, V1)
     cancelled = failed_video(make_job, V2)
     kept = failed_video(make_job, V3)
+    parent, (gone, sibling) = failed_playlist(make_job, 'PL1', {V4: 0, 'eeeeeeeeeee': 0})
     path = database.database_file()
     changes = {
         deleted.id: "status = 'deleted'",
         cancelled.id: 'cancel_requested = 1',
+        gone.id: "status = 'deleted'",
     }
 
     # Stands in for the walk of each video: the web changes the deleted and the cancelled one.
@@ -378,9 +381,42 @@ def test_change_during_the_walk_wins(monkeypatch, db, make_job, library):
         return None
 
     monkeypatch.setattr(jobstate, 'find_existing_media', walk)
-    retry_pass(monkeypatch, T0)
+    retry_pass(monkeypatch, minutes(5))
 
     assert row(db, deleted.id).status == 'deleted'
+    assert row(db, gone.id).status == 'deleted'
+    assert (row(db, sibling.id).status, row(db, sibling.id).auto_retry_attempts) == ('failed', 0)
+    assert row(db, parent.id).status == 'failed'
     stored = row(db, cancelled.id)
     assert (stored.status, stored.cancel_requested, stored.auto_retry_attempts) == ('failed', True, 0)
     assert (row(db, kept.id).status, row(db, kept.id).auto_retry_attempts) == ('queued', 1)
+
+
+# From the check for changes made during the walk until the commit, the pass holds the write
+# lock, so no web delete or cancel can land between the check and the write.
+def test_no_write_between_the_check_and_the_commit(monkeypatch, db, make_job, library):
+    import sqlite3
+
+    job = failed_video(make_job)
+    path = database.database_file()
+    check = worker.changed_since_read
+    writes: list[bool] = []
+
+    # Right after the check, the web tries to delete the video without waiting for the lock.
+    def check_then_web_write(session, rows):
+        changed = check(session, rows)
+        other = sqlite3.connect(path, timeout=0, isolation_level=None)
+        try:
+            other.execute("UPDATE downloads SET status = 'deleted' WHERE id = ?", (job.id,))
+            writes.append(True)
+        except sqlite3.OperationalError:
+            writes.append(False)
+        finally:
+            other.close()
+        return changed
+
+    monkeypatch.setattr(worker, 'changed_since_read', check_then_web_write)
+    retry_pass(monkeypatch, T0)
+
+    assert writes == [False]
+    assert row(db, job.id).status == 'queued'

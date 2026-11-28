@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, urlsplit
 
-from sqlalchemy import inspect as inspect_row, or_, select
+from sqlalchemy import inspect as inspect_row, or_, select, text
 
 from youtube_manager import VERSION, applog
 from youtube_manager.database import (
@@ -2062,10 +2062,14 @@ def retry_failed_jobs() -> None:
 
 
 # The ids among `rows` whose stored status or cancel flag is no longer what this session read,
-# before its own changes: another process wrote them since.
+# before its own changes: another process wrote them since. It first takes SQLite's write lock
+# with an UPDATE that matches no row, so nothing can change them between this check and the
+# caller's commit. Reads here hold no snapshot (legacy transaction control, see database.py), so
+# the check inside that transaction sees the latest commit.
 def changed_since_read(db, rows: list[Download]) -> set[int]:
     if not rows:
         return set()
+    db.execute(text('UPDATE downloads SET id = id WHERE 0'))
 
     def as_read(row: Download, key: str):
         history = inspect_row(row).attrs[key].history
