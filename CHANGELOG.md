@@ -16,6 +16,20 @@ describes.
   require a seal. The Release contract says how the host's seal check is met here.
   ([#52](https://github.com/Ochsyp/youtube-manager/pull/52))
 
+### Fixed
+
+- The worker's automatic retry no longer holds the database's write lock while it searches the
+  library for a failed video's file, so the web page can save changes during a retry pass on a
+  large library instead of failing after 15 seconds. A delete or cancel made during that search
+  is kept, not overwritten by the retry.
+  ([#53](https://github.com/Ochsyp/youtube-manager/pull/53))
+- The Jellyfin library refresh no longer follows a redirect, which would have sent the Jellyfin
+  token to the host the redirect names. A redirect is logged as a warning to fix `JELLYFIN_URL`.
+  ([#53](https://github.com/Ochsyp/youtube-manager/pull/53))
+- Adding a subscription twice at the same moment shows "Subscription already exists." for the
+  second one instead of an error page.
+  ([#53](https://github.com/Ochsyp/youtube-manager/pull/53))
+
 ## [1.2.4] - 2026-11-26
 
 A patch release with the fixes from a final audit. yt-dlp stays at 2026.11.23 and the bgutil

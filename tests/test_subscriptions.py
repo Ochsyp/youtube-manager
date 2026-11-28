@@ -1036,3 +1036,36 @@ def test_backfill_through_uploads_playlist_is_oldest_first(client, monkeypatch, 
 
     assert taken_order(db) == [V1, V2, V3, V4]
     assert calls == [(UPLOADS_URL, None)]
+
+
+# Of two submissions of the same URL that race past the existence check, the second meets the
+# unique constraint on url at its commit and gets the "already exists" message, not a 500.
+def test_racing_duplicate_subscription_gets_a_message(client, db):
+    from youtube_manager import database
+
+    url = 'https://www.youtube.com/playlist?list=PLrace'
+    raced = []
+
+    # Before the route's first flush, another request stores the same URL.
+    def store_the_same_url_first(session, flush_context, instances):
+        if raced:
+            return
+        raced.append(True)
+        with database.Session() as other:
+            other.add(Subscription(url=url, subscription_type='playlist', enabled=True))
+            other.commit()
+
+    event.listen(database.Session, 'before_flush', store_the_same_url_first)
+    try:
+        response = client.post(
+            '/subscriptions/add',
+            data={'url': url, 'subscription_type': 'playlist'},
+            follow_redirects=False,
+        )
+    finally:
+        event.remove(database.Session, 'before_flush', store_the_same_url_first)
+
+    assert response.status_code == 303
+    assert 'Subscription already exists.' in client.get('/subscriptions').text
+    with db() as session:
+        assert session.query(Subscription).filter(Subscription.url == url).count() == 1

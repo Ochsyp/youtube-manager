@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from urllib.parse import parse_qs, urlparse, urlsplit
 
 from youtube_manager import VERSION, applog
@@ -989,9 +990,9 @@ def add_subscription(
 
     url = normalize_url(url, subscription_type)
 
-    # A unique constraint on (url, subscription_type) blocks duplicates, and the worker's periodic
-    # check skips them; this check only gives a friendlier flash message. Of two racing submissions,
-    # one succeeds and the other is ignored.
+    # The unique constraint on url blocks duplicates; this check gives the friendlier message. Of
+    # two submissions that race past it, the second meets the constraint at its commit and gets
+    # the same message.
     with Session() as db:
         exists = db.query(Subscription).filter(Subscription.url == url).first()
 
@@ -1007,7 +1008,11 @@ def add_subscription(
             backfill_existing=(backfill_existing == 'true'),
         )
         db.add(sub)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            return redirect_with_flash('/subscriptions', 'Subscription already exists.')
 
     return redirect_with_flash('/subscriptions', 'Subscription added.')
 

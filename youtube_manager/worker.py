@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, urlsplit
 
-from sqlalchemy import or_
+from sqlalchemy import inspect as inspect_row, or_, select, text
 
 from youtube_manager import VERSION, applog
 from youtube_manager.database import (
@@ -51,6 +51,7 @@ from youtube_manager.jobstate import (
     TERMINAL_STATUS_SET,
     WORKER_PICKUP_STATUSES,
     apply_status_update_to_hierarchy,
+    child_jobs,
     compute_parent_progress,
     compute_parent_speed,
     is_in_progress,
@@ -1962,6 +1963,9 @@ def retry_failed_jobs() -> None:
         ):
             stopped.auto_retry_attempts = 0
             stopped.next_auto_retry_at = None
+        # Committed now, so no write is pending while the library is searched below: a flush
+        # would take SQLite's one write lock and hold it for the whole walk.
+        db.commit()
 
         # A parent qualifies on its own 'failed' status or any child's, which may be ahead of it
         # (see resolve_parent_status). A cancelled parent never does: the user stopped it.
@@ -2020,14 +2024,33 @@ def retry_failed_jobs() -> None:
             target.next_auto_retry_at = now + auto_retry_delay(attempts)
             return True
 
-        retried = 0
-        for job in candidates:
-            if apply_status_update_to_hierarchy(job, retry_one):
-                # A parent shows queued while its videos rerun. A deleted parent stays deleted
-                # around a video fetched again under it, as jobstate.settle_parent keeps it.
-                if job.children and job.status != 'deleted':
-                    job.status = 'queued'
-                retried += 1
+        # No autoflush: loading a parent's videos would otherwise write the resets so far and
+        # hold the write lock through the next video's library search. One commit writes them.
+        reset: set[int] = set()
+        with db.no_autoflush:
+            for job in candidates:
+                if apply_status_update_to_hierarchy(job, retry_one):
+                    # A parent shows queued while its videos rerun. A deleted parent stays deleted
+                    # around a video fetched again under it, as jobstate.settle_parent keeps it.
+                    if job.children and job.status != 'deleted':
+                        job.status = 'queued'
+                    reset.add(job.id)
+            # The walks held no lock, so the web may have deleted, cancelled or retried a row
+            # meanwhile. That change wins: a job with any row this pass changed, reset or given
+            # up, keeps what is stored if one of its rows changed since it was read.
+            touched = [
+                rows for rows in ([job, *child_jobs(job)] for job in candidates)
+                if any(db.is_modified(row) for row in rows)
+            ]
+            changed = changed_since_read(db, [row for rows in touched for row in rows])
+            for rows in touched:
+                if any(row.id in changed for row in rows):
+                    reset.discard(rows[0].id)
+                    for row in rows:
+                        db.expire(row)
+                        if row in given_up:
+                            given_up.remove(row)
+        retried = len(reset)
 
         if retried or deferred:
             log(f'Auto-retried {retried} failed job(s), {deferred} video(s) still waiting')
@@ -2042,6 +2065,36 @@ def retry_failed_jobs() -> None:
         )
         for job in given_up:
             remove_cancelled_leftovers(job)
+
+
+# The ids among `rows` whose stored status or cancel flag is no longer what this session read,
+# before its own changes: another process wrote them since. It first takes SQLite's write lock
+# with an UPDATE that matches no row, so nothing can change them between this check and the
+# caller's commit. Reads here hold no snapshot (legacy transaction control, see database.py), so
+# the check inside that transaction sees the latest commit.
+def changed_since_read(db, rows: list[Download]) -> set[int]:
+    if not rows:
+        return set()
+    db.execute(text('UPDATE downloads SET id = id WHERE 0'))
+
+    # Every row was loaded whole and nothing expired it since, so history holds the value read:
+    # under deleted when this session changed it, under unchanged when not.
+    def as_read(row: Download, key: str):
+        history = inspect_row(row).attrs[key].history
+        return (history.deleted or history.unchanged or history.added)[0]
+
+    read = {row.id: (as_read(row, 'status'), as_read(row, 'cancel_requested')) for row in rows}
+    # In chunks, since SQLite limits the variables of one statement and a channel can be large.
+    ids = list(read)
+    stored = {
+        found.id: (found.status, found.cancel_requested)
+        for start in range(0, len(ids), 500)
+        for found in db.execute(
+            select(Download.id, Download.status, Download.cancel_requested)
+            .where(Download.id.in_(ids[start:start + 500]))
+        )
+    }
+    return {row_id for row_id, values in read.items() if stored.get(row_id) != values}
 
 
 # Consecutive failed checks per subscription id, cleared by a successful scan. In memory, so a
