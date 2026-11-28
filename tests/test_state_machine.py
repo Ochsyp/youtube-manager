@@ -231,12 +231,12 @@ def test_organizer_gate_uses_effective_parent_status(monkeypatch, db, make_job, 
     filed = []
 
     # Stands in for filing a video: records the job and reports it organized.
-    def organize(session, job, dry_run, force_nfo=False) -> bool:
+    def organize(session, job, force_nfo=False) -> bool:
         filed.append(job.id)
         return True
 
     monkeypatch.delenv('LIBRARY_SENTINEL', raising=False)
-    monkeypatch.setattr(organizer, 'is_organizable', lambda session, job, dry_run=False: True)
+    monkeypatch.setattr(organizer, 'is_organizable', lambda session, job: True)
     monkeypatch.setattr(organizer, 'organize_job', organize)
     monkeypatch.setattr(organizer, 'notify_jellyfin', lambda tick=None: None)
     stale = playlist_parent(make_job, 'queued')
@@ -245,7 +245,7 @@ def test_organizer_gate_uses_effective_parent_status(monkeypatch, db, make_job, 
     video(make_job, V2, parent_id=reopened.id, status='completed')
     video(make_job, V3, parent_id=reopened.id, status='queued')
 
-    organizer.scan_and_process(dry_run=False)
+    organizer.scan_and_process(tick=lambda: True)
 
     assert filed == [finished.id]
 
@@ -709,7 +709,7 @@ def test_all_skipped_parent_offers_no_retry(client, db, make_job):
 def test_child_updates_reach_parent_and_organizer(monkeypatch, db, make_job):
     runs = []
     monkeypatch.setattr(worker, 'organizer_scan_and_process',
-                        lambda dry_run=False, tick=None: runs.append(dry_run))
+                        lambda tick: runs.append('organize'))
     parent = playlist_parent(make_job)
     first = video(make_job, V1, parent_id=parent.id, status='downloading')
     second = video(make_job, V2, parent_id=parent.id, status='downloading')
@@ -730,7 +730,7 @@ def test_child_updates_reach_parent_and_organizer(monkeypatch, db, make_job):
     worker.update_job(second.id, status='completed')
     worker.finalize_after_download(stored(db, second.id))
 
-    assert runs == [False]
+    assert runs == ['organize']
 
 
 # A single Retry, and auto-retry, still find a video's file moved within the library, and refresh

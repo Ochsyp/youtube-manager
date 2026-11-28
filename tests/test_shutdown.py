@@ -208,11 +208,11 @@ def test_organizer_stops_between_videos_and_still_notifies(db, make_job, monkeyp
         )
     filed, notified, ticks = [], [], []
     monkeypatch.setattr(organizer, 'library_ready', lambda: True)
-    monkeypatch.setattr(organizer, 'relocate_misfiled_shows', lambda session, dry_run: 0)
-    monkeypatch.setattr(organizer, 'repair_stale_filenames', lambda session, dry_run: 0)
-    monkeypatch.setattr(organizer, 'repair_missing_thumbnails', lambda session, dry_run: 0)
-    monkeypatch.setattr(organizer, 'is_organizable', lambda session, job, dry_run=False: True)
-    monkeypatch.setattr(organizer, 'organize_job', lambda session, job, dry_run: filed.append(job.id) or True)
+    monkeypatch.setattr(organizer, 'relocate_misfiled_shows', lambda session: 0)
+    monkeypatch.setattr(organizer, 'repair_stale_filenames', lambda session: 0)
+    monkeypatch.setattr(organizer, 'repair_missing_thumbnails', lambda session: 0)
+    monkeypatch.setattr(organizer, 'is_organizable', lambda session, job: True)
+    monkeypatch.setattr(organizer, 'organize_job', lambda session, job: filed.append(job.id) or True)
     monkeypatch.setattr(organizer, 'notify_jellyfin', lambda tick=None: notified.append(None))
 
     # Go on before the first video only.
@@ -220,7 +220,7 @@ def test_organizer_stops_between_videos_and_still_notifies(db, make_job, monkeyp
         ticks.append(None)
         return len(ticks) == 1
 
-    assert organizer.scan_and_process(dry_run=False, tick=tick) == 1
+    assert organizer.scan_and_process(tick=tick) == 1
 
     assert len(filed) == 1
     assert len(ticks) == 2
@@ -255,7 +255,7 @@ def quiet_worker_loop(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     ):
         monkeypatch.setattr(worker, name, lambda name=name: ran.append(name))
     monkeypatch.setattr(
-        worker, 'organizer_scan_and_process', lambda dry_run, tick=None: ran.append('organize'),
+        worker, 'organizer_scan_and_process', lambda tick: ran.append('organize'),
     )
     return ran
 
@@ -288,7 +288,7 @@ def test_main_loop_runs_no_periodic_task_after_a_stop(db, monkeypatch):
     monkeypatch.setattr(worker._shutdown, 'wait', lambda timeout=None: False)
 
     # The first periodic task finishes, and a stop arrives meanwhile.
-    def organize(dry_run, tick=None):
+    def organize(tick):
         ran.append('organize')
         worker._shutdown.set()
 
@@ -709,7 +709,7 @@ def test_unexpected_refresh_error_is_logged_as_error(
     monkeypatch.setattr(organizer.requests, 'post', post)
     monkeypatch.setattr(
         worker, 'organizer_scan_and_process',
-        lambda dry_run, tick: organizer.notify_jellyfin(tick=tick),
+        lambda tick: organizer.notify_jellyfin(tick=tick),
     )
     if stop:
         worker._shutdown.set()
@@ -767,12 +767,12 @@ def test_repair_only_refresh_runs_after_the_session_closes(db, monkeypatch):
 
     monkeypatch.setattr(organizer, 'Session', counted_session)
     monkeypatch.setattr(organizer, 'library_ready', lambda: True)
-    monkeypatch.setattr(organizer, 'relocate_misfiled_shows', lambda session, dry_run: 0)
-    monkeypatch.setattr(organizer, 'repair_stale_filenames', lambda session, dry_run: 0)
-    monkeypatch.setattr(organizer, 'repair_missing_thumbnails', lambda session, dry_run: 1)
+    monkeypatch.setattr(organizer, 'relocate_misfiled_shows', lambda session: 0)
+    monkeypatch.setattr(organizer, 'repair_stale_filenames', lambda session: 0)
+    monkeypatch.setattr(organizer, 'repair_missing_thumbnails', lambda session: 1)
     monkeypatch.setattr(organizer, 'notify_jellyfin', lambda tick=None: seen.append(len(open_sessions)))
 
-    assert organizer.scan_and_process(dry_run=False) == 0
+    assert organizer.scan_and_process(tick=lambda: True) == 0
 
     assert seen == [0]
 

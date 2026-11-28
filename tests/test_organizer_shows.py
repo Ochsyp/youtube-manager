@@ -120,7 +120,7 @@ def test_playlist_video_is_filed_as_an_episode(db, make_job, library):
     job = staged_video(library, make_job, playlist_id=playlist_id, channel_id=channel_id,
                        playlist_index=3)
 
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
 
     show_dir = library.media / f'Example Show [{PLAYLIST_ID}]'
     base = show_dir / 'Season 01' / f'Example Show - S01E03 - Episode Title [{VIDEO_ID}]'
@@ -160,7 +160,7 @@ def test_playlist_of_a_subscribed_channel_nests_in_its_folder(db, make_job, libr
     job = staged_video(library, make_job, playlist_id=playlist_id, channel_id=channel_id,
                        playlist_index=1)
 
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
 
     show_dir = library.media / f'Example Channel [{CHANNEL_ID}]' / f'Example Show [{PLAYLIST_ID}]'
     video = show_dir / 'Season 01' / f'Example Show - S01E01 - Episode Title [{VIDEO_ID}].mp4'
@@ -176,7 +176,7 @@ def test_channel_video_is_filed_as_an_episode_of_the_channel(monkeypatch, db, ma
     job = staged_video(library, make_job, channel_id=channel_id, group_by_channel=True,
                        playlist_index=12)
 
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
 
     show_dir = library.media / f'Example Channel [{CHANNEL_ID}]'
     base = show_dir / 'Season 01' / f'Example Channel - S01E0012 - Episode Title [{VIDEO_ID}]'
@@ -207,14 +207,14 @@ def test_video_waits_for_its_episode_number(monkeypatch, db, make_job, library, 
     )
     job = staged_video(library, make_job, channel_id=channel_id, **fields)
 
-    assert organizer.scan_and_process() == 0
+    assert organizer.scan_and_process(tick=lambda: True) == 0
     row = stored(db, job.id)
     assert row.organized_at is None and Path(row.filename).parent == library.staging
 
     with db() as session:
         session.get(Download, job.id).playlist_index = 2
         session.commit()
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
     assert Path(stored(db, job.id).filename).name.startswith(
         'Example Show - S01E02 - ' if kind == 'playlist' else 'Example Channel - S01E0002 - '
     )
@@ -226,7 +226,7 @@ def test_filed_show_moves_when_its_channel_is_subscribed(db, make_job, library):
     channel_id, playlist_id = make_show(db)
     job = staged_video(library, make_job, playlist_id=playlist_id, channel_id=channel_id,
                        playlist_index=1)
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
     old_show = library.media / f'Example Show [{PLAYLIST_ID}]'
     assert old_show.is_dir()
 
@@ -234,7 +234,7 @@ def test_filed_show_moves_when_its_channel_is_subscribed(db, make_job, library):
         session.add(Subscription(subscription_type='channel', channel_id=channel_id,
                                  url=f'https://www.youtube.com/channel/{CHANNEL_ID}'))
         session.commit()
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
 
     new_show = library.media / f'Example Channel [{CHANNEL_ID}]' / f'Example Show [{PLAYLIST_ID}]'
     video = new_show / 'Season 01' / f'Example Show - S01E01 - Episode Title [{VIDEO_ID}].mp4'
@@ -251,14 +251,14 @@ def test_lost_thumbnail_is_fetched_again(monkeypatch, db, make_job, library):
     channel_id, playlist_id = make_show(db)
     job = staged_video(library, make_job, playlist_id=playlist_id, channel_id=channel_id,
                        playlist_index=1, thumbnail=THUMB_URL)
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
     video = Path(stored(db, job.id).filename)
     thumb = video.with_name(video.stem + '-thumb.jpg')
     thumb.unlink()
     organized_at = stored(db, job.id).organized_at
 
     fetched = serve_images(monkeypatch, {THUMB_URL: b'fetched again'})
-    assert organizer.scan_and_process() == 0
+    assert organizer.scan_and_process(tick=lambda: True) == 0
 
     assert fetched == [THUMB_URL]
     assert thumb.read_bytes() == b'fetched again'

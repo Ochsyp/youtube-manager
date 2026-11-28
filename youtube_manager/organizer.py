@@ -45,11 +45,6 @@ from youtube_manager.media import (
 #              SETUP AND NAMING CONSTANTS
 # =======================================================
 
-# Root of the Jellyfin media library, as mounted into this container.
-SHOWS_DIR = MEDIA_PATH
-MOVIES_DIR = MEDIA_PATH
-CHANNEL_DIR = MEDIA_PATH
-
 # Jellyfin connection details for the post-organize library scan. Both optional: with either
 # unset the notification is skipped rather than treated as an error, since the videos are filed.
 JELLYFIN_URL = os.getenv('JELLYFIN_URL')
@@ -796,8 +791,8 @@ def playlist_show_dir(db, playlist: Playlist) -> Path:
     )
 
     if channel_subscribed:
-        return SHOWS_DIR / get_or_assign_channel_folder_name(db, playlist.channel) / folder_name
-    return SHOWS_DIR / folder_name
+        return MEDIA_PATH / get_or_assign_channel_folder_name(db, playlist.channel) / folder_name
+    return MEDIA_PATH / folder_name
 
 
 # Plan the move for a playlist-linked video: into the show's Season 01 folder, as an episode.
@@ -860,7 +855,7 @@ def plan_movie(db, job: Download, info: dict, video_path: Path) -> Optional[Orga
     title_clean = sanitize_filename(job.title or video_path.stem)
 
     # Movie Folder Format: {Movie Title}, release year omitted per config.
-    movie_dir = MOVIES_DIR / append_id_tag(title_clean, video_id_tag(job))
+    movie_dir = MEDIA_PATH / append_id_tag(title_clean, video_id_tag(job))
 
     # Standard Movie Format: {Movie CleanTitle} - {tech tag} [{video_id}]
     base_name = title_clean
@@ -905,7 +900,7 @@ def plan_channel_video(db, job: Download, info: dict, video_path: Path) -> Optio
         return None
 
     folder_name = get_or_assign_channel_folder_name(db, channel)
-    show_dir = CHANNEL_DIR / folder_name
+    show_dir = MEDIA_PATH / folder_name
     season_dir = show_dir / 'Season 01'
     show_title = sanitize_filename(channel.name or channel.youtube_id or folder_name)
 
@@ -1150,7 +1145,7 @@ def remove_stale_partials(job: Download, plan: OrganizePlan) -> None:
 # Carry out a plan: move the video and thumbnail into the library, write the NFO, drop superseded
 # sidecars, and record the result on the job. force_nfo rewrites an existing NFO; only a job the
 # user targeted sets it, never the routine scan: that must not clobber a manual Jellyfin edit.
-def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: dict, dry_run: bool, force_nfo: bool = False) -> bool:
+def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: dict, force_nfo: bool = False) -> bool:
     # Both sidecar conventions are checked -- yt-dlp's for a video fresh from staging, this
     # module's for one being re-filed -- so re-organizing leaves nothing at the old location.
     thumb_src = find_sidecar(video_path, '-thumb.jpg') or find_sidecar(video_path, '.jpg')
@@ -1162,17 +1157,12 @@ def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: 
     if not info_src or not info_src.exists():
         info_src = find_sidecar(video_path, '.info.json')
 
-    if not dry_run:
-        remove_stale_partials(job, plan)
+    remove_stale_partials(job, plan)
 
     # An existing destination means a previous run filed this video: clean up staging and record it
     # as organized. A source of differing size replaces a destination no other row claims (likely
     # one an interrupted move truncated), and is kept beside one another row does claim.
     if plan.dest_video.exists():
-        if dry_run:
-            log(f'[dry-run] Job {job.id}: {plan.dest_video} already in place, would mark organized')
-            return True
-
         source_differs = (
             video_path != plan.dest_video
             and video_path.exists()
@@ -1225,10 +1215,6 @@ def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: 
         mark_organized(db, job, plan)
         return True
 
-    if dry_run:
-        log(f'[dry-run] Would organize job {job.id}: {video_path} -> {plan.dest_video}')
-        return True
-
     # Make sure the show-level metadata exists before the first episode lands in the folder.
     if plan.show_dir and plan.playlist:
         ensure_show_metadata(plan.show_dir, plan.playlist, video_path)
@@ -1269,7 +1255,7 @@ def execute_plan(db, job: Download, plan: OrganizePlan, video_path: Path, info: 
 
 # Organize one completed video job. Returns True if the job is now organized, whether by this
 # call or by an earlier run. See execute_plan() for what force_nfo does.
-def organize_job(db, job: Download, dry_run: bool, force_nfo: bool = False) -> bool:
+def organize_job(db, job: Download, force_nfo: bool = False) -> bool:
     video_path = Path(job.filename)
 
     # Read the metadata before anything is moved or deleted out from under it.
@@ -1292,7 +1278,7 @@ def organize_job(db, job: Download, dry_run: bool, force_nfo: bool = False) -> b
     if not plan:
         return False
 
-    return execute_plan(db, job, plan, video_path, info, dry_run, force_nfo=force_nfo)
+    return execute_plan(db, job, plan, video_path, info, force_nfo=force_nfo)
 
 
 # =======================================================
@@ -1303,16 +1289,15 @@ def organize_job(db, job: Download, dry_run: bool, force_nfo: bool = False) -> b
 # Re-run organizing for one job, rewriting its NFO even though the video is already in place.
 # Backs "Fetch Metadata": the user asked for this one job, so the scan's caution about healthy
 # NFOs doesn't apply. Returns False, touching nothing, while library_ready() refuses.
-def organize_single_job(job_id: int, tick: Optional[Callable[[], bool]] = None) -> bool:
+def organize_single_job(job_id: int, tick: Callable[[], bool]) -> bool:
     if not library_ready():
         return False
-    SHOWS_DIR.mkdir(parents=True, exist_ok=True)
-    MOVIES_DIR.mkdir(parents=True, exist_ok=True)
+    MEDIA_PATH.mkdir(parents=True, exist_ok=True)
     with Session() as db:
         job = db.get(Download, job_id)
         if not job or not is_organizable(db, job):
             return False
-        result = organize_job(db, job, dry_run=False, force_nfo=True)
+        result = organize_job(db, job, force_nfo=True)
     if result:
         notify_jellyfin(tick=tick)
     return result
@@ -1320,15 +1305,12 @@ def organize_single_job(job_id: int, tick: Optional[Callable[[], bool]] = None) 
 
 # Ask Jellyfin, if configured, to scan now; its filesystem watcher is unreliable across bind mounts.
 # Unreachable logs WARN, not a failure; a rejected token (401/403) logs ERROR, as every refresh
-# fails until fixed. Other errors are raised. With a `tick`, a stop can cut the wait short.
-def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
+# fails until fixed. Other errors are raised. `tick` answering False, a stop, cuts the wait short.
+def notify_jellyfin(tick: Callable[[], bool]) -> None:
     if not JELLYFIN_URL or not JELLYFIN_TOKEN:
         return
     try:
-        if tick is None:
-            response = post_jellyfin_refresh(JELLYFIN_URL, JELLYFIN_TOKEN)
-        else:
-            response = post_jellyfin_refresh_until_stop(JELLYFIN_URL, JELLYFIN_TOKEN, tick)
+        response = post_jellyfin_refresh_until_stop(JELLYFIN_URL, JELLYFIN_TOKEN, tick)
         if response is None:
             return
         # Redirects are not followed (see post_jellyfin_refresh), so one means the URL is wrong.
@@ -1399,7 +1381,7 @@ def post_jellyfin_refresh_until_stop(
 
 
 # Shared pre-checks applied before a job is organized.
-def is_organizable(db, job: Download, dry_run: bool = False) -> bool:
+def is_organizable(db, job: Download) -> bool:
     if not job.filename:
         log(f'Job {job.id}: no filename recorded, skipping')
         return False
@@ -1412,8 +1394,7 @@ def is_organizable(db, job: Download, dry_run: bool = False) -> bool:
     if recovered:
         log(f'Job {job.id}: recorded path was stale ({job.filename}); recovered by youtube_id at {recovered}')
         job.filename = str(recovered)
-        if not dry_run:
-            db.commit()
+        db.commit()
         return True
 
     log(f'Job {job.id}: recorded file missing on disk ({job.filename}), skipping')
@@ -1423,7 +1404,7 @@ def is_organizable(db, job: Download, dry_run: bool = False) -> bool:
 # Re-point already-organized jobs whose recorded path no longer resolves but whose file is still
 # in the library under another name -- typically Tdarr transcoding .mkv to .mp4 in place, which
 # the main scan never revisits (it selects organized_at IS NULL).
-def repair_stale_filenames(db, dry_run: bool = False) -> int:
+def repair_stale_filenames(db) -> int:
     jobs = (
         db.query(Download)
         .filter(
@@ -1447,17 +1428,12 @@ def repair_stale_filenames(db, dry_run: bool = False) -> int:
             # Genuinely gone rather than renamed; leave it alone so the loss stays visible.
             continue
 
-        if dry_run:
-            log(f'[dry-run] Would repoint job {job.id} to {recovered}')
-        else:
-            log(f'Job {job.id}: recorded path was stale, repointed to {recovered}')
-            job.filename = str(recovered)
+        log(f'Job {job.id}: recorded path was stale, repointed to {recovered}')
+        job.filename = str(recovered)
         repaired += 1
 
-    # A dry run reaches here with the same count and simply never commits.
     if repaired:
-        if not dry_run:
-            db.commit()
+        db.commit()
         log(f'Repointed {repaired} stale file path(s)')
     return repaired
 
@@ -1465,7 +1441,7 @@ def repair_stale_filenames(db, dry_run: bool = False) -> int:
 # Send already-filed episodes back through the organizer when their show now belongs elsewhere.
 # (Un)subscribing to a channel moves its playlists' folder, but the main loop only sees organized_at
 # IS NULL, so episodes filed earlier would stay behind and split one show in two.
-def relocate_misfiled_shows(db, dry_run: bool = False) -> int:
+def relocate_misfiled_shows(db) -> int:
     jobs = (
         db.query(Download)
         .filter(
@@ -1495,18 +1471,14 @@ def relocate_misfiled_shows(db, dry_run: bool = False) -> int:
         if current.parent.parent == expected:
             continue
 
-        if dry_run:
-            log(f'[dry-run] Would refile job {job.id} from {current.parent.parent} to {expected}')
-        else:
-            # Only the flag is cleared here. The scan's own loop re-plans the job, and execute_plan
-            # moves the file, rewrites the NFO and removes the folder it came from once it empties.
-            log(f'Job {job.id}: show moved from {current.parent.parent} to {expected}, refiling')
-            job.organized_at = None
+        # Only the flag is cleared here. The scan's own loop re-plans the job, and execute_plan
+        # moves the file, rewrites the NFO and removes the folder it came from once it empties.
+        log(f'Job {job.id}: show moved from {current.parent.parent} to {expected}, refiling')
+        job.organized_at = None
         relocated += 1
 
     if relocated:
-        if not dry_run:
-            db.commit()
+        db.commit()
         log(f'Queued {relocated} episode(s) to be refiled under a different show folder')
     return relocated
 
@@ -1514,7 +1486,7 @@ def relocate_misfiled_shows(db, dry_run: bool = False) -> int:
 # Re-fetch the thumbnail for any already-organized video whose sidecar has gone missing, leaving
 # Jellyfin showing a placeholder. organized_at stays set: only the artwork is missing, and
 # clearing it would send the whole job back through the organizer.
-def repair_missing_thumbnails(db, dry_run: bool = False) -> int:
+def repair_missing_thumbnails(db) -> int:
     jobs = (
         db.query(Download)
         .filter(
@@ -1544,12 +1516,6 @@ def repair_missing_thumbnails(db, dry_run: bool = False) -> int:
         if not url:
             continue
 
-        # A dry run counts the fetch it skips, so its summary reports what a real pass would repair.
-        if dry_run:
-            log(f'[dry-run] Would re-download missing thumbnail for job {job.id}')
-            repaired += 1
-            continue
-
         if download_image(url, dest_thumb, f'thumbnail for job {job.id}'):
             repaired += 1
 
@@ -1560,19 +1526,18 @@ def repair_missing_thumbnails(db, dry_run: bool = False) -> int:
 
 # File every completed video job not yet organized; the worker calls it periodically and after each
 # parent job. Returns 0, touching nothing, while library_ready() refuses; the jobs wait for the next
-# pass. `tick`, if given, is asked before each video: False ends the filing there and the pass ends
-# as usual, so the worker can stop between videos and Jellyfin still hears about those filed.
-def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] = None) -> int:
+# pass. `tick` is asked before each video: False ends the filing there and the pass ends as usual,
+# so the worker can stop between videos and Jellyfin still hears about those filed.
+def scan_and_process(tick: Callable[[], bool]) -> int:
     if not library_ready():
         return 0
-    SHOWS_DIR.mkdir(parents=True, exist_ok=True)
-    MOVIES_DIR.mkdir(parents=True, exist_ok=True)
+    MEDIA_PATH.mkdir(parents=True, exist_ok=True)
     organized = 0
 
     with Session() as db:
         # Before the query below, not after: this clears organized_at on episodes whose show has
         # moved, and they have to be in the pending set this run rather than waiting for the next.
-        relocated = relocate_misfiled_shows(db, dry_run)
+        relocated = relocate_misfiled_shows(db)
 
         # organized_at IS NULL is the whole definition of pending, which is what makes a re-run
         # cheap: an already-filed video is never looked at again by this loop.
@@ -1588,19 +1553,17 @@ def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] =
 
         # Repair already-filed videos, which the loop below never revisits. Stale paths go first,
         # so the thumbnail pass looks beside the file's real location.
-        repaired = repair_stale_filenames(db, dry_run)
-        repaired += repair_missing_thumbnails(db, dry_run)
-        # A dry run reports the relocations it would make, but leaves organized_at set, so they
-        # never reach the loop below and have to be counted here to be visible at all.
+        repaired = repair_stale_filenames(db)
+        repaired += repair_missing_thumbnails(db)
         repaired += relocated
 
         if jobs:
             log(f'Found {len(jobs)} completed video(s) pending organization')
         for job in jobs:
-            if tick is not None and not tick():
+            if not tick():
                 log('Organizer stopped before filing every pending video; the next pass goes on')
                 break
-            if not is_organizable(db, job, dry_run):
+            if not is_organizable(db, job):
                 continue
 
             # Hold child videos back until the parent is settled, so a playlist is filed as a unit
@@ -1615,7 +1578,7 @@ def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] =
             # One unfilable job must not strand the jobs behind it; the next scan retries it.
             # Logged with its traceback, which applog indents into the same log entry.
             try:
-                if organize_job(db, job, dry_run):
+                if organize_job(db, job):
                     organized += 1
             except Exception as exc:
                 logging.exception('[organizer] Job %s: unexpected failure while organizing (%s)', job.id, exc)
@@ -1625,19 +1588,6 @@ def scan_and_process(dry_run: bool = False, tick: Optional[Callable[[], bool]] =
     # open across it would keep the worker waiting on the single writer.
     if organized:
         log(f'Organized {organized} video(s)')
-    if (organized or repaired) and not dry_run:
+    if organized or repaired:
         notify_jellyfin(tick=tick)
     return organized
-
-
-# Allow running the organizer standalone for testing, e.g. with
-# `python -m youtube_manager.organizer --dry-run`.
-if __name__ == '__main__':
-    import sys
-
-    from youtube_manager import applog
-
-    applog.configure()
-
-    count = scan_and_process(dry_run='--dry-run' in sys.argv)
-    log(f'Done. {count} video(s) organized.')

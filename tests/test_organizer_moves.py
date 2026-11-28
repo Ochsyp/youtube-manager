@@ -89,7 +89,7 @@ def filed_twice(library, make_job, source_bytes: bytes, dest_bytes: bytes):
 def execute(db, job: Download, plan: organizer.OrganizePlan, source: Path) -> bool:
     with db() as session:
         row = session.get(Download, job.id)
-        return organizer.execute_plan(session, row, plan, source, {}, dry_run=False)
+        return organizer.execute_plan(session, row, plan, source, {})
 
 
 # The job's row as stored now.
@@ -373,8 +373,8 @@ def test_missing_library_sentinel_blocks_organize_before_mkdir(caplog, monkeypat
     library.media.rmdir()
     monkeypatch.setenv('LIBRARY_SENTINEL', str(tmp_path / '.library-mounted'))
 
-    assert organizer.scan_and_process() == 0
-    assert organizer.organize_single_job(job.id) is False
+    assert organizer.scan_and_process(tick=lambda: True) == 0
+    assert organizer.organize_single_job(job.id, tick=lambda: True) is False
 
     assert not library.media.exists()
     assert source.exists()
@@ -392,12 +392,12 @@ def test_sentinel_error_rate_limited(caplog, monkeypatch, tmp_path, library):
     monkeypatch.setenv('LIBRARY_SENTINEL', str(sentinel))
 
     for _ in range(3):
-        assert organizer.scan_and_process() == 0
+        assert organizer.scan_and_process(tick=lambda: True) == 0
     assert len(messages_at(caplog, logging.ERROR)) == 1
 
     an_hour_ago = time.monotonic() - organizer.LIBRARY_ERROR_INTERVAL_SECONDS
     monkeypatch.setattr(organizer, '_library_error_logged_at', an_hour_ago)
-    assert organizer.scan_and_process() == 0
+    assert organizer.scan_and_process(tick=lambda: True) == 0
     assert len(messages_at(caplog, logging.ERROR)) == 2
 
     sentinel.touch()
@@ -423,7 +423,7 @@ def test_present_sentinel_allows_organize(monkeypatch, db, make_job, library, se
     make_job(status='completed', title='Title', youtube_id=VIDEO_ID, filename=str(source))
     plan = movie_plan(library.media)
 
-    assert organizer.scan_and_process() == 1
+    assert organizer.scan_and_process(tick=lambda: True) == 1
 
     assert plan.dest_video.read_bytes() == b'video'
     assert plan.dest_nfo.exists()
