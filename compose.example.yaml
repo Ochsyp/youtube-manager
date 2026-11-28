@@ -4,6 +4,14 @@
 # YTM_ALLOWED_HOSTS, then run `docker compose -f compose.example.yaml up -d`.
 name: youtube-manager
 
+# Docker's json-file log grows without limit by default, and the worker logs a progress line about
+# once a second while it downloads. Each service keeps at most three files of 10 MB.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # Keep this service name: the app answers to it, for probes on this network.
   youtube-manager:
@@ -12,6 +20,7 @@ services:
     # needs init: true.
     image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as X.Y.Z}
     restart: unless-stopped
+    logging: *logging
     environment:
       PUID: "1000"
       PGID: "1000"
@@ -37,6 +46,7 @@ services:
     image: ghcr.io/ochsyp/youtube-manager:${YTM_VERSION:?set YTM_VERSION to a release, such as X.Y.Z}
     command: ["worker"]
     restart: unless-stopped
+    logging: *logging
     # Docker's default of 10 s can kill a step mid-write after SIGTERM.
     stop_grace_period: 60s
     environment:
@@ -74,3 +84,4 @@ services:
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:2.0.2
     restart: unless-stopped
+    logging: *logging

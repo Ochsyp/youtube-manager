@@ -1,0 +1,8 @@
+# Test-only dependencies, kept out of the image. httpx is what FastAPI's
+# TestClient sends its requests through. requirements-dev.txt pins these and
+# everything they pull in, constrained by requirements.txt so a package both
+# sets need is pinned the same in both; regenerate it with the uv command in
+# its header, from the repo root, after requirements.txt.
+-c requirements.txt
+pytest==9.2.0
+httpx==0.28.1

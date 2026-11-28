@@ -26,6 +26,12 @@ describes.
   example worker healthcheck must change along with `WORKER_HEARTBEAT_PATH`. Three code comments
   and one test line that were out of date are corrected or removed.
   ([#55](https://github.com/Ochsyp/youtube-manager/pull/55))
+- The image installs its Python packages with `--require-hashes`: `requirements.txt` lists the
+  hash of every file each pinned release publishes, and a wheel whose hash is not listed is
+  refused. The test dependencies are compiled the same way, in full, into `requirements-dev.txt`
+  from the new `requirements-dev.in`. Dependabot writes the new hashes into its own pull
+  requests. `compose.example.yaml` rotates each service's log at three files of 10 MB.
+  ([#57](https://github.com/Ochsyp/youtube-manager/pull/57))
 
 ### Removed
 

@@ -1,7 +1,8 @@
 # Direct runtime dependencies of the web UI and the worker, unpinned.
-# requirements.txt pins these and everything they pull in, and is what the
-# image installs; regenerate it with the uv command in its header, from the
-# repo root, whenever this list changes.
+# requirements.txt pins these and everything they pull in, with the hash of
+# every file each release publishes, and is what the image installs with
+# --require-hashes. Regenerate it with the uv command in its header, from the
+# repo root, whenever this list changes, then requirements-dev.txt with its own.
 fastapi
 uvicorn
 jinja2
