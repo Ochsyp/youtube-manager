@@ -613,6 +613,28 @@ def test_stop_cuts_a_hung_jellyfin_refresh_short(caplog, monkeypatch, jellyfin):
     assert any('Jellyfin' in message for message in messages_at(caplog, logging.WARNING))
 
 
+# The refresh never follows a redirect: requests would send the X-Emby-Token header on to the new
+# host. A redirect answer is logged as a WARN naming JELLYFIN_URL, not as a refresh done.
+def test_refresh_does_not_follow_a_redirect(caplog, monkeypatch, jellyfin):
+    caplog.set_level(logging.INFO)
+    sent = []
+
+    def redirected(*args, **kwargs):
+        sent.append(kwargs.get('allow_redirects', True))
+        response = jellyfin_response(302)
+        response.headers['Location'] = 'https://elsewhere.invalid/Library/Refresh'
+        return response
+
+    monkeypatch.setattr(organizer.requests, 'post', redirected)
+
+    organizer.notify_jellyfin(tick=lambda: False)
+
+    assert sent == [False]
+    warnings = messages_at(caplog, logging.WARNING)
+    assert len(warnings) == 1 and 'JELLYFIN_URL' in warnings[0]
+    assert not any('Requested Jellyfin' in message for message in messages_at(caplog, logging.INFO))
+
+
 # A Jellyfin that answers still gets its refresh when a stop is already pending.
 def test_refresh_is_still_sent_after_a_stop(caplog, monkeypatch, jellyfin):
     caplog.set_level(logging.INFO)

@@ -315,3 +315,37 @@ def test_redownload_resets_attempts(client, db, make_job, library):
 
     for job in (gone, *children):
         assert count_restarted(db, job.id), job.youtube_id
+
+
+# The library walk for a due video holds no write lock: a video that once succeeded on a retry
+# gets its count back first and that is committed, and a playlist's second video is searched
+# with its first video's reset still unwritten, so the web can write during every walk.
+def test_library_walk_holds_no_write_lock(monkeypatch, db, make_job, library):
+    import sqlite3
+
+    from youtube_manager import jobstate
+
+    make_job(youtube_id=V2, status='completed', auto_retry_attempts=1)
+    job = failed_video(make_job)
+    failed_playlist(make_job, 'PL1', {V3: 0, V4: 0})
+    path = database.database_file()
+    writes: list[bool] = []
+
+    # Stands in for the walk: another connection tries to take the write lock without waiting.
+    def walk(target, search_paths):
+        other = sqlite3.connect(path, timeout=0, isolation_level=None)
+        try:
+            other.execute('BEGIN IMMEDIATE')
+            other.execute('ROLLBACK')
+            writes.append(True)
+        except sqlite3.OperationalError:
+            writes.append(False)
+        finally:
+            other.close()
+        return None
+
+    monkeypatch.setattr(jobstate, 'find_existing_media', walk)
+    retry_pass(monkeypatch, minutes(5))
+
+    assert writes == [True, True, True]
+    assert row(db, job.id).status == 'queued'

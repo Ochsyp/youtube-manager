@@ -1962,6 +1962,9 @@ def retry_failed_jobs() -> None:
         ):
             stopped.auto_retry_attempts = 0
             stopped.next_auto_retry_at = None
+        # Committed now, so no write is pending while the library is searched below: a flush
+        # would take SQLite's one write lock and hold it for the whole walk.
+        db.commit()
 
         # A parent qualifies on its own 'failed' status or any child's, which may be ahead of it
         # (see resolve_parent_status). A cancelled parent never does: the user stopped it.
@@ -2021,13 +2024,16 @@ def retry_failed_jobs() -> None:
             return True
 
         retried = 0
-        for job in candidates:
-            if apply_status_update_to_hierarchy(job, retry_one):
-                # A parent shows queued while its videos rerun. A deleted parent stays deleted
-                # around a video fetched again under it, as jobstate.settle_parent keeps it.
-                if job.children and job.status != 'deleted':
-                    job.status = 'queued'
-                retried += 1
+        # No autoflush: loading a parent's videos would otherwise write the resets so far and
+        # hold the write lock through the next video's library search. One commit writes them.
+        with db.no_autoflush:
+            for job in candidates:
+                if apply_status_update_to_hierarchy(job, retry_one):
+                    # A parent shows queued while its videos rerun. A deleted parent stays deleted
+                    # around a video fetched again under it, as jobstate.settle_parent keeps it.
+                    if job.children and job.status != 'deleted':
+                        job.status = 'queued'
+                    retried += 1
 
         if retried or deferred:
             log(f'Auto-retried {retried} failed job(s), {deferred} video(s) still waiting')

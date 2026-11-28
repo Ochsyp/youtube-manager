@@ -1331,6 +1331,13 @@ def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
             response = post_jellyfin_refresh_until_stop(JELLYFIN_URL, JELLYFIN_TOKEN, tick)
         if response is None:
             return
+        # Redirects are not followed (see post_jellyfin_refresh), so one means the URL is wrong.
+        if response.is_redirect:
+            warn(
+                f'Jellyfin answered the library refresh with a redirect (HTTP '
+                f'{response.status_code}); set JELLYFIN_URL to the address it redirects to'
+            )
+            return
         # A rejected token answers 401 rather than failing the request, and would otherwise be
         # logged as a successful refresh.
         response.raise_for_status()
@@ -1343,11 +1350,13 @@ def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
             warn(f'Failed to notify Jellyfin of library changes: {exc}')
 
 
-# Send one library refresh and return Jellyfin's answer.
+# Send one library refresh and return Jellyfin's answer. A redirect is not followed: requests
+# would send the X-Emby-Token header on to whatever host the redirect names.
 def post_jellyfin_refresh(url: str, token: str) -> requests.Response:
     return requests.post(
         f"{url.rstrip('/')}/Library/Refresh",
         headers={'X-Emby-Token': token},
+        allow_redirects=False,
         # Jellyfin often serves a self-signed certificate on an internal network; README,
         # Security notes, explains the trade-off.
         verify=False,
