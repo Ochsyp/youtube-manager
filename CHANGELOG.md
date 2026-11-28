@@ -15,6 +15,12 @@ describes.
   request's title or body is edited, and the seal texts say that only the maintainer's own hosts
   require a seal. The Release contract says how the host's seal check is met here.
   ([#52](https://github.com/Ochsyp/youtube-manager/pull/52))
+- Tests now cover what the README promises for playlists and channels: filing an episode into
+  its show's Season 01 folder with its NFO, thumbnail, `tvshow.nfo` and posters, the wait for an
+  episode number, the move of a show into a newly subscribed channel's folder and the re-fetch of
+  a lost thumbnail. They also cover each rejection of the add forms, the subscription toggles and
+  the polling endpoints. No change to the app.
+  ([#54](https://github.com/Ochsyp/youtube-manager/pull/54))
 
 ### Fixed
 
