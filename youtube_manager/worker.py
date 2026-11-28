@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import parse_qs, urlsplit
 
-from sqlalchemy import or_
+from sqlalchemy import inspect as inspect_row, or_, select
 
 from youtube_manager import VERSION, applog
 from youtube_manager.database import (
@@ -51,6 +51,7 @@ from youtube_manager.jobstate import (
     TERMINAL_STATUS_SET,
     WORKER_PICKUP_STATUSES,
     apply_status_update_to_hierarchy,
+    child_jobs,
     compute_parent_progress,
     compute_parent_speed,
     is_in_progress,
@@ -2023,9 +2024,9 @@ def retry_failed_jobs() -> None:
             target.next_auto_retry_at = now + auto_retry_delay(attempts)
             return True
 
-        retried = 0
         # No autoflush: loading a parent's videos would otherwise write the resets so far and
         # hold the write lock through the next video's library search. One commit writes them.
+        reset: list[list[Download]] = []
         with db.no_autoflush:
             for job in candidates:
                 if apply_status_update_to_hierarchy(job, retry_one):
@@ -2033,7 +2034,17 @@ def retry_failed_jobs() -> None:
                     # around a video fetched again under it, as jobstate.settle_parent keeps it.
                     if job.children and job.status != 'deleted':
                         job.status = 'queued'
-                    retried += 1
+                    reset.append([job, *child_jobs(job)])
+            # The walks held no lock, so the web may have deleted or cancelled a row meanwhile.
+            # That change wins: the whole job keeps what is stored, and is not written back.
+            changed = changed_since_read(db, [row for rows in reset for row in rows])
+            for rows in [rows for rows in reset if any(row.id in changed for row in rows)]:
+                reset.remove(rows)
+                for row in rows:
+                    db.expire(row)
+                    if row in given_up:
+                        given_up.remove(row)
+        retried = len(reset)
 
         if retried or deferred:
             log(f'Auto-retried {retried} failed job(s), {deferred} video(s) still waiting')
@@ -2048,6 +2059,27 @@ def retry_failed_jobs() -> None:
         )
         for job in given_up:
             remove_cancelled_leftovers(job)
+
+
+# The ids among `rows` whose stored status or cancel flag is no longer what this session read,
+# before its own changes: another process wrote them since.
+def changed_since_read(db, rows: list[Download]) -> set[int]:
+    if not rows:
+        return set()
+
+    def as_read(row: Download, key: str):
+        history = inspect_row(row).attrs[key].history
+        return (history.deleted or history.unchanged or history.added)[0]
+
+    read = {row.id: (as_read(row, 'status'), as_read(row, 'cancel_requested')) for row in rows}
+    stored = {
+        found.id: (found.status, found.cancel_requested)
+        for found in db.execute(
+            select(Download.id, Download.status, Download.cancel_requested)
+            .where(Download.id.in_(read))
+        )
+    }
+    return {row_id for row_id, values in read.items() if stored.get(row_id) != values}
 
 
 # Consecutive failed checks per subscription id, cleared by a successful scan. In memory, so a

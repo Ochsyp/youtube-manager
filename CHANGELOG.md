@@ -20,7 +20,8 @@ describes.
 
 - The worker's automatic retry no longer holds the database's write lock while it searches the
   library for a failed video's file, so the web page can save changes during a retry pass on a
-  large library instead of failing after 15 seconds.
+  large library instead of failing after 15 seconds. A delete or cancel made during that search
+  is kept, not overwritten by the retry.
   ([#53](https://github.com/Ochsyp/youtube-manager/pull/53))
 - The Jellyfin library refresh no longer follows a redirect, which would have sent the Jellyfin
   token to the host the redirect names. A redirect is logged as a warning to fix `JELLYFIN_URL`.

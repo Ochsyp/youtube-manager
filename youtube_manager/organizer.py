@@ -1332,7 +1332,7 @@ def notify_jellyfin(tick: Optional[Callable[[], bool]] = None) -> None:
         if response is None:
             return
         # Redirects are not followed (see post_jellyfin_refresh), so one means the URL is wrong.
-        if response.is_redirect:
+        if 300 <= response.status_code < 400:
             warn(
                 f'Jellyfin answered the library refresh with a redirect (HTTP '
                 f'{response.status_code}); set JELLYFIN_URL to the address it redirects to'

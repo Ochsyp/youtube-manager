@@ -349,3 +349,38 @@ def test_library_walk_holds_no_write_lock(monkeypatch, db, make_job, library):
 
     assert writes == [True, True, True]
     assert row(db, job.id).status == 'queued'
+
+
+# A delete or a cancel that the web commits while the pass searches the library wins: the pass
+# drops its reset of that video instead of writing it back to queued over the user's change.
+def test_change_during_the_walk_wins(monkeypatch, db, make_job, library):
+    import sqlite3
+
+    from youtube_manager import jobstate
+
+    deleted = failed_video(make_job, V1)
+    cancelled = failed_video(make_job, V2)
+    kept = failed_video(make_job, V3)
+    path = database.database_file()
+    changes = {
+        deleted.id: "status = 'deleted'",
+        cancelled.id: 'cancel_requested = 1',
+    }
+
+    # Stands in for the walk of each video: the web changes the deleted and the cancelled one.
+    def walk(target, search_paths):
+        if target.id in changes:
+            other = sqlite3.connect(path, timeout=5, isolation_level=None)
+            try:
+                other.execute(f'UPDATE downloads SET {changes[target.id]} WHERE id = ?', (target.id,))
+            finally:
+                other.close()
+        return None
+
+    monkeypatch.setattr(jobstate, 'find_existing_media', walk)
+    retry_pass(monkeypatch, T0)
+
+    assert row(db, deleted.id).status == 'deleted'
+    stored = row(db, cancelled.id)
+    assert (stored.status, stored.cancel_requested, stored.auto_retry_attempts) == ('failed', True, 0)
+    assert (row(db, kept.id).status, row(db, kept.id).auto_retry_attempts) == ('queued', 1)

@@ -614,15 +614,18 @@ def test_stop_cuts_a_hung_jellyfin_refresh_short(caplog, monkeypatch, jellyfin):
 
 
 # The refresh never follows a redirect: requests would send the X-Emby-Token header on to the new
-# host. A redirect answer is logged as a WARN naming JELLYFIN_URL, not as a refresh done.
-def test_refresh_does_not_follow_a_redirect(caplog, monkeypatch, jellyfin):
+# host. Any 3xx answer, with a Location or without, is logged as a WARN naming JELLYFIN_URL, not
+# as a refresh done.
+@pytest.mark.parametrize('location', ['https://elsewhere.invalid/Library/Refresh', None])
+def test_refresh_does_not_follow_a_redirect(caplog, monkeypatch, jellyfin, location):
     caplog.set_level(logging.INFO)
     sent = []
 
     def redirected(*args, **kwargs):
         sent.append(kwargs.get('allow_redirects', True))
         response = jellyfin_response(302)
-        response.headers['Location'] = 'https://elsewhere.invalid/Library/Refresh'
+        if location:
+            response.headers['Location'] = location
         return response
 
     monkeypatch.setattr(organizer.requests, 'post', redirected)
