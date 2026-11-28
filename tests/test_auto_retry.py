@@ -420,3 +420,39 @@ def test_no_write_between_the_check_and_the_commit(monkeypatch, db, make_job, li
 
     assert writes == [False]
     assert row(db, job.id).status == 'queued'
+
+
+# A video given up on in this pass is checked too: when the web retries it while the pass
+# searches the library for another video, it stays queued, gets no "gave up" error, and its
+# staging files are not cleaned up.
+def test_give_up_yields_to_a_web_retry_during_the_walk(monkeypatch, db, make_job, library):
+    import sqlite3
+
+    from youtube_manager import jobstate
+
+    searched = failed_video(make_job, V1)
+    spent = failed_video(make_job, V2, auto_retry_attempts=MAX_AUTO_RETRIES,
+                         next_auto_retry_at=minutes(-1))
+    path = database.database_file()
+    cleaned = []
+
+    # Stands in for the walk of the first video: the web retries the spent one meanwhile.
+    def walk(target, search_paths):
+        other = sqlite3.connect(path, timeout=5, isolation_level=None)
+        try:
+            other.execute(
+                "UPDATE downloads SET status = 'queued', auto_retry_attempts = 0, "
+                'next_auto_retry_at = NULL WHERE id = ?', (spent.id,),
+            )
+        finally:
+            other.close()
+        return None
+
+    monkeypatch.setattr(jobstate, 'find_existing_media', walk)
+    monkeypatch.setattr(worker, 'remove_cancelled_leftovers', cleaned.append)
+    retry_pass(monkeypatch, T0)
+
+    stored = row(db, spent.id)
+    assert (stored.status, stored.error) == ('queued', ERROR)
+    assert cleaned == []
+    assert row(db, searched.id).status == 'queued'

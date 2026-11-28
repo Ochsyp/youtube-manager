@@ -2026,7 +2026,7 @@ def retry_failed_jobs() -> None:
 
         # No autoflush: loading a parent's videos would otherwise write the resets so far and
         # hold the write lock through the next video's library search. One commit writes them.
-        reset: list[list[Download]] = []
+        reset: set[int] = set()
         with db.no_autoflush:
             for job in candidates:
                 if apply_status_update_to_hierarchy(job, retry_one):
@@ -2034,16 +2034,22 @@ def retry_failed_jobs() -> None:
                     # around a video fetched again under it, as jobstate.settle_parent keeps it.
                     if job.children and job.status != 'deleted':
                         job.status = 'queued'
-                    reset.append([job, *child_jobs(job)])
-            # The walks held no lock, so the web may have deleted or cancelled a row meanwhile.
-            # That change wins: the whole job keeps what is stored, and is not written back.
-            changed = changed_since_read(db, [row for rows in reset for row in rows])
-            for rows in [rows for rows in reset if any(row.id in changed for row in rows)]:
-                reset.remove(rows)
-                for row in rows:
-                    db.expire(row)
-                    if row in given_up:
-                        given_up.remove(row)
+                    reset.add(job.id)
+            # The walks held no lock, so the web may have deleted, cancelled or retried a row
+            # meanwhile. That change wins: a job with any row this pass changed, reset or given
+            # up, keeps what is stored if one of its rows changed since it was read.
+            touched = [
+                rows for rows in ([job, *child_jobs(job)] for job in candidates)
+                if any(db.is_modified(row) for row in rows)
+            ]
+            changed = changed_since_read(db, [row for rows in touched for row in rows])
+            for rows in touched:
+                if any(row.id in changed for row in rows):
+                    reset.discard(rows[0].id)
+                    for row in rows:
+                        db.expire(row)
+                        if row in given_up:
+                            given_up.remove(row)
         retried = len(reset)
 
         if retried or deferred:
@@ -2071,16 +2077,21 @@ def changed_since_read(db, rows: list[Download]) -> set[int]:
         return set()
     db.execute(text('UPDATE downloads SET id = id WHERE 0'))
 
+    # Every row was loaded whole and nothing expired it since, so history holds the value read:
+    # under deleted when this session changed it, under unchanged when not.
     def as_read(row: Download, key: str):
         history = inspect_row(row).attrs[key].history
         return (history.deleted or history.unchanged or history.added)[0]
 
     read = {row.id: (as_read(row, 'status'), as_read(row, 'cancel_requested')) for row in rows}
+    # In chunks, since SQLite limits the variables of one statement and a channel can be large.
+    ids = list(read)
     stored = {
         found.id: (found.status, found.cancel_requested)
+        for start in range(0, len(ids), 500)
         for found in db.execute(
             select(Download.id, Download.status, Download.cancel_requested)
-            .where(Download.id.in_(read))
+            .where(Download.id.in_(ids[start:start + 500]))
         )
     }
     return {row_id for row_id, values in read.items() if stored.get(row_id) != values}
