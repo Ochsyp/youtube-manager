@@ -186,8 +186,9 @@ class ShutdownRequested(BaseException):
     pass
 
 # Liveness file for the container healthcheck; /tmp is a tmpfs in compose.example.yaml, so a
-# restart correctly clears it. The healthcheck's staleness window must exceed the longest gap
-# between touches: one COMMAND_TIMEOUT_SECONDS-bounded yt-dlp call.
+# restart correctly clears it. A running command touches it every second (checkpoint), and the
+# organizer between videos (organizer_tick). The healthcheck's staleness window must exceed the
+# longest gap between touches, which is filing one video: a copy across disks can take minutes.
 HEARTBEAT_PATH = Path(os.getenv('WORKER_HEARTBEAT_PATH', '/tmp/worker-heartbeat'))
 
 

@@ -1,7 +1,7 @@
 # -------------------------------------------------------
 # Organizer
 #
-# Files completed downloads from the flat DOWNLOAD_PATH into a Jellyfin library layout.
+# Files completed downloads from staging (DOWNLOAD_PATH) into a Jellyfin library layout.
 # Playlist-linked and channel-grouped videos become episodes of a per-playlist/per-channel show,
 # everything else a movie. Names follow Sonarr/Radarr conventions plus a [{video_id}] collision
 # guard. Safe to re-run: organized_at, or an existing destination file, means already organized,

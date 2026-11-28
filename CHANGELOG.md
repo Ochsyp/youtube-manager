@@ -21,6 +21,11 @@ describes.
   a lost thumbnail. They also cover each rejection of the add forms, the subscription toggles and
   the polling endpoints. No change to the app.
   ([#54](https://github.com/Ochsyp/youtube-manager/pull/54))
+- The docs say exactly what the code does: `SHA256SUMS` holds the checksum of `image.json`, which
+  names the image; only a start that migrates needs room for the pre-migration copy; and the
+  example worker healthcheck must change along with `WORKER_HEARTBEAT_PATH`. Four code comments
+  and one test line that were out of date are corrected or removed.
+  ([#55](https://github.com/Ochsyp/youtube-manager/pull/55))
 
 ### Fixed
 

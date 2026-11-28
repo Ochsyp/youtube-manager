@@ -171,8 +171,8 @@ script or automation publishes a release, or edits or deletes a published one.
 - **What a release is.** One container image for linux/amd64 and linux/arm64, at
   `ghcr.io/ochsyp/youtube-manager`. The "Container image" section of the release notes names it
   by version and digest, `ghcr.io/ochsyp/youtube-manager:X.Y.Z@sha256:...`, and a host pins that
-  whole reference. The image is attested by that digest, and the release's assets `image.json`
-  and `SHA256SUMS` name it.
+  whole reference. The image is attested by that digest. The release's asset `image.json` names
+  it, and `SHA256SUMS` holds the checksum of `image.json`.
 - **The host.** The maintainer's host deployment runs youtube-manager. Once it switches to this
   image, it runs the image pinned by version and digest in its own Compose file and never pulls
   `latest`; until then, it builds youtube-manager from a clone. The host does not check this

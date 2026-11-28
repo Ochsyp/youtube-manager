@@ -96,7 +96,7 @@ docker compose -f compose.example.yaml up -d
 | `YOUTUBE_DB_URI` | `sqlite:////app/data/youtube.db` | SQLite database URL for Python's sqlite3 driver; by default `data/youtube.db` at the repository root, which is `/app` in the image. The web UI and the worker refuse a URL for any other database or driver at start |
 | `POT_PROVIDER_URL` | unset | bgutil provider base URL passed to yt-dlp; when empty, no PO-token arguments are passed |
 | `JELLYFIN_URL`, `JELLYFIN_TOKEN` | unset | Jellyfin base URL and API key (secret); the library refresh runs only when both are set |
-| `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck |
+| `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | Liveness file for the worker healthcheck. The healthcheck in `compose.example.yaml` reads `/tmp/worker-heartbeat`, so change it there too |
 | `YTM_DB_SNAPSHOT_TIME` | `00:30` | Worker only: the time of day, as HH:MM in UTC whatever `TZ` says, from which the worker writes the day's database snapshot (Backups and restore). Any other value is logged at ERROR and the default is used |
 | `YTM_ALLOWED_HOSTS` | unset | Web service: comma-separated host names or IPs the web UI answers to in addition to `youtube-manager`, `localhost` and `127.0.0.1`. Set it to the name the reverse proxy serves the UI under, such as `ytdl.example.test`; any other `Host` gets 400 |
 | `PUID`, `PGID` | `1000` | User and group the containers run as |
@@ -158,9 +158,10 @@ restore from these copies.
   the newest 3 for each pair of versions are kept; copies from earlier upgrades stay
   until you delete them. It then migrates the database one step at a time, each step in
   one transaction, so a step that fails changes nothing. The log names the copy and
-  each table's row count before and after. Every start needs free space for that copy:
-  if it cannot be written, the web UI does not start and logs an ERROR, and the worker
-  exits with status 1 after waiting 300 seconds, so a restart policy brings it back.
+  each table's row count before and after. Every start that migrates needs free space
+  for that copy: if it cannot be written, the web UI does not start and logs an ERROR,
+  and the worker exits with status 1 after waiting 300 seconds, so a restart policy
+  brings it back.
 - **Older releases.** Releases from 1.1.0 on run on a newer schema that only adds to
   their own, and log a warning. On a schema from a later major release, both services
   log an ERROR and exit, and keep restarting that way: run that release, or restore a
