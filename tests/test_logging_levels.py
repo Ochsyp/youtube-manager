@@ -293,7 +293,7 @@ def test_organizer_move_failure_logs_error(caplog, monkeypatch, library):
 
     monkeypatch.setattr(organizer, 'safe_move', full_disk)
 
-    assert organizer.execute_plan(None, job, plan, source, {}, dry_run=False) is False
+    assert organizer.execute_plan(None, job, plan, source, {}) is False
 
     errors = messages_at(caplog, logging.ERROR)
     assert len(errors) == 1
@@ -310,13 +310,13 @@ def test_organizer_catch_all_logs_traceback(caplog, monkeypatch, make_job, libra
     video.write_bytes(b'video')
     job = make_job(status='completed', youtube_id='dQw4w9WgXcQ', filename=str(video))
 
-    def explode(db, job, dry_run, force_nfo=False):
+    def explode(db, job, force_nfo=False):
         raise RuntimeError('planner exploded')
 
     monkeypatch.setattr(organizer, 'organize_job', explode)
     monkeypatch.setattr(organizer, 'JELLYFIN_URL', None)
 
-    assert organizer.scan_and_process() == 0
+    assert organizer.scan_and_process(tick=lambda: True) == 0
 
     [record] = [record for record in caplog.records if record.levelno == logging.ERROR]
     assert f'[organizer] Job {job.id}: unexpected failure' in record.getMessage()
@@ -335,7 +335,7 @@ def test_jellyfin_401_logs_error(caplog, monkeypatch, status):
     monkeypatch.setattr(organizer, 'JELLYFIN_TOKEN', 'not-a-real-token')
     monkeypatch.setattr(organizer.requests, 'post', lambda *args, **kwargs: jellyfin_response(status))
 
-    organizer.notify_jellyfin()
+    organizer.notify_jellyfin(tick=lambda: True)
 
     errors = messages_at(caplog, logging.ERROR)
     assert len(errors) == 1
@@ -361,7 +361,7 @@ def test_jellyfin_other_failures_log_warning(caplog, monkeypatch, failure):
 
     monkeypatch.setattr(organizer.requests, 'post', post)
 
-    organizer.notify_jellyfin()
+    organizer.notify_jellyfin(tick=lambda: True)
 
     assert messages_at(caplog, logging.ERROR) == []
     assert any('Failed to notify Jellyfin' in m for m in messages_at(caplog, logging.WARNING))

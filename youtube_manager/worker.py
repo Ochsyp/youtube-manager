@@ -2819,7 +2819,7 @@ def finalize_after_download(job: Download) -> None:
 
     try:
         append_log(job.id, 'Organizer: running scan after completion')
-        organizer_scan_and_process(dry_run=False, tick=organizer_tick)
+        organizer_scan_and_process(tick=organizer_tick)
     except Exception as exc:
         log_error('Organizer run failed', exc)
 
@@ -3176,7 +3176,7 @@ def main_loop() -> None:
             last_organize = now
             checkpoint()
             try:
-                organizer_scan_and_process(dry_run=False, tick=organizer_tick)
+                organizer_scan_and_process(tick=organizer_tick)
             except Exception as exc:
                 log_error('Periodic organizer run failed', exc)
 

@@ -27,6 +27,14 @@ describes.
   and one test line that were out of date are corrected or removed.
   ([#55](https://github.com/Ochsyp/youtube-manager/pull/55))
 
+### Removed
+
+- The organizer's standalone dry-run mode, `python -m youtube_manager.organizer --dry-run`. It
+  was untested and undocumented, and it still wrote folder names to the database. The `web` and
+  `worker` commands are unchanged. Inside the organizer, the three names for the library root are
+  now one.
+  ([#56](https://github.com/Ochsyp/youtube-manager/pull/56))
+
 ### Fixed
 
 - The worker's automatic retry no longer holds the database's write lock while it searches the
