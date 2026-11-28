@@ -12,8 +12,10 @@ describes.
 A patch release with the fixes from the second final check. yt-dlp stays at 2026.11.23 and the
 bgutil plugin at 2.0.2, and the database is unchanged, so going back to 1.2.4 needs no step.
 
-A host needs no change. One that copied `compose.example.yaml` can take its new `logging:` lines
-to cap each service's log at three files of 10 MB.
+A host whose `JELLYFIN_URL` is answered with a redirect, such as `http://` to `https://`, sets it
+to the address Jellyfin redirects to: the library refresh no longer follows a redirect, and logs a
+warning instead. Other hosts need no change. One that copied `compose.example.yaml` can take its
+new `logging:` lines to cap each service's log at three files of 10 MB.
 
 ### Changed
 
